@@ -1,0 +1,14 @@
+{
+    "name": "SkyStream Universe Repository",
+    "id": "sky.universe",
+    "description": "SkyStream Universe plugins repository",
+    "manifestVersion": 1,
+    "repos": [
+        "https://raw.githubusercontent.com/akashdh11/skystream-plugins/main/repo.json",
+        "https://raw.githubusercontent.com/NivinCNC/CNCVerse-Sky-Stream-Extension/main/repo.json",
+        "https://raw.githubusercontent.com/likhithkrishna1103-tech/Hindmovie/main/repo.json",
+        "https://raw.githubusercontent.com/RizkyM2999/FeliStream/refs/heads/main/repo.json",
+        "https://raw.githubusercontent.com/thegnsme/skystream-plugins/repo/repo.json",
+        "https://raw.githubusercontent.com/arranoust/MiraiExt-SkyStream/main/repo.json"
+    ]
+}
