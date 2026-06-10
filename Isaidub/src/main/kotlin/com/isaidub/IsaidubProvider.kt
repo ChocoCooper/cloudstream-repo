@@ -6,13 +6,14 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.getAndUnpack
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import org.jsoup.nodes.Document
 
 class IsaidubProvider : MainAPI() {
     override var mainUrl = "https://isaidub.guru"
     override var name = "Isaidub"
     override val hasMainPage = true
-    override var lang = "ta"
+    override var lang = "ta" // Tamil
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
 
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
@@ -22,6 +23,7 @@ class IsaidubProvider : MainAPI() {
         val cleanQuery = query.replace(Regex("\\b(19|20)\\d{2}\\b"), "").trim()
         val slug = cleanQuery.lowercase().replace(Regex("[^a-z0-9]+"), "-").removeSuffix("-")
 
+        // 1. Slug Guessing
         val suffixes = listOf("-tamil-dubbed-movie", "-tamil-dubbed-web-series")
         suffixes.forEach { suffix ->
             val guessUrl = "$mainUrl/movie/$slug$suffix/"
@@ -35,6 +37,7 @@ class IsaidubProvider : MainAPI() {
             }
         }
 
+        // 2. Fallback: Search AtoZ or Year categories if slug fails
         if (results.isEmpty()) {
             val firstChar = cleanQuery.firstOrNull()?.lowercaseChar()
             if (firstChar != null && firstChar in 'a'..'z') {
@@ -112,15 +115,17 @@ class IsaidubProvider : MainAPI() {
         
         val doc = org.jsoup.Jsoup.parse(html)
         doc.select("video source, video").firstOrNull()?.attr("src")?.let { src ->
+            val isM3u8 = src.contains(".m3u8")
             callback.invoke(
                 newExtractorLink(
                     source = this.name,
                     name = "Isaidub Direct",
                     url = src,
-                    referer = mainUrl,
-                    quality = if (src.contains(".m3u8")) Qualities.Unknown.value else Qualities.P720.value,
-                    isM3u8 = src.contains(".m3u8")
-                )
+                    type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                ) {
+                    this.referer = mainUrl
+                    this.quality = if (isM3u8) Qualities.Unknown.value else Qualities.P720.value
+                }
             )
             return
         }
@@ -143,15 +148,17 @@ class IsaidubProvider : MainAPI() {
                 
                 if (videoUrl.contains("google.com") || videoUrl.contains("youtube.com")) continue
                 
+                val isM3u8 = videoUrl.contains(".m3u8")
                 callback.invoke(
                     newExtractorLink(
                         source = this.name,
                         name = "Isaidub Embed",
                         url = videoUrl,
-                        referer = mainUrl,
-                        quality = if (videoUrl.contains(".m3u8")) Qualities.Unknown.value else Qualities.P720.value,
-                        isM3u8 = videoUrl.contains(".m3u8")
-                    )
+                        type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                    ) {
+                        this.referer = mainUrl
+                        this.quality = if (isM3u8) Qualities.Unknown.value else Qualities.P720.value
+                    }
                 )
                 break
             }
