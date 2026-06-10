@@ -7,68 +7,171 @@ import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.getAndUnpack
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import org.jsoup.nodes.Element
 import org.jsoup.nodes.TextNode
 
 class TamilMVProvider : MainAPI() {
     override var mainUrl = "https://www.1tamilmv.cards"
     override var name = "TamilMV"
-    override val hasMainPage = false // FIXED: Disabled to prevent NotImplementedError crashes on startup
+    override val hasMainPage = true // Set to true: dynamic feeds implemented securely
     override var lang = "ta"
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
 
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+
+    companion object {
+        private const val TMDB_API = "https://api.tmdb.org/3"
+        private val TMDB_KEYS = listOf(
+            "fb7bb23f03b6994dafc674c074d01761",
+            "e55425032d3d0f371fc776f302e7c09b",
+            "8301a21598f8b45668d5711a814f01f6",
+            "8cf43ad9c085135b9479ad5cf6bbcbda",
+            "da63548086e399ffc910fbc08526df05"
+        )
+    }
+
+    private fun cleanTitleForSearch(title: String): String {
+        return title.replace(Regex("(?i)\\b(tamil|dubbed|movie|series|web|hdrip|bdrip|webrip|hd|720p|1080p|mp4|mkv|esub|tcrip|dvdrip|mux|x264|hevc|h264|1cd|2cd|dvd)\\b"), "")
+            .replace(Regex("[^a-zA-Z0-9\\s]"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+    }
+
+    private suspend fun fetchTmdbPoster(title: String, year: Int?): String? {
+        val cleanTitle = cleanTitleForSearch(title)
+        for (key in TMDB_KEYS) {
+            try {
+                val baseUrl = "$TMDB_API/search/movie?api_key=$key&query=${java.net.URLEncoder.encode(cleanTitle, "UTF-8")}"
+                var results = emptyList<TmdbMovie>()
+
+                if (year != null) {
+                    val yearRes = app.get("$baseUrl&primary_release_year=$year").parsedSafe<TmdbSearchResponse>()
+                    if (yearRes?.results?.isNotEmpty() == true) {
+                        results = yearRes.results
+                    }
+                }
+                
+                if (results.isEmpty()) {
+                    val genericRes = app.get(baseUrl).parsedSafe<TmdbSearchResponse>()
+                    results = genericRes?.results ?: emptyList()
+                }
+
+                if (results.isNotEmpty()) {
+                    val posterPath = results.first().poster_path
+                    if (!posterPath.isNullOrBlank()) {
+                        return "https://image.tmdb.org/t/p/w500$posterPath"
+                    }
+                }
+                break 
+            } catch (e: Exception) {
+                continue
+            }
+        }
+        return null
+    }
 
     // Helper data class for Strmup AJAX response
     data class StrmupResponse(
         @JsonProperty("streaming_url") val streamingUrl: String?
     )
 
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        val doc = app.get(mainUrl, headers = mapOf("User-Agent" to userAgent)).document
+        val scraped = mutableListOf<SearchResponse>()
+
+        val elements = doc.select("a").filter { it.text().contains("[WATCH]") }.take(20)
+        coroutineScope {
+            elements.map { el ->
+                async {
+                    val watchUrl = el.attr("href")
+                    if (watchUrl.isNotBlank()) {
+                        val parsedTitle = el.text().substringBefore("[WATCH]").trim()
+                        val poster = fetchTmdbPoster(parsedTitle, null)
+                        scraped.add(newMovieSearchResponse(parsedTitle, watchUrl, TvType.Movie) {
+                            this.posterUrl = poster
+                        })
+                    }
+                }
+            }.awaitAll()
+        }
+        return newHomePageResponse(listOf(HomePageList("Latest Streams", scraped.distinctBy { it.url })))
+    }
+
     override suspend fun search(query: String): List<SearchResponse> {
         val results = mutableListOf<SearchResponse>()
-        val cleanQuery = query.lowercase().replace(Regex("[^a-z0-9]"), "")
         
-        // Fetch homepage to extract [WATCH] links
-        val doc = app.get(mainUrl, headers = mapOf("User-Agent" to userAgent)).document
-
-        doc.select("a").filter { it.text().contains("[WATCH]") }.forEach { el ->
-            val watchUrl = el.attr("href")
-            if (watchUrl.isBlank()) return@forEach
-
-            var titleText = ""
-            var curr: org.jsoup.nodes.Node? = el.previousSibling()
-            
-            // Fallback if previous sibling doesn't exist
-            if (curr == null && el.parent() != null) {
-                curr = el.parent()?.previousSibling()
-            }
-
-            // DOM-walking backwards to reconstruct the title
-            while (curr != null) {
-                val nodeName = curr.nodeName().lowercase()
-                if (nodeName == "br" || nodeName == "p" || nodeName == "hr" || nodeName == "div") break
-                
-                if (curr is TextNode) {
-                    if (curr.text().contains("[WATCH]")) break
-                    titleText = curr.text() + titleText
-                } else if (curr is Element) {
-                    if (curr.text().contains("[WATCH]")) break
-                    titleText = curr.text() + titleText
+        // 1. Native IPS Search Query (Queries the forum directory directly)
+        val searchUrl = "$mainUrl/index.php?/search/&q=${java.net.URLEncoder.encode(query, "UTF-8")}&type=forums_topic&search_in=titles&sortby=relevancy"
+        val response = app.get(searchUrl, headers = mapOf("User-Agent" to userAgent))
+        
+        if (response.isSuccessful) {
+            val doc = response.document
+            // Scrape topics from standard IPS stream components
+            val streamItems = doc.select(".ipsStreamItem_title a, a[data-searchable]")
+            if (streamItems.isNotEmpty()) {
+                coroutineScope {
+                    streamItems.map { el ->
+                        async {
+                            val url = el.attr("href")
+                            val text = el.text().trim()
+                            if (url.isNotBlank() && text.isNotBlank() && !url.contains("/profile/")) {
+                                val cleanTitle = text.substringBefore("[").trim()
+                                val poster = fetchTmdbPoster(cleanTitle, null)
+                                results.add(newMovieSearchResponse(cleanTitle, url, TvType.Movie) {
+                                    this.posterUrl = poster
+                                })
+                            }
+                        }
+                    }.awaitAll()
                 }
-                curr = curr.previousSibling()
             }
+        }
 
-            val cleanTitle = titleText.replace(Regex("^[- \t\n\r|\\[\\], \u00A0]+"), "")
-                                      .replace(Regex("[- \t\n\r|\\[\\], \u00A0]+$"), "").trim()
+        // 2. Fallback: Parse index listings
+        if (results.isEmpty()) {
+            val cleanQuery = query.lowercase().replace(Regex("[^a-z0-9]"), "")
+            val doc = app.get(mainUrl, headers = mapOf("User-Agent" to userAgent)).document
 
-            val normalizedTitle = cleanTitle.lowercase().replace(Regex("[^a-z0-9]"), "")
-            
-            if (cleanTitle.isNotBlank() && (normalizedTitle.contains(cleanQuery) || cleanQuery.contains(normalizedTitle))) {
-                results.add(newMovieSearchResponse(
-                    name = cleanTitle.split(" - ").first().trim(), 
-                    url = watchUrl, 
-                    type = TvType.Movie
-                ))
+            doc.select("a").filter { it.text().contains("[WATCH]") }.forEach { el ->
+                val watchUrl = el.attr("href")
+                if (watchUrl.isBlank()) return@forEach
+
+                var titleText = ""
+                var curr: org.jsoup.nodes.Node? = el.previousSibling()
+                
+                if (curr == null && el.parent() != null) {
+                    curr = el.parent()?.previousSibling()
+                }
+
+                while (curr != null) {
+                    val nodeName = curr.nodeName().lowercase()
+                    if (nodeName == "br" || nodeName == "p" || nodeName == "hr" || nodeName == "div") break
+                    
+                    if (curr is TextNode) {
+                        if (curr.text().contains("[WATCH]")) break
+                        titleText = curr.text() + titleText
+                    } else if (curr is Element) {
+                        if (curr.text().contains("[WATCH]")) break
+                        titleText = curr.text() + titleText
+                    }
+                    curr = curr.previousSibling()
+                }
+
+                val cleanTitle = titleText.replace(Regex("^[- \t\n\r|\\[\\], \u00A0]+"), "")
+                                          .replace(Regex("[- \t\n\r|\\[\\], \u00A0]+$"), "").trim()
+
+                val normalizedTitle = cleanTitle.lowercase().replace(Regex("[^a-z0-9]"), "")
+                
+                if (cleanTitle.isNotBlank() && (normalizedTitle.contains(cleanQuery) || cleanQuery.contains(normalizedTitle))) {
+                    results.add(newMovieSearchResponse(
+                        name = cleanTitle.split(" - ").first().trim(), 
+                        url = watchUrl, 
+                        type = TvType.Movie
+                    ))
+                }
             }
         }
 
@@ -76,8 +179,12 @@ class TamilMVProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
-        return newMovieLoadResponse("TamilMV Stream", url, TvType.Movie, url) {
-            this.posterUrl = null
+        val titleMatch = url.trimEnd('/').split("/").lastOrNull()?.replace("-", " ") ?: "TamilMV Stream"
+        val year = Regex("\\b(19|20)\\d{2}\\b").find(titleMatch)?.value?.toIntOrNull()
+        val poster = fetchTmdbPoster(titleMatch, year)
+
+        return newMovieLoadResponse(titleMatch, url, TvType.Movie, url) {
+            this.posterUrl = poster
         }
     }
 
@@ -192,4 +299,12 @@ class TamilMVProvider : MainAPI() {
             }
         }
     }
+
+    data class TmdbSearchResponse(
+        @JsonProperty("results") val results: List<TmdbMovie>?
+    )
+
+    data class TmdbMovie(
+        @JsonProperty("poster_path") val poster_path: String?
+    )
 }
