@@ -67,6 +67,7 @@ class MoviesdaProvider : MainAPI() {
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         // Kick off the recursive page drill-down
