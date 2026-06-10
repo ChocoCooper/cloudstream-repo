@@ -26,7 +26,7 @@ import java.util.Locale
 class Tamilian : MainAPI() {
     override var name = "Tamilian"
     override var mainUrl = "https://tamilian.io"
-    override val hasMainPage = true // Homepage logic is implemented here
+    override val hasMainPage = true
     override var lang = "ta"
     override val supportedTypes = setOf(TvType.Movie)
 
@@ -56,10 +56,18 @@ class Tamilian : MainAPI() {
         }
     }
 
+    private fun cleanTitleForSearch(title: String): String {
+        return title.replace(Regex("(?i)\\b(tamil|dubbed|movie|series|web|hdrip|bdrip|webrip|hd|720p|1080p|mp4|mkv|esub|tcrip|dvdrip|mux|x264|hevc|h264|1cd|2cd|dvd)\\b"), "")
+            .replace(Regex("[^a-zA-Z0-9\\s]"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+    }
+
     private suspend fun fetchTmdbPoster(title: String, year: Int?, fallbackPoster: String?): String? {
+        val cleanTitle = cleanTitleForSearch(title)
         for (key in TMDB_KEYS) {
             try {
-                val baseUrl = "$TMDB_API/search/movie?api_key=$key&query=$title"
+                val baseUrl = "$TMDB_API/search/movie?api_key=$key&query=${java.net.URLEncoder.encode(cleanTitle, "UTF-8")}"
                 var results = emptyList<TmdbMovie>()
 
                 if (year != null) {
