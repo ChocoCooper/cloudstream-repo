@@ -5,13 +5,14 @@ import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.getAndUnpack
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import org.jsoup.nodes.Document
 
 class IsaidubProvider : MainAPI() {
     override var mainUrl = "https://isaidub.guru"
     override var name = "Isaidub"
     override val hasMainPage = true
-    override var lang = "ta" // Tamil
+    override var lang = "ta"
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
 
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
@@ -21,17 +22,19 @@ class IsaidubProvider : MainAPI() {
         val cleanQuery = query.replace(Regex("\\b(19|20)\\d{2}\\b"), "").trim()
         val slug = cleanQuery.lowercase().replace(Regex("[^a-z0-9]+"), "-").removeSuffix("-")
 
-        // 1. Slug Guessing (Translating your guessPromises logic)
         val suffixes = listOf("-tamil-dubbed-movie", "-tamil-dubbed-web-series")
         suffixes.forEach { suffix ->
             val guessUrl = "$mainUrl/movie/$slug$suffix/"
             val response = app.get(guessUrl, headers = mapOf("User-Agent" to userAgent))
             if (response.isSuccessful) {
-                results.add(newMovieSearchResponse(cleanQuery, guessUrl, this.name, TvType.Movie, null))
+                results.add(newMovieSearchResponse(
+                    name = cleanQuery, 
+                    url = guessUrl, 
+                    type = TvType.Movie
+                ))
             }
         }
 
-        // 2. Fallback: Search AtoZ or Year categories if slug fails
         if (results.isEmpty()) {
             val firstChar = cleanQuery.firstOrNull()?.lowercaseChar()
             if (firstChar != null && firstChar in 'a'..'z') {
@@ -43,7 +46,11 @@ class IsaidubProvider : MainAPI() {
                     val text = el.text().trim()
                     if (href.contains("/movie/") && text.contains(cleanQuery, ignoreCase = true)) {
                         val fullUrl = if (href.startsWith("http")) href else "$mainUrl$href"
-                        results.add(newMovieSearchResponse(text, fullUrl, this.name, TvType.Movie, null))
+                        results.add(newMovieSearchResponse(
+                            name = text, 
+                            url = fullUrl, 
+                            type = TvType.Movie
+                        ))
                     }
                 }
             }
@@ -56,9 +63,8 @@ class IsaidubProvider : MainAPI() {
         val doc = app.get(url, headers = mapOf("User-Agent" to userAgent)).document
         val title = doc.selectFirst("title")?.text()?.substringBefore("-")?.trim() ?: "Unknown"
         
-        // Isaidub often nests links. We pass the current URL as data to loadLinks
         return newMovieLoadResponse(title, url, TvType.Movie, url) {
-            this.posterUrl = null // Isaidub rarely uses standardized posters on sub-pages
+            this.posterUrl = null
         }
     }
 
@@ -68,17 +74,14 @@ class IsaidubProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // This handles your parseMoviePage -> extractFinalDownloadUrl pipeline
         val doc = app.get(data, headers = mapOf("User-Agent" to userAgent)).document
         
-        // Find sub-pages or direct download pages
         doc.select("a").forEach { el ->
             val href = el.attr("href")
             if (href.contains("/download/page/")) {
                 val fullUrl = if (href.startsWith("http")) href else "$mainUrl$href"
                 extractFromDownloadPage(fullUrl, callback)
             } else if (href.contains("/movie/") && !href.endsWith(data)) {
-                // Recursive drill-down for nested Isaidub pages
                 val fullUrl = if (href.startsWith("http")) href else "$mainUrl$href"
                 val subDoc = app.get(fullUrl).document
                 subDoc.select("a[href*=/download/page/]").forEach { subEl ->
@@ -107,24 +110,24 @@ class IsaidubProvider : MainAPI() {
         val response = app.get(embedUrl, headers = mapOf("Referer" to mainUrl))
         val html = response.text
         
-        // Handle direct generic video tags translated from generic embed extractor
         val doc = org.jsoup.Jsoup.parse(html)
         doc.select("video source, video").firstOrNull()?.attr("src")?.let { src ->
             callback.invoke(
                 newExtractorLink(
-                    this.name, "Isaidub Direct", src, mainUrl,
-                    if (src.contains(".m3u8")) Qualities.Unknown.value else Qualities.P720.value,
-                    src.contains(".m3u8")
+                    source = this.name,
+                    name = "Isaidub Direct",
+                    url = src,
+                    referer = mainUrl,
+                    quality = if (src.contains(".m3u8")) Qualities.Unknown.value else Qualities.P720.value,
+                    isM3u8 = src.contains(".m3u8")
                 )
             )
             return
         }
 
-        // Handle packer decoding (translating your unpack function)
         val unpackedHtml = getAndUnpack(html)
         val searchHtml = unpackedHtml.ifBlank { html }
 
-        // Regex patterns matching your JS array
         val patterns = listOf(
             Regex("[\"']hls[2-4][\"']\\s*:\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE),
             Regex("sources\\s*:\\s*\\[\\s*\\{\\s*file\\s*:\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE),
@@ -142,9 +145,12 @@ class IsaidubProvider : MainAPI() {
                 
                 callback.invoke(
                     newExtractorLink(
-                        this.name, "Isaidub Embed", videoUrl, mainUrl,
-                        if (videoUrl.contains(".m3u8")) Qualities.Unknown.value else Qualities.P720.value,
-                        videoUrl.contains(".m3u8")
+                        source = this.name,
+                        name = "Isaidub Embed",
+                        url = videoUrl,
+                        referer = mainUrl,
+                        quality = if (videoUrl.contains(".m3u8")) Qualities.Unknown.value else Qualities.P720.value,
+                        isM3u8 = videoUrl.contains(".m3u8")
                     )
                 )
                 break
