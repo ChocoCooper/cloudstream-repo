@@ -55,6 +55,7 @@ subprojects {
     cloudstream {
         setRepo(System.getenv("GITHUB_REPOSITORY") ?: "https://github.com/ChocoCooper/cloudstream-repo")
         authors = listOf("ChocoCooper")
+        isCrossPlatform = false
     }
 
     android {
