@@ -1,5 +1,6 @@
 package com.isaidub
 
+import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
@@ -7,54 +8,132 @@ import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.getAndUnpack
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import org.jsoup.nodes.Document
 
 class IsaidubProvider : MainAPI() {
     override var mainUrl = "https://isaidub.guru"
     override var name = "Isaidub"
-    override val hasMainPage = false // FIXED: Disabled to prevent NotImplementedError crashes on startup
-    override var lang = "ta" // Tamil
+    override val hasMainPage = true // Set to true: dynamic feeds implemented securely
+    override var lang = "ta"
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
 
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 
+    companion object {
+        private const val TMDB_API = "https://api.tmdb.org/3"
+        private val TMDB_KEYS = listOf(
+            "fb7bb23f03b6994dafc674c074d01761",
+            "e55425032d3d0f371fc776f302e7c09b",
+            "8301a21598f8b45668d5711a814f01f6",
+            "8cf43ad9c085135b9479ad5cf6bbcbda",
+            "da63548086e399ffc910fbc08526df05"
+        )
+    }
+
+    private fun cleanTitleForSearch(title: String): String {
+        return title.replace(Regex("(?i)\\b(tamil|dubbed|movie|series|web|hdrip|bdrip|webrip|hd|720p|1080p|mp4|mkv|esub|tcrip|dvdrip|mux|x264|hevc|h264|1cd|2cd|dvd)\\b"), "")
+            .replace(Regex("[^a-zA-Z0-9\\s]"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+    }
+
+    private suspend fun fetchTmdbPoster(title: String, year: Int?): String? {
+        val cleanTitle = cleanTitleForSearch(title)
+        for (key in TMDB_KEYS) {
+            try {
+                val baseUrl = "$TMDB_API/search/movie?api_key=$key&query=${java.net.URLEncoder.encode(cleanTitle, "UTF-8")}"
+                var results = emptyList<TmdbMovie>()
+
+                if (year != null) {
+                    val yearRes = app.get("$baseUrl&primary_release_year=$year").parsedSafe<TmdbSearchResponse>()
+                    if (yearRes?.results?.isNotEmpty() == true) {
+                        results = yearRes.results
+                    }
+                }
+                
+                if (results.isEmpty()) {
+                    val genericRes = app.get(baseUrl).parsedSafe<TmdbSearchResponse>()
+                    results = genericRes?.results ?: emptyList()
+                }
+
+                if (results.isNotEmpty()) {
+                    val posterPath = results.first().poster_path
+                    if (!posterPath.isNullOrBlank()) {
+                        return "https://image.tmdb.org/t/p/w500$posterPath"
+                    }
+                }
+                break 
+            } catch (e: Exception) {
+                continue
+            }
+        }
+        return null
+    }
+
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        val doc = app.get(mainUrl, headers = mapOf("User-Agent" to userAgent)).document
+        val scraped = mutableListOf<SearchResponse>()
+
+        val elements = doc.select("a[href*='/movie/']").take(24)
+        coroutineScope {
+            elements.map { el ->
+                async {
+                    val href = el.attr("href")
+                    val rawTitle = el.text().trim().substringBefore("(").trim()
+                    if (href.isNotBlank() && rawTitle.isNotBlank()) {
+                        val fullUrl = if (href.startsWith("http")) href else "$mainUrl$href"
+                        val poster = fetchTmdbPoster(rawTitle, null)
+                        scraped.add(newMovieSearchResponse(rawTitle, fullUrl, TvType.Movie) {
+                            this.posterUrl = poster
+                        })
+                    }
+                }
+            }.awaitAll()
+        }
+        return newHomePageResponse(listOf(HomePageList("Latest Updates", scraped.distinctBy { it.url })))
+    }
+
     override suspend fun search(query: String): List<SearchResponse> {
         val results = mutableListOf<SearchResponse>()
-        val cleanQuery = query.replace(Regex("\\b(19|20)\\d{2}\\b"), "").trim()
-        val slug = cleanQuery.lowercase().replace(Regex("[^a-z0-9]+"), "-").removeSuffix("-")
-
-        // 1. Slug Guessing
-        val suffixes = listOf("-tamil-dubbed-movie", "-tamil-dubbed-web-series")
-        suffixes.forEach { suffix ->
-            val guessUrl = "$mainUrl/movie/$slug$suffix/"
-            val response = app.get(guessUrl, headers = mapOf("User-Agent" to userAgent))
-            if (response.isSuccessful) {
-                results.add(newMovieSearchResponse(
-                    name = cleanQuery, 
-                    url = guessUrl, 
-                    type = TvType.Movie
-                ))
+        
+        // 1. Native Search Form Query
+        val searchUrl = "$mainUrl/search.php?find=${java.net.URLEncoder.encode(query, "UTF-8")}"
+        val doc = app.get(searchUrl, headers = mapOf("User-Agent" to userAgent)).document
+        
+        val foundElements = doc.select("a[href*='/movie/']")
+        if (foundElements.isNotEmpty()) {
+            coroutineScope {
+                foundElements.map { el ->
+                    async {
+                        val href = el.attr("href")
+                        val text = el.text().trim()
+                        if (href.isNotBlank() && text.isNotBlank() && !href.contains("search.php")) {
+                            val fullUrl = if (href.startsWith("http")) href else "$mainUrl$href"
+                            val cleanTitle = text.substringBefore("(").trim()
+                            val poster = fetchTmdbPoster(cleanTitle, null)
+                            results.add(newMovieSearchResponse(text, fullUrl, TvType.Movie) {
+                                this.posterUrl = poster
+                            })
+                        }
+                    }
+                }.awaitAll()
             }
         }
 
-        // 2. Fallback: Search AtoZ or Year categories if slug fails
+        // 2. Fallback: Slug Guessing & Parsing Categories
         if (results.isEmpty()) {
-            val firstChar = cleanQuery.firstOrNull()?.lowercaseChar()
-            if (firstChar != null && firstChar in 'a'..'z') {
-                val catUrl = "$mainUrl/tamil-atoz-dubbed-movies/$firstChar/"
-                val doc = app.get(catUrl, headers = mapOf("User-Agent" to userAgent)).document
-                
-                doc.select("a").forEach { el ->
-                    val href = el.attr("href")
-                    val text = el.text().trim()
-                    if (href.contains("/movie/") && text.contains(cleanQuery, ignoreCase = true)) {
-                        val fullUrl = if (href.startsWith("http")) href else "$mainUrl$href"
-                        results.add(newMovieSearchResponse(
-                            name = text, 
-                            url = fullUrl, 
-                            type = TvType.Movie
-                        ))
-                    }
+            val cleanQuery = query.replace(Regex("\\b(19|20)\\d{2}\\b"), "").trim()
+            val slug = cleanQuery.lowercase().replace(Regex("[^a-z0-9]+"), "-").removeSuffix("-")
+            val suffixes = listOf("-tamil-dubbed-movie", "-tamil-dubbed-web-series")
+            
+            suffixes.forEach { suffix ->
+                val guessUrl = "$mainUrl/movie/$slug$suffix/"
+                val response = app.get(guessUrl, headers = mapOf("User-Agent" to userAgent))
+                if (response.isSuccessful) {
+                    results.add(newMovieSearchResponse(cleanQuery, guessUrl, TvType.Movie))
                 }
             }
         }
@@ -65,9 +144,11 @@ class IsaidubProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url, headers = mapOf("User-Agent" to userAgent)).document
         val title = doc.selectFirst("title")?.text()?.substringBefore("-")?.trim() ?: "Unknown"
-        
+        val year = Regex("\\b(19|20)\\d{2}\\b").find(title)?.value?.toIntOrNull()
+        val poster = fetchTmdbPoster(title, year)
+
         return newMovieLoadResponse(title, url, TvType.Movie, url) {
-            this.posterUrl = null
+            this.posterUrl = poster
         }
     }
 
@@ -164,4 +245,12 @@ class IsaidubProvider : MainAPI() {
             }
         }
     }
+
+    data class TmdbSearchResponse(
+        @JsonProperty("results") val results: List<TmdbMovie>?
+    )
+
+    data class TmdbMovie(
+        @JsonProperty("poster_path") val poster_path: String?
+    )
 }
