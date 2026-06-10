@@ -6,6 +6,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.getAndUnpack
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import org.jsoup.nodes.Element
 import org.jsoup.nodes.TextNode
 
@@ -18,6 +19,7 @@ class TamilMVProvider : MainAPI() {
 
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
 
+    // Helper data class for Strmup AJAX response
     data class StrmupResponse(
         @JsonProperty("streaming_url") val streamingUrl: String?
     )
@@ -26,6 +28,7 @@ class TamilMVProvider : MainAPI() {
         val results = mutableListOf<SearchResponse>()
         val cleanQuery = query.lowercase().replace(Regex("[^a-z0-9]"), "")
         
+        // Fetch homepage to extract [WATCH] links
         val doc = app.get(mainUrl, headers = mapOf("User-Agent" to userAgent)).document
 
         doc.select("a").filter { it.text().contains("[WATCH]") }.forEach { el ->
@@ -35,10 +38,12 @@ class TamilMVProvider : MainAPI() {
             var titleText = ""
             var curr: org.jsoup.nodes.Node? = el.previousSibling()
             
+            // Fallback if previous sibling doesn't exist
             if (curr == null && el.parent() != null) {
                 curr = el.parent()?.previousSibling()
             }
 
+            // DOM-walking backwards to reconstruct the title
             while (curr != null) {
                 val nodeName = curr.nodeName().lowercase()
                 if (nodeName == "br" || nodeName == "p" || nodeName == "hr" || nodeName == "div") break
@@ -113,14 +118,16 @@ class TamilMVProvider : MainAPI() {
         ).parsedSafe<StrmupResponse>()
 
         response?.streamingUrl?.let { directUrl ->
+            val isM3u8 = directUrl.contains(".m3u8")
             callback.invoke(newExtractorLink(
                 source = this.name,
                 name = "Strmup",
                 url = directUrl,
-                referer = embedUrl,
-                quality = Qualities.Unknown.value,
-                isM3u8 = directUrl.contains(".m3u8")
-            ))
+                type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+            ) {
+                this.referer = embedUrl
+                this.quality = Qualities.Unknown.value
+            })
         }
     }
 
@@ -131,6 +138,7 @@ class TamilMVProvider : MainAPI() {
         var responseRes = app.get(embedUrl, headers = mapOf("Referer" to mainUrl, "User-Agent" to userAgent))
         var html = responseRes.text
 
+        // Landing page check & mirror fallback logic
         if (html.contains("<title>Loading...</title>") || html.contains("Page is loading")) {
             val mirrors = listOf("yuguaab.com", "cavanhabg.com")
             for (mirror in mirrors) {
@@ -147,8 +155,10 @@ class TamilMVProvider : MainAPI() {
             }
         }
 
+        // Unpack obfuscation if present
         val unpackedHtml = getAndUnpack(html).ifBlank { html }
 
+        // Common patterns for video sources
         val patterns = listOf(
             Regex("[\"']hls[2-4][\"']\\s*:\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE),
             Regex("sources\\s*:\\s*\\[\\s*\\{\\s*file\\s*:\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE),
@@ -158,7 +168,6 @@ class TamilMVProvider : MainAPI() {
 
         for (pattern in patterns) {
             val match = pattern.find(unpackedHtml)
-            
             if (match != null) {
                 var videoUrl = match.groupValues.lastOrNull() ?: match.value
                 videoUrl = videoUrl.replace("\\", "")
@@ -169,15 +178,17 @@ class TamilMVProvider : MainAPI() {
                     videoUrl = embedBase + videoUrl
                 }
                 
+                val isM3u8 = videoUrl.contains(".m3u8")
                 callback.invoke(newExtractorLink(
                     source = this.name,
                     name = "TamilMV Embed",
                     url = videoUrl,
-                    referer = mainUrl, 
-                    quality = if (videoUrl.contains(".m3u8")) Qualities.Unknown.value else Qualities.P720.value, 
-                    isM3u8 = videoUrl.contains(".m3u8")
-                ))
-                break
+                    type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                ) {
+                    this.referer = mainUrl
+                    this.quality = if (isM3u8) Qualities.Unknown.value else Qualities.P720.value
+                })
+                break 
             }
         }
     }
