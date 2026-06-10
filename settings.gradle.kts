@@ -1,4 +1,4 @@
-rootProject.name = "CloudstreamPlugins"
+rootProject.name = "ChocoCooper"
 
 // This file sets what projects are included. All new projects should get automatically included unless specified in "disabled" variable.
 
