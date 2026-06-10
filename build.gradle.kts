@@ -54,6 +54,7 @@ fun Project.android(configuration: LibraryExtension.() -> Unit) {
 
 subprojects {
     apply(plugin = "com.android.library")
+    apply(plugin = "kotlin-android")
     apply(plugin = "com.lagradost.cloudstream3.gradle")
 
     cloudstream {
@@ -62,7 +63,7 @@ subprojects {
     }
 
     android {
-        namespace = "com.chococooper"
+        namespace = "com.chococooper.${project.name.lowercase()}"
         compileSdk = 36
 
         defaultConfig {
