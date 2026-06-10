@@ -1,4 +1,4 @@
-import com.android.build.gradle.BaseExtension
+import com.android.build.gradle.LibraryExtension
 import com.lagradost.cloudstream3.gradle.CloudstreamExtension
 import org.gradle.kotlin.dsl.register
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
@@ -14,11 +14,8 @@ buildscript {
     }
 
     dependencies {
-        // Safe, proven AGP version
         classpath("com.android.tools.build:gradle:8.1.4")
-        
         classpath("com.github.recloudstream:gradle:81b1d424d2")
-        
         classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.0.21")
     }
 }
@@ -57,11 +54,12 @@ fun getSecret(key: String, fallback: String = ""): String {
         ?: fallback
 }
 
-fun Project.cloudstream(configuration: CloudstreamExtension.() -> Unit) = 
+fun Project.cloudstream(configuration: CloudstreamExtension.() -> Unit) =
     extensions.getByName<CloudstreamExtension>("cloudstream").configuration()
 
-fun Project.android(configuration: BaseExtension.() -> Unit) = 
-    extensions.getByName<BaseExtension>("android").configuration()
+// FIX: Use LibraryExtension instead of BaseExtension so compileSdk is available
+fun Project.android(configuration: LibraryExtension.() -> Unit) =
+    extensions.getByName<LibraryExtension>("android").configuration()
 
 subprojects {
     apply(plugin = "com.android.library")
@@ -75,15 +73,15 @@ subprojects {
     }
 
     android {
-        // Automatically isolates namespaces to prevent R-class collisions
         namespace = "com.chococooper.${project.name.lowercase()}"
 
-        // ✅ FIXED: compileSdk must be at this level (not inside defaultConfig)
+        // FIX: compileSdk belongs here on LibraryExtension — now resolves correctly
         compileSdk = 35
-        targetSdk = 35
 
         defaultConfig {
             minSdk = 21
+            // FIX: targetSdk belongs inside defaultConfig per AGP 8.x
+            targetSdk = 35
         }
 
         compileOptions {
