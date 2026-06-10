@@ -1,4 +1,4 @@
-package com.harish.moviesda
+package com.moviesda
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
