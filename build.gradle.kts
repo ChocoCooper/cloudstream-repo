@@ -14,13 +14,8 @@ buildscript {
     }
 
     dependencies {
-        // Downgrade AGP to safely compile with target Java 8 compatibility configurations
-        classpath("com.android.tools.build:gradle:8.2.2")
-        
-        // Use the explicit verified green tag version from your JitPack screenshot
-        classpath("com.github.recloudstream.gradle:gradle:master-81b1d424d2-1")
-        
-        // Align your Kotlin compiler version down to a stable 8.x ecosystem pair
+        classpath("com.android.tools.build:gradle:8.2.2") // Revert this back to the snapshot to satisfy the POM check
+        classpath("com.github.recloudstream:gradle:master-SNAPSHOT")
         classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.23")
     }
 }
