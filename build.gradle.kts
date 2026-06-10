@@ -14,13 +14,11 @@ buildscript {
     }
 
     dependencies {
-        // Safe, proven AGP version to avoid configuration lock crashes
-        classpath("com.android.tools.build:gradle:8.1.1")
+        // Safe, proven AGP version
+        classpath("com.android.tools.build:gradle:8.1.4")
         
-        // FIXED: Corrected JitPack formatting and commit hash length
         classpath("com.github.recloudstream:gradle:81b1d424d2")
         
-        // FIXED: Reverted to latest stable Kotlin version (2.3.0 does not exist yet)
         classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.0.21")
     }
 }
@@ -33,7 +31,7 @@ allprojects {
     }
 }
 
-// Global metadata bypass to prevent "Unresolved reference" compiler errors
+// Global metadata bypass
 subprojects {
     tasks.withType<KotlinCompile>().configureEach {
         compilerOptions {
@@ -53,16 +51,17 @@ val localProperties = Properties().apply {
     }
 }
 
-// Helper to read secret from local.properties or system environment or fallback
 fun getSecret(key: String, fallback: String = ""): String {
     return localProperties.getProperty(key)
         ?: System.getenv(key)
         ?: fallback
 }
 
-fun Project.cloudstream(configuration: CloudstreamExtension.() -> Unit) = extensions.getByName<CloudstreamExtension>("cloudstream").configuration()
+fun Project.cloudstream(configuration: CloudstreamExtension.() -> Unit) = 
+    extensions.getByName<CloudstreamExtension>("cloudstream").configuration()
 
-fun Project.android(configuration: BaseExtension.() -> Unit) = extensions.getByName<BaseExtension>("android").configuration()
+fun Project.android(configuration: BaseExtension.() -> Unit) = 
+    extensions.getByName<BaseExtension>("android").configuration()
 
 subprojects {
     apply(plugin = "com.android.library")
@@ -76,13 +75,15 @@ subprojects {
     }
 
     android {
-        // FIXED: Automatically isolates namespaces based on module folder names to prevent R-class collisions
+        // Automatically isolates namespaces to prevent R-class collisions
         namespace = "com.chococooper.${project.name.lowercase()}"
+
+        // ✅ FIXED: compileSdk must be at this level (not inside defaultConfig)
+        compileSdk = 35
+        targetSdk = 35
 
         defaultConfig {
             minSdk = 21
-            compileSdk = 35 // FIXED: Kotlin DSL syntax
-            targetSdk = 35
         }
 
         compileOptions {
@@ -98,7 +99,7 @@ subprojects {
                     "-Xno-param-assertions",
                     "-Xno-receiver-assertions",
                     "-Xannotation-default-target=param-property",
-                    "-Xskip-metadata-version-check" // REQUIRED to read cloudstream.jar
+                    "-Xskip-metadata-version-check"
                 )
             }
         }
@@ -107,27 +108,22 @@ subprojects {
     dependencies {
         val implementation by configurations
         val cloudstream by configurations
+
         cloudstream("com.lagradost:cloudstream3:pre-release")
 
-        // Standard extension dependency graph configurations
         implementation(kotlin("stdlib"))
         implementation("com.github.Blatzar:NiceHttp:0.4.18")
         implementation("org.jsoup:jsoup:1.22.2")
         implementation("com.fasterxml.jackson.module:jackson-module-kotlin:2.13.1")
         implementation("com.fasterxml.jackson.core:jackson-databind:2.13.1")
-        
-        // FIXED: Explicitly use -core to bypass Android OS verification triggers
         implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
-        
         implementation("org.mozilla:rhino:1.8.1")
         implementation("me.xdrop:fuzzywuzzy:1.4.0")
         implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
-        
-        // Stable BouncyCastle version that avoids major class version 69 crashes
         implementation("org.bouncycastle:bcpkix-jdk15to18:1.77")
     }
 
-    // THE FINAL OVERRIDE: Forcibly skips the cross-platform check task completely!
+    // Skip cross-platform check task
     tasks.configureEach {
         if (name == "ensureJarCompatibility") {
             enabled = false
