@@ -14,8 +14,12 @@ buildscript {
     }
 
     dependencies {
-        classpath("com.android.tools.build:gradle:8.2.2") // Revert this back to the snapshot to satisfy the POM check
-        classpath("com.github.recloudstream:gradle:master-SNAPSHOT")
+        // OFFICIAL TEMPLATE FIX:
+        // Do NOT manually add the Android Gradle Plugin here.
+        // The official recloudstream plugin handles it internally.
+        classpath("com.github.recloudstream:gradle:-SNAPSHOT")
+        
+        // Keep Kotlin aligned with stable versions
         classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.23")
     }
 }
