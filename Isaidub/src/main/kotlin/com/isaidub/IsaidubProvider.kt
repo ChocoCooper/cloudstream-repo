@@ -12,7 +12,7 @@ import org.jsoup.nodes.Document
 class IsaidubProvider : MainAPI() {
     override var mainUrl = "https://isaidub.guru"
     override var name = "Isaidub"
-    override val hasMainPage = true
+    override val hasMainPage = false // FIXED: Disabled to prevent NotImplementedError crashes on startup
     override var lang = "ta" // Tamil
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
 
