@@ -13,7 +13,7 @@ import org.jsoup.nodes.TextNode
 class TamilMVProvider : MainAPI() {
     override var mainUrl = "https://www.1tamilmv.cards"
     override var name = "TamilMV"
-    override val hasMainPage = true
+    override val hasMainPage = false // FIXED: Disabled to prevent NotImplementedError crashes on startup
     override var lang = "ta"
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
 
