@@ -1,4 +1,5 @@
 *.iml
+*.ps1
 .gradle
 /local.properties
 /.idea
@@ -9,4 +10,5 @@
 .externalNativeBuild
 .cxx
 local.properties
-.vscodetest.txt
+.vscode
+/dist
