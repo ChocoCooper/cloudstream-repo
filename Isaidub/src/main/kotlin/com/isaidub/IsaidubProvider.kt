@@ -5,7 +5,6 @@ import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.getAndUnpack
-import com.lagradost.cloudstream3.network.Cloudstream3HttpClient
 import org.jsoup.nodes.Document
 
 class IsaidubProvider : MainAPI() {
@@ -28,7 +27,7 @@ class IsaidubProvider : MainAPI() {
             val guessUrl = "$mainUrl/movie/$slug$suffix/"
             val response = app.get(guessUrl, headers = mapOf("User-Agent" to userAgent))
             if (response.isSuccessful) {
-                results.add(MovieSearchResponse(cleanQuery, guessUrl, this.name, TvType.Movie, null))
+                results.add(newMovieSearchResponse(cleanQuery, guessUrl, this.name, TvType.Movie, null))
             }
         }
 
@@ -44,7 +43,7 @@ class IsaidubProvider : MainAPI() {
                     val text = el.text().trim()
                     if (href.contains("/movie/") && text.contains(cleanQuery, ignoreCase = true)) {
                         val fullUrl = if (href.startsWith("http")) href else "$mainUrl$href"
-                        results.add(MovieSearchResponse(text, fullUrl, this.name, TvType.Movie, null))
+                        results.add(newMovieSearchResponse(text, fullUrl, this.name, TvType.Movie, null))
                     }
                 }
             }
@@ -66,6 +65,7 @@ class IsaidubProvider : MainAPI() {
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         // This handles your parseMoviePage -> extractFinalDownloadUrl pipeline
@@ -111,7 +111,7 @@ class IsaidubProvider : MainAPI() {
         val doc = org.jsoup.Jsoup.parse(html)
         doc.select("video source, video").firstOrNull()?.attr("src")?.let { src ->
             callback.invoke(
-                ExtractorLink(
+                newExtractorLink(
                     this.name, "Isaidub Direct", src, mainUrl,
                     if (src.contains(".m3u8")) Qualities.Unknown.value else Qualities.P720.value,
                     src.contains(".m3u8")
@@ -141,7 +141,7 @@ class IsaidubProvider : MainAPI() {
                 if (videoUrl.contains("google.com") || videoUrl.contains("youtube.com")) continue
                 
                 callback.invoke(
-                    ExtractorLink(
+                    newExtractorLink(
                         this.name, "Isaidub Embed", videoUrl, mainUrl,
                         if (videoUrl.contains(".m3u8")) Qualities.Unknown.value else Qualities.P720.value,
                         videoUrl.contains(".m3u8")
