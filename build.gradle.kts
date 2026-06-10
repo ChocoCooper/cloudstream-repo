@@ -14,12 +14,7 @@ buildscript {
     }
 
     dependencies {
-        // OFFICIAL TEMPLATE FIX:
-        // Do NOT manually add the Android Gradle Plugin here.
-        // The official recloudstream plugin handles it internally.
-        classpath("com.github.recloudstream:gradle:-SNAPSHOT")
-        
-        // Keep Kotlin aligned with stable versions
+        classpath("com.github.recloudstream:gradle:81b1d424d2")
         classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.23")
     }
 }
