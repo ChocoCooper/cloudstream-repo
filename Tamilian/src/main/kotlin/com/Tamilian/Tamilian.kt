@@ -26,7 +26,7 @@ import java.util.Locale
 class Tamilian : MainAPI() {
     override var name = "Tamilian"
     override var mainUrl = "https://tamilian.io"
-    override val hasMainPage = true
+    override val hasMainPage = true // Homepage logic is implemented here
     override var lang = "ta"
     override val supportedTypes = setOf(TvType.Movie)
 
