@@ -13,6 +13,7 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.newHomePageResponse
 import com.lagradost.cloudstream3.newMovieLoadResponse
 import com.lagradost.cloudstream3.newMovieSearchResponse
+import com.lagradost.cloudstream3.newSubtitleFile
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
@@ -31,7 +32,6 @@ class Tamilian : MainAPI() {
 
     companion object {
         private const val TMDB_API = "https://api.tmdb.org/3"
-        // List of fallback keys
         private val TMDB_KEYS = listOf(
             "fb7bb23f03b6994dafc674c074d01761",
             "e55425032d3d0f371fc776f302e7c09b",
@@ -41,7 +41,6 @@ class Tamilian : MainAPI() {
         )
     }
 
-    // --- HELPER: Safely handles relative URLs ---
     private fun String.toAbsoluteUrl(): String {
         if (this.isBlank()) return ""
         if (this.startsWith("http")) return this
@@ -49,7 +48,6 @@ class Tamilian : MainAPI() {
         return if (this.startsWith("/")) "$mainUrl$this" else "$mainUrl/$this"
     }
 
-    // --- HELPER: Cleans "the-batman-d3d9446" into "The Batman" ---
     private fun cleanTitleFromUrl(url: String): String {
         val slug = url.trimEnd('/').split("/").last()
         val withoutId = slug.replace(Regex("-[a-f0-9]{7,}\$"), "")
@@ -58,14 +56,12 @@ class Tamilian : MainAPI() {
         }
     }
 
-    // --- HELPER: Smart Multi-Key TMDB Fetcher ---
     private suspend fun fetchTmdbPoster(title: String, year: Int?, fallbackPoster: String?): String? {
         for (key in TMDB_KEYS) {
             try {
                 val baseUrl = "$TMDB_API/search/movie?api_key=$key&query=$title"
                 var results = emptyList<TmdbMovie>()
 
-                // 1. Try Exact Year Match first
                 if (year != null) {
                     val yearRes = app.get("$baseUrl&primary_release_year=$year").parsedSafe<TmdbSearchResponse>()
                     if (yearRes?.results?.isNotEmpty() == true) {
@@ -73,14 +69,12 @@ class Tamilian : MainAPI() {
                     }
                 }
                 
-                // 2. Fallback: If exact year failed, search without year constraint
                 if (results.isEmpty()) {
                     val genericRes = app.get(baseUrl).parsedSafe<TmdbSearchResponse>()
                     results = genericRes?.results ?: emptyList()
                 }
 
                 if (results.isNotEmpty()) {
-                    // Prioritize Tamil ("ta") movies over other languages
                     val bestMatch = results.firstOrNull { it.original_language == "ta" } ?: results.first()
                     val posterPath = bestMatch.poster_path
                     
@@ -88,11 +82,8 @@ class Tamilian : MainAPI() {
                         return "https://image.tmdb.org/t/p/w500$posterPath"
                     }
                 }
-                // If it successfully executed but found no poster, break the loop to avoid wasting other keys
                 break 
-                
             } catch (e: Exception) {
-                // If the key is banned, rate-limited, or network fails, loop continues to the next key!
                 continue
             }
         }
@@ -136,7 +127,6 @@ class Tamilian : MainAPI() {
                 }
             }.awaitAll()
         }.distinctBy { 
-            // Removes duplicates pointing to the same TMDB entity
             if (it.posterUrl?.contains("tmdb.org") == true) it.posterUrl else it.url 
         }
 
@@ -218,7 +208,6 @@ class Tamilian : MainAPI() {
         val watchUrl = if (data.endsWith("/")) "${data}watching.html" else "$data/watching.html"
         val baseHeaders = mapOf("Referer" to data)
         
-        // --- STEP 1: Get the Internal Movie ID ---
         val watchRes = app.get(watchUrl, headers = baseHeaders).text
         val movieIdMatch = Regex("""movie\s*=\s*\{[^}]*id:\s*"(\d+)"""").find(watchRes)
         val movieId = movieIdMatch?.groupValues?.get(1) ?: return false
@@ -228,7 +217,6 @@ class Tamilian : MainAPI() {
             "Referer" to watchUrl
         )
 
-        // --- STEP 2: Fetch the Hidden Server Buttons ---
         val serverApiUrl = "$mainUrl/ajax/movie/episode/servers/${movieId}_1_full"
         val servRes = app.get(serverApiUrl, headers = ajaxHeaders)
         if (!servRes.isSuccessful) return false
@@ -249,7 +237,6 @@ class Tamilian : MainAPI() {
             cleanDataId
         }
 
-        // --- STEP 3: Fetch the Embed Link ---
         val sourcesUrl = "$mainUrl/ajax/movie/episode/server/sources/$fullDataId"
         val sourceRes = app.get(sourcesUrl, headers = ajaxHeaders)
         if (!sourceRes.isSuccessful) return false
@@ -262,7 +249,6 @@ class Tamilian : MainAPI() {
             finalLink = match?.groupValues?.get(1)?.replace("\\", "")
         }
 
-        // --- STEP 4: Direct API POST ---
         if (finalLink != null) {
             val token = finalLink.substringAfterLast("/")
             val embedHost = if (finalLink.contains("megacloud")) "https://megacloud.tv" else "https://embedojo.net"
@@ -275,7 +261,6 @@ class Tamilian : MainAPI() {
                 "Content-Type" to "application/x-www-form-urlencoded; charset=UTF-8"
             )
 
-            // Hit the /player/index.php endpoint
             val videoDataRes = app.post(
                 "$embedHost/player/index.php?data=$token&do=getVideo",
                 headers = postHeaders
@@ -292,7 +277,7 @@ class Tamilian : MainAPI() {
             parsedData?.tracks?.forEach { track ->
                 if (track.kind == "captions" && !track.file.isNullOrBlank()) {
                     subtitleCallback.invoke(
-                        SubtitleFile(track.label ?: "Subtitles", track.file)
+                        newSubtitleFile(track.label ?: "Subtitles", track.file)
                     )
                 }
             }
