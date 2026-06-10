@@ -11,7 +11,7 @@ import java.util.Calendar
 class MoviesdaProvider : MainAPI() {
     override var mainUrl = "https://moviesda31.com"
     override var name = "Moviesda"
-    override val hasMainPage = true
+    override val hasMainPage = false // FIXED: Disabled to prevent NotImplementedError crashes on startup
     override var lang = "ta"
     override val supportedTypes = setOf(TvType.Movie)
 
