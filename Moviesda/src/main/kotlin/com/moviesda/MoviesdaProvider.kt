@@ -5,6 +5,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.getAndUnpack
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import java.util.Calendar
 
 class MoviesdaProvider : MainAPI() {
@@ -22,6 +23,7 @@ class MoviesdaProvider : MainAPI() {
         val slug = cleanQuery.lowercase().replace(Regex("[^a-z0-9\\s]"), "").replace(Regex("\\s+"), "-")
         val currentYear = Calendar.getInstance().get(Calendar.YEAR)
         
+        // 1. Direct URL Guessing
         val yearsToTry = listOf(currentYear, currentYear - 1, currentYear + 1, currentYear - 2)
         for (year in yearsToTry) {
             val directUrl = "$mainUrl/$slug-$year-tamil-movie/"
@@ -36,6 +38,7 @@ class MoviesdaProvider : MainAPI() {
             }
         }
 
+        // 2. Category Browsing Fallback
         if (results.isEmpty()) {
             val categoriesToCheck = listOf(
                 "$mainUrl/tamil-$currentYear-movies/",
@@ -84,6 +87,7 @@ class MoviesdaProvider : MainAPI() {
     private suspend fun drillDownForLinks(url: String, callback: (ExtractorLink) -> Unit) {
         val doc = app.get(url, headers = mapOf("User-Agent" to userAgent)).document
 
+        // Step 1: Check for "original" page link
         val originalLink = doc.selectFirst("a[href*=-original-movie]")?.attr("href")
         if (originalLink != null) {
             val fullOriginalUrl = if (originalLink.startsWith("http")) originalLink else "$mainUrl$originalLink"
@@ -91,6 +95,7 @@ class MoviesdaProvider : MainAPI() {
             return
         }
 
+        // Step 2: Check for Quality pages
         val qualityLinks = doc.select("a").filter { 
             it.text().contains(Regex("\\b(360p|480p|720p|1080p|4K)\\s*HD\\b", RegexOption.IGNORE_CASE)) 
         }
@@ -103,6 +108,7 @@ class MoviesdaProvider : MainAPI() {
             return
         }
 
+        // Step 3: Check for /download/ links
         val downloadLinks = doc.select("a[href*=/download/]")
         if (downloadLinks.isNotEmpty()) {
             downloadLinks.forEach { el ->
@@ -140,24 +146,29 @@ class MoviesdaProvider : MainAPI() {
         val response = app.get(embedUrl, headers = mapOf("Referer" to mainUrl))
         val html = response.text
 
+        // 1. Check for standard video tags
         val doc = org.jsoup.Jsoup.parse(html)
         doc.select("video source").forEach { el ->
             val src = el.attr("src")
             if (src.isNotBlank()) {
+                val isM3u8 = src.contains(".m3u8")
                 callback.invoke(newExtractorLink(
                     source = this.name,
                     name = "Moviesda Direct",
                     url = src,
-                    referer = mainUrl, 
-                    quality = if (src.contains(".m3u8")) Qualities.Unknown.value else Qualities.P720.value, 
-                    isM3u8 = src.contains(".m3u8")
-                ))
+                    type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                ) {
+                    this.referer = mainUrl
+                    this.quality = if (isM3u8) Qualities.Unknown.value else Qualities.P720.value
+                })
                 return
             }
         }
 
+        // 2. Unpack Packer obfuscation if present
         val unpackedHtml = getAndUnpack(html).ifBlank { html }
 
+        // 3. Regex fallback matching your JS patterns
         val patterns = listOf(
             Regex("[\"']hls[2-4][\"']\\s*:\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE),
             Regex("https?://[^\\s\"']+\\.m3u8[^\\s\"']*", RegexOption.IGNORE_CASE),
@@ -172,14 +183,16 @@ class MoviesdaProvider : MainAPI() {
                 
                 if (videoUrl.contains("google.com") || videoUrl.contains("youtube.com")) continue
                 
+                val isM3u8 = videoUrl.contains(".m3u8")
                 callback.invoke(newExtractorLink(
                     source = this.name,
                     name = "Moviesda Embed",
                     url = videoUrl,
-                    referer = mainUrl, 
-                    quality = if (videoUrl.contains(".m3u8")) Qualities.Unknown.value else Qualities.P720.value, 
-                    isM3u8 = videoUrl.contains(".m3u8")
-                ))
+                    type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                ) {
+                    this.referer = mainUrl
+                    this.quality = if (isM3u8) Qualities.Unknown.value else Qualities.P720.value
+                })
                 break
             }
         }
