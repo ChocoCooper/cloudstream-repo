@@ -108,7 +108,7 @@ subprojects {
         implementation("me.xdrop:fuzzywuzzy:1.4.0")
         implementation("com.google.code.gson:gson:2.14.0")
         implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
-        implementation("org.bouncycastle:bcpkix-jdk18on:1.84")
+        implementation("org.bouncycastle:bcpkix-jdk15to18:1.77")
     }
 }
 
