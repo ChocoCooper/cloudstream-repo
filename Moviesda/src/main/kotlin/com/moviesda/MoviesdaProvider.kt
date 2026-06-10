@@ -1,21 +1,99 @@
 package com.moviesda
 
+import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.getAndUnpack
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import java.util.Calendar
 
 class MoviesdaProvider : MainAPI() {
     override var mainUrl = "https://moviesda31.com"
     override var name = "Moviesda"
-    override val hasMainPage = false // FIXED: Disabled to prevent NotImplementedError crashes on startup
+    override val hasMainPage = true // Set to true: dynamic feeds implemented securely
     override var lang = "ta"
     override val supportedTypes = setOf(TvType.Movie)
 
     private val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+
+    companion object {
+        private const val TMDB_API = "https://api.tmdb.org/3"
+        private val TMDB_KEYS = listOf(
+            "fb7bb23f03b6994dafc674c074d01761",
+            "e55425032d3d0f371fc776f302e7c09b",
+            "8301a21598f8b45668d5711a814f01f6",
+            "8cf43ad9c085135b9479ad5cf6bbcbda",
+            "da63548086e399ffc910fbc08526df05"
+        )
+    }
+
+    private fun cleanTitleForSearch(title: String): String {
+        return title.replace(Regex("(?i)\\b(tamil|dubbed|movie|series|web|hdrip|bdrip|webrip|hd|720p|1080p|mp4|mkv|esub|tcrip|dvdrip|mux|x264|hevc|h264|1cd|2cd|dvd)\\b"), "")
+            .replace(Regex("[^a-zA-Z0-9\\s]"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
+    }
+
+    private suspend fun fetchTmdbPoster(title: String, year: Int?): String? {
+        val cleanTitle = cleanTitleForSearch(title)
+        for (key in TMDB_KEYS) {
+            try {
+                val baseUrl = "$TMDB_API/search/movie?api_key=$key&query=${java.net.URLEncoder.encode(cleanTitle, "UTF-8")}"
+                var results = emptyList<TmdbMovie>()
+
+                if (year != null) {
+                    val yearRes = app.get("$baseUrl&primary_release_year=$year").parsedSafe<TmdbSearchResponse>()
+                    if (yearRes?.results?.isNotEmpty() == true) {
+                        results = yearRes.results
+                    }
+                }
+                
+                if (results.isEmpty()) {
+                    val genericRes = app.get(baseUrl).parsedSafe<TmdbSearchResponse>()
+                    results = genericRes?.results ?: emptyList()
+                }
+
+                if (results.isNotEmpty()) {
+                    val posterPath = results.first().poster_path
+                    if (!posterPath.isNullOrBlank()) {
+                        return "https://image.tmdb.org/t/p/w500$posterPath"
+                    }
+                }
+                break 
+            } catch (e: Exception) {
+                continue
+            }
+        }
+        return null
+    }
+
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        val doc = app.get(mainUrl, headers = mapOf("User-Agent" to userAgent)).document
+        val scraped = mutableListOf<SearchResponse>()
+        val elements = doc.select("a[href*=-tamil-movie], a[href*=-movie/]").take(24)
+
+        coroutineScope {
+            elements.map { el ->
+                async {
+                    val href = el.attr("href")
+                    val rawTitle = el.text().trim()
+                    if (href.isNotBlank() && rawTitle.isNotBlank() && !href.contains("/tamil-movies/")) {
+                        val fullUrl = if (href.startsWith("http")) href else "$mainUrl$href"
+                        val poster = fetchTmdbPoster(rawTitle, null)
+                        scraped.add(newMovieSearchResponse(rawTitle, fullUrl, TvType.Movie) {
+                            this.posterUrl = poster
+                        })
+                    }
+                }
+            }.awaitAll()
+        }
+        return newHomePageResponse(listOf(HomePageList("Latest Uploads", scraped.distinctBy { it.url })))
+    }
 
     override suspend fun search(query: String): List<SearchResponse> {
         val results = mutableListOf<SearchResponse>()
@@ -29,11 +107,10 @@ class MoviesdaProvider : MainAPI() {
             val directUrl = "$mainUrl/$slug-$year-tamil-movie/"
             val response = app.get(directUrl, headers = mapOf("User-Agent" to userAgent))
             if (response.isSuccessful && response.text.contains("movie")) {
-                results.add(newMovieSearchResponse(
-                    name = "$cleanQuery ($year)", 
-                    url = directUrl, 
-                    type = TvType.Movie
-                ))
+                val poster = fetchTmdbPoster(cleanQuery, year)
+                results.add(newMovieSearchResponse("$cleanQuery ($year)", directUrl, TvType.Movie) {
+                    this.posterUrl = poster
+                })
                 break 
             }
         }
@@ -47,17 +124,21 @@ class MoviesdaProvider : MainAPI() {
 
             for (categoryUrl in categoriesToCheck) {
                 val doc = app.get(categoryUrl, headers = mapOf("User-Agent" to userAgent)).document
-                doc.select("a[href*=-tamil-movie], a[href*=-movie/]").forEach { el ->
-                    val href = el.attr("href")
-                    val text = el.text().trim()
-                    if (href.isNotBlank() && text.contains(cleanQuery, ignoreCase = true) && !href.contains("/tamil-movies/")) {
-                        val fullUrl = if (href.startsWith("http")) href else "$mainUrl$href"
-                        results.add(newMovieSearchResponse(
-                            name = text, 
-                            url = fullUrl, 
-                            type = TvType.Movie
-                        ))
-                    }
+                val items = doc.select("a[href*=-tamil-movie], a[href*=-movie/]")
+                coroutineScope {
+                    items.map { el ->
+                        async {
+                            val href = el.attr("href")
+                            val text = el.text().trim()
+                            if (href.isNotBlank() && text.contains(cleanQuery, ignoreCase = true) && !href.contains("/tamil-movies/")) {
+                                val fullUrl = if (href.startsWith("http")) href else "$mainUrl$href"
+                                val poster = fetchTmdbPoster(text, null)
+                                results.add(newMovieSearchResponse(text, fullUrl, TvType.Movie) {
+                                    this.posterUrl = poster
+                                })
+                            }
+                        }
+                    }.awaitAll()
                 }
             }
         }
@@ -68,9 +149,11 @@ class MoviesdaProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url, headers = mapOf("User-Agent" to userAgent)).document
         val title = doc.selectFirst("title")?.text()?.substringBefore("-")?.trim() ?: "Unknown Movie"
+        val year = Regex("\\b(19|20)\\d{2}\\b").find(title)?.value?.toIntOrNull()
+        val poster = fetchTmdbPoster(title, year)
         
         return newMovieLoadResponse(title, url, TvType.Movie, url) {
-            this.posterUrl = null
+            this.posterUrl = poster
         }
     }
 
@@ -143,7 +226,8 @@ class MoviesdaProvider : MainAPI() {
     }
 
     private suspend fun extractFromEmbed(embedUrl: String, callback: (ExtractorLink) -> Unit) {
-        val response = app.get(embedUrl, headers = mapOf("Referer" to mainUrl))
+        // Enforce user-agent headers to bypass Cloudflare and referer protection
+        val response = app.get(embedUrl, headers = mapOf("Referer" to mainUrl, "User-Agent" to userAgent))
         val html = response.text
 
         // 1. Check for standard video tags
@@ -197,4 +281,12 @@ class MoviesdaProvider : MainAPI() {
             }
         }
     }
+
+    data class TmdbSearchResponse(
+        @JsonProperty("results") val results: List<TmdbMovie>?
+    )
+
+    data class TmdbMovie(
+        @JsonProperty("poster_path") val poster_path: String?
+    )
 }
