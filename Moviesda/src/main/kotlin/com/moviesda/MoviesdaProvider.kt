@@ -30,10 +30,24 @@ class MoviesdaProvider : MainAPI() {
             "8cf43ad9c085135b9479ad5cf6bbcbda",
             "da63548086e399ffc910fbc08526df05"
         )
+
+        // Remote Proxylist to bypass ISP Blocks
+        private val proxies = listOf(
+            "https://ancient-violet-1ee6.phisher12.workers.dev",
+            "https://autumn-limit-1fea.phisher53.workers.dev",
+            "https://wispy-bar-8fbe.phisher2.workers.dev",
+            "https://orange-voice-abcf.phisher16.workers.dev",
+            "https://icy-king-bff2.phisher40.workers.dev"
+        )
+    }
+
+    private fun String.proxify(): String {
+        if (this.contains("tmdb.org") || this.contains("workers.dev")) return this
+        return "${proxies.random()}/$this"
     }
 
     private fun cleanTitleForSearch(title: String): String {
-        return title.replace(Regex("(?i)\\b(tamil|dubbed|movie|series|web|hdrip|bdrip|webrip|hd|720p|1080p|mp4|mkv|esub|tcrip|dvdrip|mux|x264|hevc|h264|1cd|2cd|dvd)\\b"), "")
+        return title.substringBefore("(").replace(Regex("(?i)\\b(tamil|dubbed|movie|series|web|hdrip|bdrip|webrip|hd|720p|1080p|mp4|mkv|esub|tcrip|dvdrip|mux|x264|hevc|h264|1cd|2cd|dvd)\\b"), "")
             .replace(Regex("[^a-zA-Z0-9\\s]"), " ")
             .replace(Regex("\\s+"), " ")
             .trim()
@@ -73,7 +87,7 @@ class MoviesdaProvider : MainAPI() {
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val doc = app.get(mainUrl, headers = mapOf("User-Agent" to userAgent)).document
+        val doc = app.get(mainUrl.proxify(), headers = mapOf("User-Agent" to userAgent)).document
         val scraped = mutableListOf<SearchResponse>()
         val elements = doc.select("a[href*=-tamil-movie], a[href*=-movie/]").take(24)
 
@@ -84,7 +98,8 @@ class MoviesdaProvider : MainAPI() {
                     val rawTitle = el.text().trim()
                     if (href.isNotBlank() && rawTitle.isNotBlank() && !href.contains("/tamil-movies/")) {
                         val fullUrl = if (href.startsWith("http")) href else "$mainUrl$href"
-                        val poster = fetchTmdbPoster(rawTitle, null)
+                        val cleanTitle = cleanTitleForSearch(rawTitle)
+                        val poster = fetchTmdbPoster(cleanTitle, null)
                         scraped.add(newMovieSearchResponse(rawTitle, fullUrl, TvType.Movie) {
                             this.posterUrl = poster
                         })
@@ -105,7 +120,7 @@ class MoviesdaProvider : MainAPI() {
         val yearsToTry = listOf(currentYear, currentYear - 1, currentYear + 1, currentYear - 2)
         for (year in yearsToTry) {
             val directUrl = "$mainUrl/$slug-$year-tamil-movie/"
-            val response = app.get(directUrl, headers = mapOf("User-Agent" to userAgent))
+            val response = app.get(directUrl.proxify(), headers = mapOf("User-Agent" to userAgent))
             if (response.text.contains("movie")) {
                 val poster = fetchTmdbPoster(cleanQuery, year)
                 results.add(newMovieSearchResponse("$cleanQuery ($year)", directUrl, TvType.Movie) {
@@ -123,7 +138,7 @@ class MoviesdaProvider : MainAPI() {
             )
 
             for (categoryUrl in categoriesToCheck) {
-                val response = app.get(categoryUrl, headers = mapOf("User-Agent" to userAgent))
+                val response = app.get(categoryUrl.proxify(), headers = mapOf("User-Agent" to userAgent))
                 if(response.text.isNotBlank()) {
                     val doc = response.document
                     val items = doc.select("a[href*=-tamil-movie], a[href*=-movie/]")
@@ -150,7 +165,7 @@ class MoviesdaProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val doc = app.get(url, headers = mapOf("User-Agent" to userAgent)).document
+        val doc = app.get(url.proxify(), headers = mapOf("User-Agent" to userAgent)).document
         val title = doc.selectFirst("title")?.text()?.substringBefore("-")?.trim() ?: "Unknown Movie"
         val year = Regex("\\b(19|20)\\d{2}\\b").find(title)?.value?.toIntOrNull()
         val poster = fetchTmdbPoster(title, year)
@@ -171,9 +186,8 @@ class MoviesdaProvider : MainAPI() {
     }
 
     private suspend fun drillDownForLinks(url: String, callback: (ExtractorLink) -> Unit) {
-        val doc = app.get(url, headers = mapOf("User-Agent" to userAgent)).document
+        val doc = app.get(url.proxify(), headers = mapOf("User-Agent" to userAgent)).document
 
-        // Step 1: Check for "original" page link
         val originalLink = doc.selectFirst("a[href*=-original-movie]")?.attr("href")
         if (originalLink != null) {
             val fullOriginalUrl = if (originalLink.startsWith("http")) originalLink else "$mainUrl$originalLink"
@@ -181,7 +195,6 @@ class MoviesdaProvider : MainAPI() {
             return
         }
 
-        // Step 2: Check for Quality pages
         val qualityLinks = doc.select("a").filter { 
             it.text().contains(Regex("\\b(360p|480p|720p|1080p|4K)\\s*HD\\b", RegexOption.IGNORE_CASE)) 
         }
@@ -194,7 +207,6 @@ class MoviesdaProvider : MainAPI() {
             return
         }
 
-        // Step 3: Check for /download/ links
         val downloadLinks = doc.select("a[href*=/download/]")
         if (downloadLinks.isNotEmpty()) {
             downloadLinks.forEach { el ->
@@ -206,7 +218,7 @@ class MoviesdaProvider : MainAPI() {
     }
 
     private suspend fun extractFinalDownloadUrl(url: String, callback: (ExtractorLink) -> Unit) {
-        val doc = app.get(url, headers = mapOf("User-Agent" to userAgent)).document
+        val doc = app.get(url.proxify(), headers = mapOf("User-Agent" to userAgent)).document
       
         doc.select("a").forEach { el ->
             val href = el.attr("href")
@@ -229,8 +241,7 @@ class MoviesdaProvider : MainAPI() {
     }
 
     private suspend fun extractFromEmbed(embedUrl: String, callback: (ExtractorLink) -> Unit) {
-        // Enforce user-agent headers to bypass Cloudflare and referer protection
-        val response = app.get(embedUrl, headers = mapOf("Referer" to mainUrl, "User-Agent" to userAgent))
+        val response = app.get(embedUrl.proxify(), headers = mapOf("Referer" to mainUrl, "User-Agent" to userAgent))
         val html = response.text
 
         // 1. Check for standard video tags
@@ -255,9 +266,12 @@ class MoviesdaProvider : MainAPI() {
         // 2. Unpack Packer obfuscation if present
         val unpackedHtml = getAndUnpack(html).ifBlank { html }
 
-        // 3. Regex fallback matching your JS patterns
+        // 3. Regex fallback matching extra JS patterns
         val patterns = listOf(
-            Regex("[\"']hls[2-4][\"']\\s*:\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE),
+            Regex("[\"']hls[2-4]?[\"']\\s*:\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE),
+            Regex("sources\\s*:\\s*\\[\\s*\\{\\s*file\\s*:\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE),
+            Regex("file[\"']?\\s*:\\s*[\"'](https?://[^\"']+\\.m3u8[^\"']*)[\"']", RegexOption.IGNORE_CASE),
+            Regex("file[\"']?\\s*:\\s*[\"'](https?://[^\"']+\\.mp4[^\"']*)[\"']", RegexOption.IGNORE_CASE),
             Regex("https?://[^\\s\"']+\\.m3u8[^\\s\"']*", RegexOption.IGNORE_CASE),
             Regex("https?://[^\\s\"']+\\.mp4[^\\s\"']*", RegexOption.IGNORE_CASE)
         )
@@ -274,7 +288,7 @@ class MoviesdaProvider : MainAPI() {
                 callback.invoke(newExtractorLink(
                     source = this.name,
                     name = "Moviesda Embed",
-                    url = videoUrl,
+                    url = videoUrl, // Explicitly DO NOT proxify the raw video link for Exoplayer
                     type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                 ) {
                     this.referer = mainUrl
