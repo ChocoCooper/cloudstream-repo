@@ -18,9 +18,7 @@ class IsaidubProvider : MainAPI() {
     
     // TMDB Fallback array: Official -> Mirror -> Proxy
     private val tmdbUrls = listOf(
-        "https://api.themoviedb.org/3",
-        "https://api.tmdb.org/3",
-        "https://tmdb-proxy.cubecity.cloud/3"
+        "https://api.themoviedb.org/3"
     )
 
     // Data classes for TMDB JSON parsing
@@ -142,10 +140,15 @@ class IsaidubProvider : MainAPI() {
     }
 
     private suspend fun findIsaidubMoviePage(title: String, year: String): String? {
-        val cleanTitle = title.replace(" ", "")
+        // Remove apostrophes and special characters to handle sites omitting them
+        val titleNoPunctuation = title.replace(Regex("[^a-zA-Z0-9 ]"), "")
+        
+        // Create an ultimate clean string for aggressive text matching
+        val superCleanTitle = title.lowercase().replace(Regex("[^a-z0-9]"), "")
+
         val slugsToTest = listOfNotNull(
             toSlug(title).takeIf { it.isNotBlank() },
-            toSlug(cleanTitle).takeIf { it.isNotBlank() }
+            toSlug(titleNoPunctuation).takeIf { it.isNotBlank() }
         ).distinct()
 
         val suffixes = listOf("-tamil-dubbed-movie", "-tamil-dubbed-web-series")
@@ -178,9 +181,8 @@ class IsaidubProvider : MainAPI() {
         val categories = mutableListOf("$mainUrl/")
         if (year.isNotBlank()) categories.add("$mainUrl/tamil-$year-dubbed-movies/")
 
-        val cleanLetters = title.lowercase().replace(Regex("[^a-z0-9]"), "")
-        if (cleanLetters.isNotEmpty() && cleanLetters[0].isLetter()) {
-            val firstChar = cleanLetters[0]
+        if (superCleanTitle.isNotEmpty() && superCleanTitle[0].isLetter()) {
+            val firstChar = superCleanTitle[0]
             categories.add("$mainUrl/tamil-atoz-dubbed-movies/$firstChar/")
             categories.add("$mainUrl/tamil-atoz-dubbed-movies/$firstChar/2/")
         }
@@ -193,8 +195,13 @@ class IsaidubProvider : MainAPI() {
                     val text = a.text().trim().ifBlank { a.selectFirst("img")?.attr("alt") ?: "" }
 
                     if (href.contains("/movie/") || href.contains("-dubbed-movie")) {
-                        val normalizedText = text.lowercase().replace(" ", "")
-                        val match = slugsToTest.any { href.contains(it) || normalizedText.contains(it) }
+                        // Strip everything to just alphanumeric characters for fuzzy matching
+                        val normalizedText = text.lowercase().replace(Regex("[^a-z0-9]"), "")
+                        
+                        // It's a match if the slug is inside the URL, OR the super-clean titles match
+                        val match = slugsToTest.any { href.contains(it) } || 
+                                   (superCleanTitle.isNotBlank() && normalizedText.contains(superCleanTitle))
+                                   
                         if (match) {
                             return if (href.startsWith("http")) href else "$mainUrl$href"
                         }
