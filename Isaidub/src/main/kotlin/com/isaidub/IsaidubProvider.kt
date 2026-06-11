@@ -106,15 +106,16 @@ class IsaidubProvider : MainAPI() {
         resolutions.forEach { res ->
             val finalLink = extractFinalLink(res.url, 0, mutableSetOf())
             if (finalLink != null) {
-                // Use pure positional arguments and INFER_TYPE to bypass API deprecation
+                val isM3u8 = finalLink.contains(".m3u8", ignoreCase = true)
+                
                 callback.invoke(
-                    ExtractorLink(
-                        this.name,                 // source
-                        res.label,                 // name
-                        finalLink,                 // url
-                        "$mainUrl/",               // referer
-                        Qualities.Unknown.value,   // quality
-                        INFER_TYPE                 // type
+                    newExtractorLink(
+                        source = this.name,
+                        name = res.label,
+                        url = finalLink,
+                        referer = "$mainUrl/",
+                        quality = Qualities.Unknown.value,
+                        type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                     )
                 )
             }
