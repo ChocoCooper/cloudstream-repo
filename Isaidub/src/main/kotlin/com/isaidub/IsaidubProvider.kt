@@ -15,8 +15,7 @@ import kotlinx.coroutines.coroutineScope
 import org.jsoup.nodes.Document
 
 class IsaidubProvider : MainAPI() {
-    // FIXED: Updated to latest active domain
-    override var mainUrl = "https://isaidub.guru"
+    override var mainUrl = "https://isaidub.guru" // Domain Restored
     override var name = "Isaidub"
     override val hasMainPage = true 
     override var lang = "ta"
@@ -33,19 +32,6 @@ class IsaidubProvider : MainAPI() {
             "8cf43ad9c085135b9479ad5cf6bbcbda",
             "da63548086e399ffc910fbc08526df05"
         )
-        
-        private val proxies = listOf(
-            "https://ancient-violet-1ee6.phisher12.workers.dev",
-            "https://autumn-limit-1fea.phisher53.workers.dev",
-            "https://wispy-bar-8fbe.phisher2.workers.dev",
-            "https://orange-voice-abcf.phisher16.workers.dev",
-            "https://icy-king-bff2.phisher40.workers.dev"
-        )
-    }
-
-    private fun String.proxify(): String {
-        if (this.contains("tmdb.org") || this.contains("workers.dev") || !this.contains(mainUrl)) return this
-        return "${proxies.random()}/$this"
     }
 
     private fun cleanTitleForSearch(title: String): String {
@@ -89,7 +75,7 @@ class IsaidubProvider : MainAPI() {
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val doc = app.get(mainUrl.proxify(), headers = mapOf("User-Agent" to userAgent)).document
+        val doc = app.get(mainUrl, headers = mapOf("User-Agent" to userAgent)).document
         val scraped = mutableListOf<SearchResponse>()
 
         val elements = doc.select("a[href*='/movie/']").take(24)
@@ -115,7 +101,7 @@ class IsaidubProvider : MainAPI() {
         val results = mutableListOf<SearchResponse>()
         
         val searchUrl = "$mainUrl/search.php?find=${java.net.URLEncoder.encode(query, "UTF-8")}"
-        val response = app.get(searchUrl.proxify(), headers = mapOf("User-Agent" to userAgent))
+        val response = app.get(searchUrl, headers = mapOf("User-Agent" to userAgent))
         
         if (response.text.isNotBlank()) {
             val doc = response.document
@@ -147,7 +133,7 @@ class IsaidubProvider : MainAPI() {
             
             suffixes.forEach { suffix ->
                 val guessUrl = "$mainUrl/movie/$slug$suffix/"
-                val guessResponse = app.get(guessUrl.proxify(), headers = mapOf("User-Agent" to userAgent))
+                val guessResponse = app.get(guessUrl, headers = mapOf("User-Agent" to userAgent))
                 if (guessResponse.text.isNotBlank()) {
                     results.add(newMovieSearchResponse(cleanQuery, guessUrl, TvType.Movie))
                 }
@@ -158,7 +144,7 @@ class IsaidubProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val doc = app.get(url.proxify(), headers = mapOf("User-Agent" to userAgent)).document
+        val doc = app.get(url, headers = mapOf("User-Agent" to userAgent)).document
         val title = doc.selectFirst("title")?.text()?.substringBefore("-")?.trim() ?: "Unknown"
         val year = Regex("\\b(19|20)\\d{2}\\b").find(title)?.value?.toIntOrNull()
         val poster = fetchTmdbPoster(title, year)
@@ -174,7 +160,7 @@ class IsaidubProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val doc = app.get(data.proxify(), headers = mapOf("User-Agent" to userAgent)).document
+        val doc = app.get(data, headers = mapOf("User-Agent" to userAgent)).document
         
         doc.select("a").forEach { el ->
             val href = el.attr("href")
@@ -183,7 +169,7 @@ class IsaidubProvider : MainAPI() {
                 extractFromDownloadPage(fullUrl, callback)
             } else if (href.contains("/movie/") && !href.endsWith(data)) {
                 val fullUrl = if (href.startsWith("http")) href else "$mainUrl$href"
-                val subDoc = app.get(fullUrl.proxify()).document
+                val subDoc = app.get(fullUrl).document
                 subDoc.select("a[href*=/download/page/]").forEach { subEl ->
                     val subHref = subEl.attr("href")
                     val dlUrl = if (subHref.startsWith("http")) subHref else "$mainUrl$subHref"
@@ -195,7 +181,7 @@ class IsaidubProvider : MainAPI() {
     }
 
     private suspend fun extractFromDownloadPage(url: String, callback: (ExtractorLink) -> Unit) {
-        val doc = app.get(url.proxify(), headers = mapOf("User-Agent" to userAgent)).document
+        val doc = app.get(url, headers = mapOf("User-Agent" to userAgent)).document
         
         doc.select("a").forEach { el ->
             val href = el.attr("href")
