@@ -16,7 +16,7 @@ import org.jsoup.nodes.TextNode
 class TamilMVProvider : MainAPI() {
     override var mainUrl = "https://www.1tamilmv.cards"
     override var name = "TamilMV"
-    override val hasMainPage = true // Set to true: dynamic feeds implemented securely
+    override val hasMainPage = true
     override var lang = "ta"
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
 
@@ -107,7 +107,7 @@ class TamilMVProvider : MainAPI() {
         val searchUrl = "$mainUrl/index.php?/search/&q=${java.net.URLEncoder.encode(query, "UTF-8")}&type=forums_topic&search_in=titles&sortby=relevancy"
         val response = app.get(searchUrl, headers = mapOf("User-Agent" to userAgent))
         
-        if (response.isSuccessful) {
+        if (response.text.isNotBlank()) {
             val doc = response.document
             // Scrape topics from standard IPS stream components
             val streamItems = doc.select(".ipsStreamItem_title a, a[data-searchable]")
