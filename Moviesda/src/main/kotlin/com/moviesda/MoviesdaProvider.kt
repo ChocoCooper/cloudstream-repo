@@ -15,7 +15,7 @@ import java.util.Calendar
 class MoviesdaProvider : MainAPI() {
     override var mainUrl = "https://moviesda31.com"
     override var name = "Moviesda"
-    override val hasMainPage = true // Set to true: dynamic feeds implemented securely
+    override val hasMainPage = true 
     override var lang = "ta"
     override val supportedTypes = setOf(TvType.Movie)
 
@@ -106,7 +106,7 @@ class MoviesdaProvider : MainAPI() {
         for (year in yearsToTry) {
             val directUrl = "$mainUrl/$slug-$year-tamil-movie/"
             val response = app.get(directUrl, headers = mapOf("User-Agent" to userAgent))
-            if (response.isSuccessful && response.text.contains("movie")) {
+            if (response.text.contains("movie")) {
                 val poster = fetchTmdbPoster(cleanQuery, year)
                 results.add(newMovieSearchResponse("$cleanQuery ($year)", directUrl, TvType.Movie) {
                     this.posterUrl = poster
@@ -123,22 +123,25 @@ class MoviesdaProvider : MainAPI() {
             )
 
             for (categoryUrl in categoriesToCheck) {
-                val doc = app.get(categoryUrl, headers = mapOf("User-Agent" to userAgent)).document
-                val items = doc.select("a[href*=-tamil-movie], a[href*=-movie/]")
-                coroutineScope {
-                    items.map { el ->
-                        async {
-                            val href = el.attr("href")
-                            val text = el.text().trim()
-                            if (href.isNotBlank() && text.contains(cleanQuery, ignoreCase = true) && !href.contains("/tamil-movies/")) {
-                                val fullUrl = if (href.startsWith("http")) href else "$mainUrl$href"
-                                val poster = fetchTmdbPoster(text, null)
-                                results.add(newMovieSearchResponse(text, fullUrl, TvType.Movie) {
-                                    this.posterUrl = poster
-                                })
+                val response = app.get(categoryUrl, headers = mapOf("User-Agent" to userAgent))
+                if(response.text.isNotBlank()) {
+                    val doc = response.document
+                    val items = doc.select("a[href*=-tamil-movie], a[href*=-movie/]")
+                    coroutineScope {
+                        items.map { el ->
+                            async {
+                                val href = el.attr("href")
+                                val text = el.text().trim()
+                                if (href.isNotBlank() && text.contains(cleanQuery, ignoreCase = true) && !href.contains("/tamil-movies/")) {
+                                    val fullUrl = if (href.startsWith("http")) href else "$mainUrl$href"
+                                    val poster = fetchTmdbPoster(text, null)
+                                    results.add(newMovieSearchResponse(text, fullUrl, TvType.Movie) {
+                                        this.posterUrl = poster
+                                    })
+                                }
                             }
-                        }
-                    }.awaitAll()
+                        }.awaitAll()
+                    }
                 }
             }
         }
