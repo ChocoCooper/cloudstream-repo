@@ -2,6 +2,7 @@ package com.isaidub // Adjust package name to match your repository
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import com.lagradost.nicehttp.NiceResponse
 import org.jsoup.Jsoup
 import java.net.URI
 import java.net.URLEncoder
@@ -36,7 +37,7 @@ class IsaidubProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        var tmdbJson: AppResponse? = null
+        var tmdbJson: NiceResponse? = null
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
 
         // Try TMDB endpoints in order until one succeeds
@@ -106,7 +107,7 @@ class IsaidubProvider : MainAPI() {
             val finalLink = extractFinalLink(res.url, 0, mutableSetOf())
             if (finalLink != null) {
                 callback.invoke(
-                    ExtractorLink(
+                    newExtractorLink(
                         source = this.name,
                         name = res.label, // Shows "Movie (720p HD)" in the Cloudstream player
                         url = finalLink,
