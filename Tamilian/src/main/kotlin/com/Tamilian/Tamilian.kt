@@ -1,5 +1,6 @@
 package com.Tamilian
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.HomePageList
 import com.lagradost.cloudstream3.HomePageResponse
@@ -40,7 +41,6 @@ class Tamilian : MainAPI() {
             "da63548086e399ffc910fbc08526df05"
         )
         
-        // Remote Proxylist to bypass ISP Blocks
         private val proxies = listOf(
             "https://ancient-violet-1ee6.phisher12.workers.dev",
             "https://autumn-limit-1fea.phisher53.workers.dev",
@@ -50,8 +50,9 @@ class Tamilian : MainAPI() {
         )
     }
 
+    // FIXED: Only proxify the main site to bypass ISP block. Never proxify external video links!
     private fun String.proxify(): String {
-        if (this.contains("tmdb.org") || this.contains("workers.dev")) return this
+        if (this.contains("tmdb.org") || this.contains("workers.dev") || !this.contains(mainUrl)) return this
         return "${proxies.random()}/$this"
     }
 
@@ -284,7 +285,7 @@ class Tamilian : MainAPI() {
             )
 
             val videoDataRes = app.post(
-                "$embedHost/player/index.php?data=$token&do=getVideo".proxify(),
+                "$embedHost/player/index.php?data=$token&do=getVideo",
                 headers = postHeaders
             )
 
@@ -331,25 +332,31 @@ class Tamilian : MainAPI() {
         return false
     }
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
     data class LinkResponse(
         @JsonProperty("link") val link: String?
     )
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
     data class Track(
         @JsonProperty("file") val file: String?,
         @JsonProperty("label") val label: String?,
         @JsonProperty("kind") val kind: String?
     )
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
     data class VideoData(
         @JsonProperty("videoSource") val videoSource: String?,
         @JsonProperty("tracks") val tracks: List<Track>?
     )
 
+    // FIXED: IgnoreUnknown ensures Jackson won't crash when TMDB returns extra data
+    @JsonIgnoreProperties(ignoreUnknown = true)
     data class TmdbSearchResponse(
         @JsonProperty("results") val results: List<TmdbMovie>?
     )
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
     data class TmdbMovie(
         @JsonProperty("poster_path") val poster_path: String?,
         @JsonProperty("original_language") val original_language: String?
