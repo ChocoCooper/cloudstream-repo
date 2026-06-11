@@ -16,7 +16,7 @@ import org.jsoup.nodes.Document
 class IsaidubProvider : MainAPI() {
     override var mainUrl = "https://isaidub.guru"
     override var name = "Isaidub"
-    override val hasMainPage = true // Set to true: dynamic feeds implemented securely
+    override val hasMainPage = true 
     override var lang = "ta"
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
 
@@ -101,25 +101,28 @@ class IsaidubProvider : MainAPI() {
         
         // 1. Native Search Form Query
         val searchUrl = "$mainUrl/search.php?find=${java.net.URLEncoder.encode(query, "UTF-8")}"
-        val doc = app.get(searchUrl, headers = mapOf("User-Agent" to userAgent)).document
+        val response = app.get(searchUrl, headers = mapOf("User-Agent" to userAgent))
         
-        val foundElements = doc.select("a[href*='/movie/']")
-        if (foundElements.isNotEmpty()) {
-            coroutineScope {
-                foundElements.map { el ->
-                    async {
-                        val href = el.attr("href")
-                        val text = el.text().trim()
-                        if (href.isNotBlank() && text.isNotBlank() && !href.contains("search.php")) {
-                            val fullUrl = if (href.startsWith("http")) href else "$mainUrl$href"
-                            val cleanTitle = text.substringBefore("(").trim()
-                            val poster = fetchTmdbPoster(cleanTitle, null)
-                            results.add(newMovieSearchResponse(text, fullUrl, TvType.Movie) {
-                                this.posterUrl = poster
-                            })
+        if (response.text.isNotBlank()) {
+            val doc = response.document
+            val foundElements = doc.select("a[href*='/movie/']")
+            if (foundElements.isNotEmpty()) {
+                coroutineScope {
+                    foundElements.map { el ->
+                        async {
+                            val href = el.attr("href")
+                            val text = el.text().trim()
+                            if (href.isNotBlank() && text.isNotBlank() && !href.contains("search.php")) {
+                                val fullUrl = if (href.startsWith("http")) href else "$mainUrl$href"
+                                val cleanTitle = text.substringBefore("(").trim()
+                                val poster = fetchTmdbPoster(cleanTitle, null)
+                                results.add(newMovieSearchResponse(text, fullUrl, TvType.Movie) {
+                                    this.posterUrl = poster
+                                })
+                            }
                         }
-                    }
-                }.awaitAll()
+                    }.awaitAll()
+                }
             }
         }
 
@@ -131,8 +134,8 @@ class IsaidubProvider : MainAPI() {
             
             suffixes.forEach { suffix ->
                 val guessUrl = "$mainUrl/movie/$slug$suffix/"
-                val response = app.get(guessUrl, headers = mapOf("User-Agent" to userAgent))
-                if (response.isSuccessful) {
+                val guessResponse = app.get(guessUrl, headers = mapOf("User-Agent" to userAgent))
+                if (guessResponse.text.isNotBlank()) {
                     results.add(newMovieSearchResponse(cleanQuery, guessUrl, TvType.Movie))
                 }
             }
