@@ -31,10 +31,24 @@ class IsaidubProvider : MainAPI() {
             "8cf43ad9c085135b9479ad5cf6bbcbda",
             "da63548086e399ffc910fbc08526df05"
         )
+        
+        // Remote Proxylist to bypass ISP Blocks
+        private val proxies = listOf(
+            "https://ancient-violet-1ee6.phisher12.workers.dev",
+            "https://autumn-limit-1fea.phisher53.workers.dev",
+            "https://wispy-bar-8fbe.phisher2.workers.dev",
+            "https://orange-voice-abcf.phisher16.workers.dev",
+            "https://icy-king-bff2.phisher40.workers.dev"
+        )
+    }
+
+    private fun String.proxify(): String {
+        if (this.contains("tmdb.org") || this.contains("workers.dev")) return this
+        return "${proxies.random()}/$this"
     }
 
     private fun cleanTitleForSearch(title: String): String {
-        return title.replace(Regex("(?i)\\b(tamil|dubbed|movie|series|web|hdrip|bdrip|webrip|hd|720p|1080p|mp4|mkv|esub|tcrip|dvdrip|mux|x264|hevc|h264|1cd|2cd|dvd)\\b"), "")
+        return title.substringBefore("(").replace(Regex("(?i)\\b(tamil|dubbed|movie|series|web|hdrip|bdrip|webrip|hd|720p|1080p|mp4|mkv|esub|tcrip|dvdrip|mux|x264|hevc|h264|1cd|2cd|dvd)\\b"), "")
             .replace(Regex("[^a-zA-Z0-9\\s]"), " ")
             .replace(Regex("\\s+"), " ")
             .trim()
@@ -74,7 +88,7 @@ class IsaidubProvider : MainAPI() {
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val doc = app.get(mainUrl, headers = mapOf("User-Agent" to userAgent)).document
+        val doc = app.get(mainUrl.proxify(), headers = mapOf("User-Agent" to userAgent)).document
         val scraped = mutableListOf<SearchResponse>()
 
         val elements = doc.select("a[href*='/movie/']").take(24)
@@ -101,7 +115,7 @@ class IsaidubProvider : MainAPI() {
         
         // 1. Native Search Form Query
         val searchUrl = "$mainUrl/search.php?find=${java.net.URLEncoder.encode(query, "UTF-8")}"
-        val response = app.get(searchUrl, headers = mapOf("User-Agent" to userAgent))
+        val response = app.get(searchUrl.proxify(), headers = mapOf("User-Agent" to userAgent))
         
         if (response.text.isNotBlank()) {
             val doc = response.document
@@ -114,7 +128,7 @@ class IsaidubProvider : MainAPI() {
                             val text = el.text().trim()
                             if (href.isNotBlank() && text.isNotBlank() && !href.contains("search.php")) {
                                 val fullUrl = if (href.startsWith("http")) href else "$mainUrl$href"
-                                val cleanTitle = text.substringBefore("(").trim()
+                                val cleanTitle = cleanTitleForSearch(text)
                                 val poster = fetchTmdbPoster(cleanTitle, null)
                                 results.add(newMovieSearchResponse(text, fullUrl, TvType.Movie) {
                                     this.posterUrl = poster
@@ -134,7 +148,7 @@ class IsaidubProvider : MainAPI() {
             
             suffixes.forEach { suffix ->
                 val guessUrl = "$mainUrl/movie/$slug$suffix/"
-                val guessResponse = app.get(guessUrl, headers = mapOf("User-Agent" to userAgent))
+                val guessResponse = app.get(guessUrl.proxify(), headers = mapOf("User-Agent" to userAgent))
                 if (guessResponse.text.isNotBlank()) {
                     results.add(newMovieSearchResponse(cleanQuery, guessUrl, TvType.Movie))
                 }
@@ -145,7 +159,7 @@ class IsaidubProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val doc = app.get(url, headers = mapOf("User-Agent" to userAgent)).document
+        val doc = app.get(url.proxify(), headers = mapOf("User-Agent" to userAgent)).document
         val title = doc.selectFirst("title")?.text()?.substringBefore("-")?.trim() ?: "Unknown"
         val year = Regex("\\b(19|20)\\d{2}\\b").find(title)?.value?.toIntOrNull()
         val poster = fetchTmdbPoster(title, year)
@@ -161,7 +175,7 @@ class IsaidubProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val doc = app.get(data, headers = mapOf("User-Agent" to userAgent)).document
+        val doc = app.get(data.proxify(), headers = mapOf("User-Agent" to userAgent)).document
         
         doc.select("a").forEach { el ->
             val href = el.attr("href")
@@ -170,7 +184,7 @@ class IsaidubProvider : MainAPI() {
                 extractFromDownloadPage(fullUrl, callback)
             } else if (href.contains("/movie/") && !href.endsWith(data)) {
                 val fullUrl = if (href.startsWith("http")) href else "$mainUrl$href"
-                val subDoc = app.get(fullUrl).document
+                val subDoc = app.get(fullUrl.proxify()).document
                 subDoc.select("a[href*=/download/page/]").forEach { subEl ->
                     val subHref = subEl.attr("href")
                     val dlUrl = if (subHref.startsWith("http")) subHref else "$mainUrl$subHref"
@@ -182,7 +196,7 @@ class IsaidubProvider : MainAPI() {
     }
 
     private suspend fun extractFromDownloadPage(url: String, callback: (ExtractorLink) -> Unit) {
-        val doc = app.get(url, headers = mapOf("User-Agent" to userAgent)).document
+        val doc = app.get(url.proxify(), headers = mapOf("User-Agent" to userAgent)).document
         
         doc.select("a").forEach { el ->
             val href = el.attr("href")
@@ -194,7 +208,7 @@ class IsaidubProvider : MainAPI() {
     }
 
     private suspend fun extractFromEmbed(embedUrl: String, callback: (ExtractorLink) -> Unit) {
-        val response = app.get(embedUrl, headers = mapOf("Referer" to mainUrl))
+        val response = app.get(embedUrl.proxify(), headers = mapOf("Referer" to mainUrl))
         val html = response.text
         
         val doc = org.jsoup.Jsoup.parse(html)
@@ -218,8 +232,10 @@ class IsaidubProvider : MainAPI() {
         val searchHtml = unpackedHtml.ifBlank { html }
 
         val patterns = listOf(
-            Regex("[\"']hls[2-4][\"']\\s*:\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE),
+            Regex("[\"']hls[2-4]?[\"']\\s*:\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE),
             Regex("sources\\s*:\\s*\\[\\s*\\{\\s*file\\s*:\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE),
+            Regex("file[\"']?\\s*:\\s*[\"'](https?://[^\"']+\\.m3u8[^\"']*)[\"']", RegexOption.IGNORE_CASE),
+            Regex("file[\"']?\\s*:\\s*[\"'](https?://[^\"']+\\.mp4[^\"']*)[\"']", RegexOption.IGNORE_CASE),
             Regex("https?://[^\\s\"']+\\.m3u8[^\\s\"']*", RegexOption.IGNORE_CASE),
             Regex("https?://[^\\s\"']+\\.mp4[^\\s\"']*", RegexOption.IGNORE_CASE)
         )
@@ -237,7 +253,7 @@ class IsaidubProvider : MainAPI() {
                     newExtractorLink(
                         source = this.name,
                         name = "Isaidub Embed",
-                        url = videoUrl,
+                        url = videoUrl, // Important: Exoplayer needs raw URL, so do not proxify this
                         type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                     ) {
                         this.referer = mainUrl
