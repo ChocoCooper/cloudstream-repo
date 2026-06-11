@@ -227,7 +227,7 @@ class Tamilian : MainAPI() {
 
         val serverApiUrl = "$mainUrl/ajax/movie/episode/servers/${movieId}_1_full"
         val servRes = app.get(serverApiUrl, headers = ajaxHeaders)
-        if (!servRes.isSuccessful) return false
+        if (servRes.text.isBlank()) return false
 
         val serverBtns = servRes.document.select("a[data-id]")
         if (serverBtns.isEmpty()) return false
@@ -247,7 +247,7 @@ class Tamilian : MainAPI() {
 
         val sourcesUrl = "$mainUrl/ajax/movie/episode/server/sources/$fullDataId"
         val sourceRes = app.get(sourcesUrl, headers = ajaxHeaders)
-        if (!sourceRes.isSuccessful) return false
+        if (sourceRes.text.isBlank()) return false
 
         var finalLink: String? = null
         try { finalLink = sourceRes.parsedSafe<LinkResponse>()?.link } catch (e: Exception) {}
