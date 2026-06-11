@@ -64,8 +64,8 @@ class IsaidubProvider : MainAPI() {
             val year = item.release_date?.split("-")?.firstOrNull() ?: ""
             val posterUrl = if (item.poster_path != null) "https://image.tmdb.org/t/p/w500${item.poster_path}" else ""
 
-            // Pack the TMDB data into a custom string so load() and loadLinks() can use it
-            val targetData = "$title||$year||$posterUrl"
+            // Explicitly prepend mainUrl to prevent Cloudstream from malforming the data payload
+            val targetData = "$mainUrl/${title}||${year}||${posterUrl}"
 
             results.add(newMovieSearchResponse(title, targetData) {
                 this.posterUrl = posterUrl
@@ -76,15 +76,17 @@ class IsaidubProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val parts = url.split("||")
-        if (parts.size < 2) return null
+        // Strip the mainUrl prefix we added in search()
+        val cleanData = url.substringAfter("$mainUrl/")
+        val parts = cleanData.split("||")
+        if (parts.isEmpty()) return null
         
-        val title = parts[0]
-        val year = parts[1]
-        val posterUrl = if (parts.size > 2 && parts[2].isNotBlank()) parts[2] else null
+        val title = parts.getOrNull(0) ?: return null
+        val year = parts.getOrNull(1) ?: ""
+        val posterUrl = parts.getOrNull(2).takeIf { !it.isNullOrBlank() }
 
-        // Pass the packed data straight to loadLinks via the url parameter
-        return newMovieLoadResponse(title, url, TvType.Movie, url) {
+        // Pass the cleaned URL data forward
+        return newMovieLoadResponse(title, cleanData, TvType.Movie, cleanData) {
             this.posterUrl = posterUrl
             this.year = year.toIntOrNull()
         }
@@ -96,9 +98,11 @@ class IsaidubProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val parts = data.split("||")
-        val title = parts[0]
-        val year = parts[1]
+        val cleanData = data.substringAfter("$mainUrl/")
+        val parts = cleanData.split("||")
+        
+        val title = parts.getOrNull(0) ?: return false
+        val year = parts.getOrNull(1) ?: ""
 
         val targetUrl = findIsaidubMoviePage(title, year) ?: return false
         val resolutions = getResolutions(targetUrl)
@@ -108,7 +112,6 @@ class IsaidubProvider : MainAPI() {
             if (finalLink != null) {
                 val isM3u8 = finalLink.contains(".m3u8", ignoreCase = true)
                 
-                // Using the updated Cloudstream DSL syntax
                 callback.invoke(
                     newExtractorLink(
                         source = this.name,
