@@ -15,8 +15,7 @@ import org.jsoup.nodes.Element
 import org.jsoup.nodes.TextNode
 
 class TamilMVProvider : MainAPI() {
-    // FIXED: Updated to latest active domain mirror
-    override var mainUrl = "https://www.1tamilmv.cards"
+    override var mainUrl = "https://www.1tamilmv.cards" // Domain Restored
     override var name = "TamilMV"
     override val hasMainPage = true 
     override var lang = "ta"
@@ -33,19 +32,6 @@ class TamilMVProvider : MainAPI() {
             "8cf43ad9c085135b9479ad5cf6bbcbda",
             "da63548086e399ffc910fbc08526df05"
         )
-        
-        private val proxies = listOf(
-            "https://ancient-violet-1ee6.phisher12.workers.dev",
-            "https://autumn-limit-1fea.phisher53.workers.dev",
-            "https://wispy-bar-8fbe.phisher2.workers.dev",
-            "https://orange-voice-abcf.phisher16.workers.dev",
-            "https://icy-king-bff2.phisher40.workers.dev"
-        )
-    }
-
-    private fun String.proxify(): String {
-        if (this.contains("tmdb.org") || this.contains("workers.dev") || !this.contains(mainUrl)) return this
-        return "${proxies.random()}/$this"
     }
 
     private fun cleanTitleForSearch(title: String): String {
@@ -94,7 +80,7 @@ class TamilMVProvider : MainAPI() {
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val doc = app.get(mainUrl.proxify(), headers = mapOf("User-Agent" to userAgent)).document
+        val doc = app.get(mainUrl, headers = mapOf("User-Agent" to userAgent)).document
         val scraped = mutableListOf<SearchResponse>()
 
         val elements = doc.select("a").filter { it.text().contains("[WATCH]") }.take(20)
@@ -120,7 +106,7 @@ class TamilMVProvider : MainAPI() {
         val results = mutableListOf<SearchResponse>()
         
         val searchUrl = "$mainUrl/index.php?/search/&q=${java.net.URLEncoder.encode(query, "UTF-8")}&type=forums_topic&search_in=titles&sortby=relevancy"
-        val response = app.get(searchUrl.proxify(), headers = mapOf("User-Agent" to userAgent))
+        val response = app.get(searchUrl, headers = mapOf("User-Agent" to userAgent))
         
         if (response.text.isNotBlank()) {
             val doc = response.document
@@ -146,7 +132,7 @@ class TamilMVProvider : MainAPI() {
 
         if (results.isEmpty()) {
             val cleanQuery = query.lowercase().replace(Regex("[^a-z0-9]"), "")
-            val doc = app.get(mainUrl.proxify(), headers = mapOf("User-Agent" to userAgent)).document
+            val doc = app.get(mainUrl, headers = mapOf("User-Agent" to userAgent)).document
 
             doc.select("a").filter { it.text().contains("[WATCH]") }.forEach { el ->
                 val watchUrl = el.attr("href")
@@ -229,7 +215,7 @@ class TamilMVProvider : MainAPI() {
         val ajaxUrl = "$host/ajax/stream?filecode=$filecode"
 
         val response = app.get(
-            ajaxUrl, // Removed proxy for external stream server
+            ajaxUrl, 
             headers = mapOf(
                 "X-Requested-With" to "XMLHttpRequest",
                 "Referer" to embedUrl,
