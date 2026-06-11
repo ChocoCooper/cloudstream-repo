@@ -16,7 +16,7 @@ import org.jsoup.nodes.TextNode
 class TamilMVProvider : MainAPI() {
     override var mainUrl = "https://www.1tamilmv.cards"
     override var name = "TamilMV"
-    override val hasMainPage = true
+    override val hasMainPage = true 
     override var lang = "ta"
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
 
@@ -31,10 +31,24 @@ class TamilMVProvider : MainAPI() {
             "8cf43ad9c085135b9479ad5cf6bbcbda",
             "da63548086e399ffc910fbc08526df05"
         )
+        
+        // Remote Proxylist to bypass ISP Blocks
+        private val proxies = listOf(
+            "https://ancient-violet-1ee6.phisher12.workers.dev",
+            "https://autumn-limit-1fea.phisher53.workers.dev",
+            "https://wispy-bar-8fbe.phisher2.workers.dev",
+            "https://orange-voice-abcf.phisher16.workers.dev",
+            "https://icy-king-bff2.phisher40.workers.dev"
+        )
+    }
+
+    private fun String.proxify(): String {
+        if (this.contains("tmdb.org") || this.contains("workers.dev")) return this
+        return "${proxies.random()}/$this"
     }
 
     private fun cleanTitleForSearch(title: String): String {
-        return title.replace(Regex("(?i)\\b(tamil|dubbed|movie|series|web|hdrip|bdrip|webrip|hd|720p|1080p|mp4|mkv|esub|tcrip|dvdrip|mux|x264|hevc|h264|1cd|2cd|dvd)\\b"), "")
+        return title.substringBefore("(").replace(Regex("(?i)\\b(tamil|dubbed|movie|series|web|hdrip|bdrip|webrip|hd|720p|1080p|mp4|mkv|esub|tcrip|dvdrip|mux|x264|hevc|h264|1cd|2cd|dvd)\\b"), "")
             .replace(Regex("[^a-zA-Z0-9\\s]"), " ")
             .replace(Regex("\\s+"), " ")
             .trim()
@@ -79,7 +93,7 @@ class TamilMVProvider : MainAPI() {
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val doc = app.get(mainUrl, headers = mapOf("User-Agent" to userAgent)).document
+        val doc = app.get(mainUrl.proxify(), headers = mapOf("User-Agent" to userAgent)).document
         val scraped = mutableListOf<SearchResponse>()
 
         val elements = doc.select("a").filter { it.text().contains("[WATCH]") }.take(20)
@@ -89,7 +103,8 @@ class TamilMVProvider : MainAPI() {
                     val watchUrl = el.attr("href")
                     if (watchUrl.isNotBlank()) {
                         val parsedTitle = el.text().substringBefore("[WATCH]").trim()
-                        val poster = fetchTmdbPoster(parsedTitle, null)
+                        val cleanTitle = cleanTitleForSearch(parsedTitle)
+                        val poster = fetchTmdbPoster(cleanTitle, null)
                         scraped.add(newMovieSearchResponse(parsedTitle, watchUrl, TvType.Movie) {
                             this.posterUrl = poster
                         })
@@ -105,7 +120,7 @@ class TamilMVProvider : MainAPI() {
         
         // 1. Native IPS Search Query (Queries the forum directory directly)
         val searchUrl = "$mainUrl/index.php?/search/&q=${java.net.URLEncoder.encode(query, "UTF-8")}&type=forums_topic&search_in=titles&sortby=relevancy"
-        val response = app.get(searchUrl, headers = mapOf("User-Agent" to userAgent))
+        val response = app.get(searchUrl.proxify(), headers = mapOf("User-Agent" to userAgent))
         
         if (response.text.isNotBlank()) {
             val doc = response.document
@@ -118,7 +133,7 @@ class TamilMVProvider : MainAPI() {
                             val url = el.attr("href")
                             val text = el.text().trim()
                             if (url.isNotBlank() && text.isNotBlank() && !url.contains("/profile/")) {
-                                val cleanTitle = text.substringBefore("[").trim()
+                                val cleanTitle = cleanTitleForSearch(text)
                                 val poster = fetchTmdbPoster(cleanTitle, null)
                                 results.add(newMovieSearchResponse(cleanTitle, url, TvType.Movie) {
                                     this.posterUrl = poster
@@ -133,7 +148,7 @@ class TamilMVProvider : MainAPI() {
         // 2. Fallback: Parse index listings
         if (results.isEmpty()) {
             val cleanQuery = query.lowercase().replace(Regex("[^a-z0-9]"), "")
-            val doc = app.get(mainUrl, headers = mapOf("User-Agent" to userAgent)).document
+            val doc = app.get(mainUrl.proxify(), headers = mapOf("User-Agent" to userAgent)).document
 
             doc.select("a").filter { it.text().contains("[WATCH]") }.forEach { el ->
                 val watchUrl = el.attr("href")
@@ -216,7 +231,7 @@ class TamilMVProvider : MainAPI() {
         val ajaxUrl = "$host/ajax/stream?filecode=$filecode"
 
         val response = app.get(
-            ajaxUrl, 
+            ajaxUrl.proxify(), 
             headers = mapOf(
                 "X-Requested-With" to "XMLHttpRequest",
                 "Referer" to embedUrl,
@@ -242,7 +257,7 @@ class TamilMVProvider : MainAPI() {
         val uri = java.net.URI(embedUrl)
         val embedBase = "${uri.scheme}://${uri.host}"
         
-        var responseRes = app.get(embedUrl, headers = mapOf("Referer" to mainUrl, "User-Agent" to userAgent))
+        var responseRes = app.get(embedUrl.proxify(), headers = mapOf("Referer" to mainUrl, "User-Agent" to userAgent))
         var html = responseRes.text
 
         // Landing page check & mirror fallback logic
@@ -252,7 +267,7 @@ class TamilMVProvider : MainAPI() {
                 if (uri.host.contains(mirror)) continue
                 
                 val mirrorUrl = embedUrl.replace(uri.host, mirror)
-                val mirrorRes = app.get(mirrorUrl, headers = mapOf("Referer" to mainUrl, "User-Agent" to userAgent))
+                val mirrorRes = app.get(mirrorUrl.proxify(), headers = mapOf("Referer" to mainUrl, "User-Agent" to userAgent))
                 val mirrorHtml = mirrorRes.text
                 
                 if (mirrorHtml.contains("jwplayer") || mirrorHtml.contains("sources") || mirrorHtml.contains("eval(function(p,a,c,k,e,d)")) {
@@ -267,8 +282,10 @@ class TamilMVProvider : MainAPI() {
 
         // Common patterns for video sources
         val patterns = listOf(
-            Regex("[\"']hls[2-4][\"']\\s*:\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE),
+            Regex("[\"']hls[2-4]?[\"']\\s*:\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE),
             Regex("sources\\s*:\\s*\\[\\s*\\{\\s*file\\s*:\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE),
+            Regex("file[\"']?\\s*:\\s*[\"'](https?://[^\"']+\\.m3u8[^\"']*)[\"']", RegexOption.IGNORE_CASE),
+            Regex("file[\"']?\\s*:\\s*[\"'](https?://[^\"']+\\.mp4[^\"']*)[\"']", RegexOption.IGNORE_CASE),
             Regex("https?://[^\\s\"']+\\.m3u8[^\\s\"']*", RegexOption.IGNORE_CASE),
             Regex("https?://[^\\s\"']+\\.mp4[^\\s\"']*", RegexOption.IGNORE_CASE)
         )
@@ -289,7 +306,7 @@ class TamilMVProvider : MainAPI() {
                 callback.invoke(newExtractorLink(
                     source = this.name,
                     name = "TamilMV Embed",
-                    url = videoUrl,
+                    url = videoUrl, // Explicitly DO NOT proxify the raw video link for Exoplayer
                     type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                 ) {
                     this.referer = mainUrl
