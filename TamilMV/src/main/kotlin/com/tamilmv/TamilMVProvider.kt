@@ -1,5 +1,6 @@
 package com.tamilmv
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
@@ -14,6 +15,7 @@ import org.jsoup.nodes.Element
 import org.jsoup.nodes.TextNode
 
 class TamilMVProvider : MainAPI() {
+    // FIXED: Updated to latest active domain mirror
     override var mainUrl = "https://www.1tamilmv.cards"
     override var name = "TamilMV"
     override val hasMainPage = true 
@@ -32,7 +34,6 @@ class TamilMVProvider : MainAPI() {
             "da63548086e399ffc910fbc08526df05"
         )
         
-        // Remote Proxylist to bypass ISP Blocks
         private val proxies = listOf(
             "https://ancient-violet-1ee6.phisher12.workers.dev",
             "https://autumn-limit-1fea.phisher53.workers.dev",
@@ -43,7 +44,7 @@ class TamilMVProvider : MainAPI() {
     }
 
     private fun String.proxify(): String {
-        if (this.contains("tmdb.org") || this.contains("workers.dev")) return this
+        if (this.contains("tmdb.org") || this.contains("workers.dev") || !this.contains(mainUrl)) return this
         return "${proxies.random()}/$this"
     }
 
@@ -87,7 +88,7 @@ class TamilMVProvider : MainAPI() {
         return null
     }
 
-    // Helper data class for Strmup AJAX response
+    @JsonIgnoreProperties(ignoreUnknown = true)
     data class StrmupResponse(
         @JsonProperty("streaming_url") val streamingUrl: String?
     )
@@ -118,13 +119,11 @@ class TamilMVProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         val results = mutableListOf<SearchResponse>()
         
-        // 1. Native IPS Search Query (Queries the forum directory directly)
         val searchUrl = "$mainUrl/index.php?/search/&q=${java.net.URLEncoder.encode(query, "UTF-8")}&type=forums_topic&search_in=titles&sortby=relevancy"
         val response = app.get(searchUrl.proxify(), headers = mapOf("User-Agent" to userAgent))
         
         if (response.text.isNotBlank()) {
             val doc = response.document
-            // Scrape topics from standard IPS stream components
             val streamItems = doc.select(".ipsStreamItem_title a, a[data-searchable]")
             if (streamItems.isNotEmpty()) {
                 coroutineScope {
@@ -145,7 +144,6 @@ class TamilMVProvider : MainAPI() {
             }
         }
 
-        // 2. Fallback: Parse index listings
         if (results.isEmpty()) {
             val cleanQuery = query.lowercase().replace(Regex("[^a-z0-9]"), "")
             val doc = app.get(mainUrl.proxify(), headers = mapOf("User-Agent" to userAgent)).document
@@ -231,7 +229,7 @@ class TamilMVProvider : MainAPI() {
         val ajaxUrl = "$host/ajax/stream?filecode=$filecode"
 
         val response = app.get(
-            ajaxUrl.proxify(), 
+            ajaxUrl, // Removed proxy for external stream server
             headers = mapOf(
                 "X-Requested-With" to "XMLHttpRequest",
                 "Referer" to embedUrl,
@@ -257,17 +255,16 @@ class TamilMVProvider : MainAPI() {
         val uri = java.net.URI(embedUrl)
         val embedBase = "${uri.scheme}://${uri.host}"
         
-        var responseRes = app.get(embedUrl.proxify(), headers = mapOf("Referer" to mainUrl, "User-Agent" to userAgent))
+        var responseRes = app.get(embedUrl, headers = mapOf("Referer" to mainUrl, "User-Agent" to userAgent))
         var html = responseRes.text
 
-        // Landing page check & mirror fallback logic
         if (html.contains("<title>Loading...</title>") || html.contains("Page is loading")) {
             val mirrors = listOf("yuguaab.com", "cavanhabg.com")
             for (mirror in mirrors) {
                 if (uri.host.contains(mirror)) continue
                 
                 val mirrorUrl = embedUrl.replace(uri.host, mirror)
-                val mirrorRes = app.get(mirrorUrl.proxify(), headers = mapOf("Referer" to mainUrl, "User-Agent" to userAgent))
+                val mirrorRes = app.get(mirrorUrl, headers = mapOf("Referer" to mainUrl, "User-Agent" to userAgent))
                 val mirrorHtml = mirrorRes.text
                 
                 if (mirrorHtml.contains("jwplayer") || mirrorHtml.contains("sources") || mirrorHtml.contains("eval(function(p,a,c,k,e,d)")) {
@@ -277,10 +274,8 @@ class TamilMVProvider : MainAPI() {
             }
         }
 
-        // Unpack obfuscation if present
         val unpackedHtml = getAndUnpack(html).ifBlank { html }
 
-        // Common patterns for video sources
         val patterns = listOf(
             Regex("[\"']hls[2-4]?[\"']\\s*:\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE),
             Regex("sources\\s*:\\s*\\[\\s*\\{\\s*file\\s*:\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE),
@@ -306,7 +301,7 @@ class TamilMVProvider : MainAPI() {
                 callback.invoke(newExtractorLink(
                     source = this.name,
                     name = "TamilMV Embed",
-                    url = videoUrl, // Explicitly DO NOT proxify the raw video link for Exoplayer
+                    url = videoUrl,
                     type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                 ) {
                     this.referer = mainUrl
@@ -317,10 +312,12 @@ class TamilMVProvider : MainAPI() {
         }
     }
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
     data class TmdbSearchResponse(
         @JsonProperty("results") val results: List<TmdbMovie>?
     )
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
     data class TmdbMovie(
         @JsonProperty("poster_path") val poster_path: String?
     )
