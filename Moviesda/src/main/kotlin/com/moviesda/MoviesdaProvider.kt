@@ -1,5 +1,6 @@
 package com.moviesda
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
@@ -31,7 +32,6 @@ class MoviesdaProvider : MainAPI() {
             "da63548086e399ffc910fbc08526df05"
         )
 
-        // Remote Proxylist to bypass ISP Blocks
         private val proxies = listOf(
             "https://ancient-violet-1ee6.phisher12.workers.dev",
             "https://autumn-limit-1fea.phisher53.workers.dev",
@@ -42,7 +42,7 @@ class MoviesdaProvider : MainAPI() {
     }
 
     private fun String.proxify(): String {
-        if (this.contains("tmdb.org") || this.contains("workers.dev")) return this
+        if (this.contains("tmdb.org") || this.contains("workers.dev") || !this.contains(mainUrl)) return this
         return "${proxies.random()}/$this"
     }
 
@@ -87,7 +87,8 @@ class MoviesdaProvider : MainAPI() {
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val doc = app.get(mainUrl.proxify(), headers = mapOf("User-Agent" to userAgent)).document
+        val response = app.get(mainUrl.proxify(), headers = mapOf("User-Agent" to userAgent))
+        val doc = response.document
         val scraped = mutableListOf<SearchResponse>()
         val elements = doc.select("a[href*=-tamil-movie], a[href*=-movie/]").take(24)
 
@@ -116,7 +117,6 @@ class MoviesdaProvider : MainAPI() {
         val slug = cleanQuery.lowercase().replace(Regex("[^a-z0-9\\s]"), "").replace(Regex("\\s+"), "-")
         val currentYear = Calendar.getInstance().get(Calendar.YEAR)
         
-        // 1. Direct URL Guessing
         val yearsToTry = listOf(currentYear, currentYear - 1, currentYear + 1, currentYear - 2)
         for (year in yearsToTry) {
             val directUrl = "$mainUrl/$slug-$year-tamil-movie/"
@@ -130,7 +130,6 @@ class MoviesdaProvider : MainAPI() {
             }
         }
 
-        // 2. Category Browsing Fallback
         if (results.isEmpty()) {
             val categoriesToCheck = listOf(
                 "$mainUrl/tamil-$currentYear-movies/",
@@ -241,10 +240,9 @@ class MoviesdaProvider : MainAPI() {
     }
 
     private suspend fun extractFromEmbed(embedUrl: String, callback: (ExtractorLink) -> Unit) {
-        val response = app.get(embedUrl.proxify(), headers = mapOf("Referer" to mainUrl, "User-Agent" to userAgent))
+        val response = app.get(embedUrl, headers = mapOf("Referer" to mainUrl, "User-Agent" to userAgent))
         val html = response.text
 
-        // 1. Check for standard video tags
         val doc = org.jsoup.Jsoup.parse(html)
         doc.select("video source").forEach { el ->
             val src = el.attr("src")
@@ -263,10 +261,8 @@ class MoviesdaProvider : MainAPI() {
             }
         }
 
-        // 2. Unpack Packer obfuscation if present
         val unpackedHtml = getAndUnpack(html).ifBlank { html }
 
-        // 3. Regex fallback matching extra JS patterns
         val patterns = listOf(
             Regex("[\"']hls[2-4]?[\"']\\s*:\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE),
             Regex("sources\\s*:\\s*\\[\\s*\\{\\s*file\\s*:\\s*[\"']([^\"']+)[\"']", RegexOption.IGNORE_CASE),
@@ -288,7 +284,7 @@ class MoviesdaProvider : MainAPI() {
                 callback.invoke(newExtractorLink(
                     source = this.name,
                     name = "Moviesda Embed",
-                    url = videoUrl, // Explicitly DO NOT proxify the raw video link for Exoplayer
+                    url = videoUrl,
                     type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                 ) {
                     this.referer = mainUrl
@@ -299,10 +295,12 @@ class MoviesdaProvider : MainAPI() {
         }
     }
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
     data class TmdbSearchResponse(
         @JsonProperty("results") val results: List<TmdbMovie>?
     )
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
     data class TmdbMovie(
         @JsonProperty("poster_path") val poster_path: String?
     )
