@@ -55,23 +55,34 @@ class IsaidubProvider : MainAPI() {
         }
 
         if (tmdbJson == null) return emptyList()
-
-        val results = arrayListOf<SearchResponse>()
         val parsed = AppUtils.parseJson<TmdbSearchResponse>(tmdbJson.text)
 
-        parsed.results?.forEach { item ->
-            val title = item.title ?: item.name ?: return@forEach
+        // 1. Filter out no-poster junk and limit to top 8 to prevent rate-limiting Isaidub
+        val validTmdbResults = parsed.results?.filter { it.poster_path != null }?.take(8) ?: emptyList()
+
+        // 2. Use 'amap' (Async Map) to concurrently verify if the movie actually exists on Isaidub
+        val results = validTmdbResults.amap { item ->
+            val title = item.title ?: item.name ?: return@amap null
             val year = item.release_date?.split("-")?.firstOrNull() ?: ""
-            val posterUrl = if (item.poster_path != null) "https://image.tmdb.org/t/p/w500${item.poster_path}" else ""
+            
+            // STRICT CHECK: Does it exist on Isaidub?
+            val existsOnIsaidub = findIsaidubMoviePage(title, year) != null
+            
+            if (existsOnIsaidub) {
+                val posterUrl = "https://image.tmdb.org/t/p/w500${item.poster_path}"
+                
+                // Explicitly prepend mainUrl to prevent Cloudstream from malforming the data payload
+                val targetData = "$mainUrl/${title}||${year}||${posterUrl}"
 
-            // Explicitly prepend mainUrl to prevent Cloudstream from malforming the data payload
-            val targetData = "$mainUrl/${title}||${year}||${posterUrl}"
+                newMovieSearchResponse(title, targetData) {
+                    this.posterUrl = posterUrl
+                    this.year = year.toIntOrNull()
+                }
+            } else {
+                null // Drop it from search results if Isaidub doesn't have it
+            }
+        }.filterNotNull()
 
-            results.add(newMovieSearchResponse(title, targetData) {
-                this.posterUrl = posterUrl
-                this.year = year.toIntOrNull()
-            })
-        }
         return results
     }
 
@@ -98,6 +109,7 @@ class IsaidubProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        // Strip the mainUrl prefix we added in search()
         val cleanData = data.substringAfter("$mainUrl/")
         val parts = cleanData.split("||")
         
@@ -112,6 +124,7 @@ class IsaidubProvider : MainAPI() {
             if (finalLink != null) {
                 val isM3u8 = finalLink.contains(".m3u8", ignoreCase = true)
                 
+                // Using the updated Cloudstream DSL syntax
                 callback.invoke(
                     newExtractorLink(
                         source = this.name,
