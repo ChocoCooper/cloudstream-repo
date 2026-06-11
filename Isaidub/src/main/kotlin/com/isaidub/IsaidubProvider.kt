@@ -1,5 +1,6 @@
 package com.isaidub
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
@@ -14,6 +15,7 @@ import kotlinx.coroutines.coroutineScope
 import org.jsoup.nodes.Document
 
 class IsaidubProvider : MainAPI() {
+    // FIXED: Updated to latest active domain
     override var mainUrl = "https://isaidub.guru"
     override var name = "Isaidub"
     override val hasMainPage = true 
@@ -32,7 +34,6 @@ class IsaidubProvider : MainAPI() {
             "da63548086e399ffc910fbc08526df05"
         )
         
-        // Remote Proxylist to bypass ISP Blocks
         private val proxies = listOf(
             "https://ancient-violet-1ee6.phisher12.workers.dev",
             "https://autumn-limit-1fea.phisher53.workers.dev",
@@ -43,7 +44,7 @@ class IsaidubProvider : MainAPI() {
     }
 
     private fun String.proxify(): String {
-        if (this.contains("tmdb.org") || this.contains("workers.dev")) return this
+        if (this.contains("tmdb.org") || this.contains("workers.dev") || !this.contains(mainUrl)) return this
         return "${proxies.random()}/$this"
     }
 
@@ -113,7 +114,6 @@ class IsaidubProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         val results = mutableListOf<SearchResponse>()
         
-        // 1. Native Search Form Query
         val searchUrl = "$mainUrl/search.php?find=${java.net.URLEncoder.encode(query, "UTF-8")}"
         val response = app.get(searchUrl.proxify(), headers = mapOf("User-Agent" to userAgent))
         
@@ -140,7 +140,6 @@ class IsaidubProvider : MainAPI() {
             }
         }
 
-        // 2. Fallback: Slug Guessing & Parsing Categories
         if (results.isEmpty()) {
             val cleanQuery = query.replace(Regex("\\b(19|20)\\d{2}\\b"), "").trim()
             val slug = cleanQuery.lowercase().replace(Regex("[^a-z0-9]+"), "-").removeSuffix("-")
@@ -208,7 +207,7 @@ class IsaidubProvider : MainAPI() {
     }
 
     private suspend fun extractFromEmbed(embedUrl: String, callback: (ExtractorLink) -> Unit) {
-        val response = app.get(embedUrl.proxify(), headers = mapOf("Referer" to mainUrl))
+        val response = app.get(embedUrl, headers = mapOf("Referer" to mainUrl))
         val html = response.text
         
         val doc = org.jsoup.Jsoup.parse(html)
@@ -253,7 +252,7 @@ class IsaidubProvider : MainAPI() {
                     newExtractorLink(
                         source = this.name,
                         name = "Isaidub Embed",
-                        url = videoUrl, // Important: Exoplayer needs raw URL, so do not proxify this
+                        url = videoUrl,
                         type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                     ) {
                         this.referer = mainUrl
@@ -265,10 +264,12 @@ class IsaidubProvider : MainAPI() {
         }
     }
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
     data class TmdbSearchResponse(
         @JsonProperty("results") val results: List<TmdbMovie>?
     )
 
+    @JsonIgnoreProperties(ignoreUnknown = true)
     data class TmdbMovie(
         @JsonProperty("poster_path") val poster_path: String?
     )
