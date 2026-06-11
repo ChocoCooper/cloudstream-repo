@@ -31,19 +31,6 @@ class MoviesdaProvider : MainAPI() {
             "8cf43ad9c085135b9479ad5cf6bbcbda",
             "da63548086e399ffc910fbc08526df05"
         )
-
-        private val proxies = listOf(
-            "https://ancient-violet-1ee6.phisher12.workers.dev",
-            "https://autumn-limit-1fea.phisher53.workers.dev",
-            "https://wispy-bar-8fbe.phisher2.workers.dev",
-            "https://orange-voice-abcf.phisher16.workers.dev",
-            "https://icy-king-bff2.phisher40.workers.dev"
-        )
-    }
-
-    private fun String.proxify(): String {
-        if (this.contains("tmdb.org") || this.contains("workers.dev") || !this.contains(mainUrl)) return this
-        return "${proxies.random()}/$this"
     }
 
     private fun cleanTitleForSearch(title: String): String {
@@ -87,7 +74,7 @@ class MoviesdaProvider : MainAPI() {
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val response = app.get(mainUrl.proxify(), headers = mapOf("User-Agent" to userAgent))
+        val response = app.get(mainUrl, headers = mapOf("User-Agent" to userAgent))
         val doc = response.document
         val scraped = mutableListOf<SearchResponse>()
         val elements = doc.select("a[href*=-tamil-movie], a[href*=-movie/]").take(24)
@@ -120,7 +107,7 @@ class MoviesdaProvider : MainAPI() {
         val yearsToTry = listOf(currentYear, currentYear - 1, currentYear + 1, currentYear - 2)
         for (year in yearsToTry) {
             val directUrl = "$mainUrl/$slug-$year-tamil-movie/"
-            val response = app.get(directUrl.proxify(), headers = mapOf("User-Agent" to userAgent))
+            val response = app.get(directUrl, headers = mapOf("User-Agent" to userAgent))
             if (response.text.contains("movie")) {
                 val poster = fetchTmdbPoster(cleanQuery, year)
                 results.add(newMovieSearchResponse("$cleanQuery ($year)", directUrl, TvType.Movie) {
@@ -137,7 +124,7 @@ class MoviesdaProvider : MainAPI() {
             )
 
             for (categoryUrl in categoriesToCheck) {
-                val response = app.get(categoryUrl.proxify(), headers = mapOf("User-Agent" to userAgent))
+                val response = app.get(categoryUrl, headers = mapOf("User-Agent" to userAgent))
                 if(response.text.isNotBlank()) {
                     val doc = response.document
                     val items = doc.select("a[href*=-tamil-movie], a[href*=-movie/]")
@@ -164,7 +151,7 @@ class MoviesdaProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val doc = app.get(url.proxify(), headers = mapOf("User-Agent" to userAgent)).document
+        val doc = app.get(url, headers = mapOf("User-Agent" to userAgent)).document
         val title = doc.selectFirst("title")?.text()?.substringBefore("-")?.trim() ?: "Unknown Movie"
         val year = Regex("\\b(19|20)\\d{2}\\b").find(title)?.value?.toIntOrNull()
         val poster = fetchTmdbPoster(title, year)
@@ -185,7 +172,7 @@ class MoviesdaProvider : MainAPI() {
     }
 
     private suspend fun drillDownForLinks(url: String, callback: (ExtractorLink) -> Unit) {
-        val doc = app.get(url.proxify(), headers = mapOf("User-Agent" to userAgent)).document
+        val doc = app.get(url, headers = mapOf("User-Agent" to userAgent)).document
 
         val originalLink = doc.selectFirst("a[href*=-original-movie]")?.attr("href")
         if (originalLink != null) {
@@ -217,7 +204,7 @@ class MoviesdaProvider : MainAPI() {
     }
 
     private suspend fun extractFinalDownloadUrl(url: String, callback: (ExtractorLink) -> Unit) {
-        val doc = app.get(url.proxify(), headers = mapOf("User-Agent" to userAgent)).document
+        val doc = app.get(url, headers = mapOf("User-Agent" to userAgent)).document
       
         doc.select("a").forEach { el ->
             val href = el.attr("href")
