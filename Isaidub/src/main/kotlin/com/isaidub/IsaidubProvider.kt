@@ -39,7 +39,6 @@ class IsaidubProvider : MainAPI() {
         var tmdbJson: NiceResponse? = null
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
 
-        // Try TMDB endpoints in order until one succeeds
         for (baseUrl in tmdbUrls) {
             try {
                 val url = "$baseUrl/search/movie?api_key=$tmdbApiKey&query=$encodedQuery"
@@ -48,29 +47,22 @@ class IsaidubProvider : MainAPI() {
                     tmdbJson = response
                     break
                 }
-            } catch (e: Exception) {
-                // Ignore and try the next mirror
-            }
+            } catch (e: Exception) { }
         }
 
         if (tmdbJson == null) return emptyList()
         val parsed = AppUtils.parseJson<TmdbSearchResponse>(tmdbJson.text)
 
-        // 1. Filter out no-poster junk and limit to top 8 to prevent rate-limiting Isaidub
         val validTmdbResults = parsed.results?.filter { it.poster_path != null }?.take(8) ?: emptyList()
 
-        // 2. Use 'amap' (Async Map) to concurrently verify if the movie actually exists on Isaidub
         val results = validTmdbResults.amap { item ->
             val title = item.title ?: item.name ?: return@amap null
             val year = item.release_date?.split("-")?.firstOrNull() ?: ""
             
-            // STRICT CHECK: Does it exist on Isaidub?
             val existsOnIsaidub = findIsaidubMoviePage(title, year) != null
             
             if (existsOnIsaidub) {
                 val posterUrl = "https://image.tmdb.org/t/p/w500${item.poster_path}"
-                
-                // Explicitly prepend mainUrl to prevent Cloudstream from malforming the data payload
                 val targetData = "$mainUrl/${title}||${year}||${posterUrl}"
 
                 newMovieSearchResponse(title, targetData) {
@@ -78,7 +70,7 @@ class IsaidubProvider : MainAPI() {
                     this.year = year.toIntOrNull()
                 }
             } else {
-                null // Drop it from search results if Isaidub doesn't have it
+                null
             }
         }.filterNotNull()
 
@@ -86,7 +78,6 @@ class IsaidubProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        // Strip the mainUrl prefix we added in search()
         val cleanData = url.substringAfter("$mainUrl/")
         val parts = cleanData.split("||")
         if (parts.isEmpty()) return null
@@ -95,7 +86,6 @@ class IsaidubProvider : MainAPI() {
         val year = parts.getOrNull(1) ?: ""
         val posterUrl = parts.getOrNull(2).takeIf { !it.isNullOrBlank() }
 
-        // Pass the cleaned URL data forward
         return newMovieLoadResponse(title, cleanData, TvType.Movie, cleanData) {
             this.posterUrl = posterUrl
             this.year = year.toIntOrNull()
@@ -108,7 +98,6 @@ class IsaidubProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // Strip the mainUrl prefix we added in search()
         val cleanData = data.substringAfter("$mainUrl/")
         val parts = cleanData.split("||")
         
@@ -123,7 +112,6 @@ class IsaidubProvider : MainAPI() {
             if (finalLink != null) {
                 val isM3u8 = finalLink.contains(".m3u8", ignoreCase = true)
                 
-                // Using the updated Cloudstream DSL syntax
                 callback.invoke(
                     newExtractorLink(
                         source = this.name,
@@ -140,22 +128,70 @@ class IsaidubProvider : MainAPI() {
         return true
     }
 
-    private suspend fun findIsaidubMoviePage(title: String, year: String): String? {
-        // Remove apostrophes and special characters to handle sites omitting them
-        val titleNoPunctuation = title.replace(Regex("[^a-zA-Z0-9 ]"), "")
+    // NEW: Intelligent Fuzzy Matcher anchored by Release Year
+    private fun isFuzzyMatch(tmdbTitle: String, isaidubText: String, year: String): Boolean {
+        val cleanTmdbRaw = tmdbTitle.lowercase().replace(Regex("[^a-z0-9]"), "")
+        val cleanIsaidubRaw = isaidubText.lowercase().replace(Regex("[^a-z0-9]"), "")
         
-        // Create an ultimate clean string for aggressive text matching
-        val superCleanTitle = title.lowercase().replace(Regex("[^a-z0-9]"), "")
+        // 1. Direct substring match (covers 90% of normal movies)
+        if (cleanIsaidubRaw.contains(cleanTmdbRaw) || cleanTmdbRaw.contains(cleanIsaidubRaw)) return true
+
+        // 2. Year-anchored Token Overlap (For franchise renames, Roman numeral drops, etc.)
+        if (year.isNotBlank() && isaidubText.contains(year)) {
+            // Convert 'Part II' to '2', remove 'The', drop punctuation
+            val normTmdb = tmdbTitle.lowercase()
+                .replace(Regex("part ii\\b"), "2")
+                .replace(Regex("part iii\\b"), "3")
+                .replace(Regex("part iv\\b"), "4")
+                .replace("judgment", "judgement")
+                .replace(Regex("[^a-z0-9\\s]"), " ")
+                .replace(Regex("^(the|a|an)\\s+"), "")
+                .trim()
+
+            val normIsaidub = isaidubText.lowercase()
+                .replace(year, "") // Remove year to prevent false positives in token matching
+                .replace(Regex("[^a-z0-9\\s]"), " ")
+                .replace(Regex("^(the|a|an)\\s+"), "")
+                .trim()
+
+            val tmdbTokens = normTmdb.split(Regex("\\s+")).filter { it.isNotBlank() }
+            val isaidubTokens = normIsaidub.split(Regex("\\s+")).filter { it.isNotBlank() }
+
+            if (tmdbTokens.isEmpty() || isaidubTokens.isEmpty()) return false
+
+            // Count how many significant TMDB words exist in the Isaidub title
+            val matchCount = tmdbTokens.count { isaidubTokens.contains(it) }
+            val matchPercentage = matchCount.toDouble() / tmdbTokens.size
+
+            // If it's a single word title, require exact token. Otherwise, 50% overlap is enough if the year is perfect.
+            return if (tmdbTokens.size == 1) {
+                matchPercentage == 1.0
+            } else {
+                matchPercentage >= 0.5
+            }
+        }
+        return false
+    }
+
+    private suspend fun findIsaidubMoviePage(title: String, year: String): String? {
+        val cleanTitle = title.replace(" ", "")
+        
+        // Apply our roman numeral / 'the' normalizer to the slug guesser as well
+        val advancedNormalizedTitle = title.lowercase()
+            .replace(Regex("part ii\\b"), "2")
+            .replace(Regex("part iii\\b"), "3")
+            .replace("judgment", "judgement")
+            .replace(Regex("^(the|a|an)\\s+"), "")
 
         val slugsToTest = listOfNotNull(
             toSlug(title).takeIf { it.isNotBlank() },
-            toSlug(titleNoPunctuation).takeIf { it.isNotBlank() }
+            toSlug(cleanTitle).takeIf { it.isNotBlank() },
+            toSlug(advancedNormalizedTitle).takeIf { it.isNotBlank() }
         ).distinct()
 
         val suffixes = listOf("-tamil-dubbed-movie", "-tamil-dubbed-web-series")
         val guesses = mutableListOf<String>()
 
-        // 1. Slug Guessing Generation
         slugsToTest.forEach { s ->
             suffixes.forEach { suffix ->
                 if (year.isNotBlank()) {
@@ -167,7 +203,6 @@ class IsaidubProvider : MainAPI() {
             }
         }
 
-        // Test Slugs
         for (guess in guesses.distinct()) {
             val url = "$mainUrl/movie/$guess/"
             try {
@@ -178,12 +213,13 @@ class IsaidubProvider : MainAPI() {
             } catch (e: Exception) { }
         }
 
-        // 2. Category Fallback
+        // Category Fallback Search
         val categories = mutableListOf("$mainUrl/")
         if (year.isNotBlank()) categories.add("$mainUrl/tamil-$year-dubbed-movies/")
 
-        if (superCleanTitle.isNotEmpty() && superCleanTitle[0].isLetter()) {
-            val firstChar = superCleanTitle[0]
+        val firstLetterTitle = title.lowercase().replace(Regex("^(the|a|an)\\s+"), "").replace(Regex("[^a-z0-9]"), "")
+        if (firstLetterTitle.isNotEmpty() && firstLetterTitle[0].isLetter()) {
+            val firstChar = firstLetterTitle[0]
             categories.add("$mainUrl/tamil-atoz-dubbed-movies/$firstChar/")
             categories.add("$mainUrl/tamil-atoz-dubbed-movies/$firstChar/2/")
         }
@@ -196,14 +232,11 @@ class IsaidubProvider : MainAPI() {
                     val text = a.text().trim().ifBlank { a.selectFirst("img")?.attr("alt") ?: "" }
 
                     if (href.contains("/movie/") || href.contains("-dubbed-movie")) {
-                        // Strip everything to just alphanumeric characters for fuzzy matching
-                        val normalizedText = text.lowercase().replace(Regex("[^a-z0-9]"), "")
-                        
-                        // It's a match if the slug is inside the URL, OR the super-clean titles match
-                        val match = slugsToTest.any { href.contains(it) } || 
-                                   (superCleanTitle.isNotBlank() && normalizedText.contains(superCleanTitle))
-                                   
-                        if (match) {
+                        // Pass to our intelligent fuzzy matcher
+                        val isFuzzy = isFuzzyMatch(title, text, year)
+                        val isSlugMatch = slugsToTest.any { href.contains(it) }
+
+                        if (isFuzzy || isSlugMatch) {
                             return if (href.startsWith("http")) href else "$mainUrl$href"
                         }
                     }
@@ -248,7 +281,6 @@ class IsaidubProvider : MainAPI() {
                 }
             }
 
-            // If we hit an intermediate folder (like "Original") instead of files, crawl deeper
             if (foundResolutions.isEmpty() && folderPages.isNotEmpty()) {
                 for (folderUrl in folderPages) {
                     val nested = getResolutions(folderUrl, depth + 1, maxDepth)
