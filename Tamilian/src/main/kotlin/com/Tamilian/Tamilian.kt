@@ -40,20 +40,6 @@ class Tamilian : MainAPI() {
             "8cf43ad9c085135b9479ad5cf6bbcbda",
             "da63548086e399ffc910fbc08526df05"
         )
-        
-        private val proxies = listOf(
-            "https://ancient-violet-1ee6.phisher12.workers.dev",
-            "https://autumn-limit-1fea.phisher53.workers.dev",
-            "https://wispy-bar-8fbe.phisher2.workers.dev",
-            "https://orange-voice-abcf.phisher16.workers.dev",
-            "https://icy-king-bff2.phisher40.workers.dev"
-        )
-    }
-
-    // FIXED: Only proxify the main site to bypass ISP block. Never proxify external video links!
-    private fun String.proxify(): String {
-        if (this.contains("tmdb.org") || this.contains("workers.dev") || !this.contains(mainUrl)) return this
-        return "${proxies.random()}/$this"
     }
 
     private fun String.toAbsoluteUrl(): String {
@@ -116,7 +102,7 @@ class Tamilian : MainAPI() {
     private data class ScrapedMovie(val title: String, val url: String, val nativePoster: String?, val year: Int?)
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val doc = app.get("$mainUrl/home/".proxify()).document
+        val doc = app.get("$mainUrl/home/").document
         
         val scrapedMovies = doc.select("a[href*='/movie/']").mapNotNull { element ->
             val href = element.attr("href")
@@ -157,7 +143,7 @@ class Tamilian : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val doc = app.get("$mainUrl/search/$query".proxify()).document
+        val doc = app.get("$mainUrl/search/$query").document
         
         val scrapedMovies = doc.select("a[href*='/movie/']").mapNotNull { element ->
             val href = element.attr("href")
@@ -198,7 +184,7 @@ class Tamilian : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val doc = app.get(url.proxify()).document
+        val doc = app.get(url).document
         
         val title = doc.selectFirst(".mvic-desc h3")?.text() ?: cleanTitleFromUrl(url)
         val plot = doc.selectFirst(".desc")?.text()
@@ -231,7 +217,7 @@ class Tamilian : MainAPI() {
         val watchUrl = if (data.endsWith("/")) "${data}watching.html" else "$data/watching.html"
         val baseHeaders = mapOf("Referer" to data)
         
-        val watchRes = app.get(watchUrl.proxify(), headers = baseHeaders).text
+        val watchRes = app.get(watchUrl, headers = baseHeaders).text
         val movieIdMatch = Regex("""movie\s*=\s*\{[^}]*id:\s*"(\d+)"""").find(watchRes)
         val movieId = movieIdMatch?.groupValues?.get(1) ?: return false
 
@@ -241,7 +227,7 @@ class Tamilian : MainAPI() {
         )
 
         val serverApiUrl = "$mainUrl/ajax/movie/episode/servers/${movieId}_1_full"
-        val servRes = app.get(serverApiUrl.proxify(), headers = ajaxHeaders)
+        val servRes = app.get(serverApiUrl, headers = ajaxHeaders)
         if (servRes.text.isBlank()) return false
 
         val serverBtns = servRes.document.select("a[data-id]")
@@ -261,7 +247,7 @@ class Tamilian : MainAPI() {
         }
 
         val sourcesUrl = "$mainUrl/ajax/movie/episode/server/sources/$fullDataId"
-        val sourceRes = app.get(sourcesUrl.proxify(), headers = ajaxHeaders)
+        val sourceRes = app.get(sourcesUrl, headers = ajaxHeaders)
         if (sourceRes.text.isBlank()) return false
 
         var finalLink: String? = null
@@ -350,7 +336,6 @@ class Tamilian : MainAPI() {
         @JsonProperty("tracks") val tracks: List<Track>?
     )
 
-    // FIXED: IgnoreUnknown ensures Jackson won't crash when TMDB returns extra data
     @JsonIgnoreProperties(ignoreUnknown = true)
     data class TmdbSearchResponse(
         @JsonProperty("results") val results: List<TmdbMovie>?
