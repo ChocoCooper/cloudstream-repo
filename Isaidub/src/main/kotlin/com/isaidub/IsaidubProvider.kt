@@ -18,7 +18,8 @@ class IsaidubProvider : MainAPI() {
     
     // TMDB Fallback array: Official -> Mirror -> Proxy
     private val tmdbUrls = listOf(
-        "https://api.themoviedb.org/3"
+        "https://api.tmdb.org/3",
+        "https://tmdb-proxy.cubecity.cloud/3"
     )
 
     // Data classes for TMDB JSON parsing
