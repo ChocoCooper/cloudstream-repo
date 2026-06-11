@@ -108,16 +108,17 @@ class IsaidubProvider : MainAPI() {
             if (finalLink != null) {
                 val isM3u8 = finalLink.contains(".m3u8", ignoreCase = true)
                 
-                // Using strict positional arguments to bypass Kotlin named-parameter errors
+                // Using the updated Cloudstream DSL syntax
                 callback.invoke(
                     newExtractorLink(
-                        this.name,                 // source
-                        res.label,                 // name
-                        finalLink,                 // url
-                        "$mainUrl/",               // referer/refer
-                        Qualities.Unknown.value,   // quality
-                        isM3u8                     // isM3u8
-                    )
+                        source = this.name,
+                        name = res.label,
+                        url = finalLink,
+                        type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                    ) {
+                        this.referer = "$mainUrl/"
+                        this.quality = Qualities.Unknown.value
+                    }
                 )
             }
         }
