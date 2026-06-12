@@ -1,4 +1,4 @@
-package com.isaidub // Adjust package name to match your repository
+package com.lagradost.cloudstream3.extractors // Adjust package name to match your repository
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
@@ -9,6 +9,7 @@ import kotlinx.coroutines.coroutineScope
 import org.jsoup.Jsoup
 import java.net.URI
 import java.net.URLEncoder
+import kotlin.random.Random
 
 class IsaidubProvider : MainAPI() {
     override var mainUrl = "https://isaidub.guru"
@@ -17,7 +18,26 @@ class IsaidubProvider : MainAPI() {
     override var supportedTypes = setOf(TvType.Movie)
     override var lang = "ta"
 
-    private val tmdbApiKey = "1b3113663c9004682ed61086cf967c44"
+    // Massive Key Rotation Array to prevent rate-limiting
+    private val tmdbApiKeys = listOf(
+        "fb7bb23f03b6994dafc674c074d01761",
+        "e55425032d3d0f371fc776f302e7c09b",
+        "8301a21598f8b45668d5711a814f01f6",
+        "8cf43ad9c085135b9479ad5cf6bbcbda",
+        "da63548086e399ffc910fbc08526df05",
+        "13e53ff644a8bd4ba37b3e1044ad24f3",
+        "269890f657dddf4635473cf4cf456576",
+        "a2f888b27315e62e471b2d587048f32e",
+        "8476a7ab80ad76f0936744df0430e67c",
+        "5622cafbfe8f8cfe358a29c53e19bba0",
+        "ae4bd1b6fce2a5648671bfc171d15ba4",
+        "257654f35e3dff105574f97fb4b97035",
+        "2f4038e83265214a0dcd6ec2eb3276f5",
+        "9e43f45f94705cc8e1d5a0400d19a7b7",
+        "af6887753365e14160254ac7f4345dd2",
+        "06f10fc8741a672af455421c239a1ffc",
+        "09ad8ace66eec34302943272db0e8d2c"
+    )
     
     private val tmdbUrls = listOf(
         "https://api.themoviedb.org/3",
@@ -35,6 +55,10 @@ class IsaidubProvider : MainAPI() {
 
     data class ScrapedMovie(val title: String, val link: String)
     data class ResolutionNode(val label: String, val url: String)
+
+    private fun getRandomApiKey(): String {
+        return tmdbApiKeys[Random.nextInt(tmdbApiKeys.size)]
+    }
 
     // --- TOKENIZATION & MATCHING HELPERS ---
 
@@ -98,7 +122,6 @@ class IsaidubProvider : MainAPI() {
         return matches.sortedByDescending { it.second }.map { it.first }
     }
 
-    // Returns null if TMDB has no data, signaling fetchSectionItems to discard this item
     private suspend fun fetchTmdbPoster(rawTitle: String, fallbackYear: String = ""): Pair<String?, String> {
         val cleanName = rawTitle.replace("isaiDub.me", "").replace("-", "").trim()
         val yearRegex = Regex("\\b(19|20)\\d{2}\\b").find(cleanName)
@@ -109,10 +132,11 @@ class IsaidubProvider : MainAPI() {
             val encodedQuery = URLEncoder.encode(finalSearchTitle, "UTF-8")
             for (baseUrl in tmdbUrls) {
                 try {
+                    val apiKey = getRandomApiKey()
                     val url = if (extractedYear.isNotBlank()) {
-                        "$baseUrl/search/movie?api_key=$tmdbApiKey&query=$encodedQuery&year=$extractedYear"
+                        "$baseUrl/search/movie?api_key=$apiKey&query=$encodedQuery&year=$extractedYear"
                     } else {
-                        "$baseUrl/search/movie?api_key=$tmdbApiKey&query=$encodedQuery"
+                        "$baseUrl/search/movie?api_key=$apiKey&query=$encodedQuery"
                     }
                     val response = app.get(url, timeout = 2)
                     if (response.isSuccessful && response.text.contains("results")) {
@@ -148,14 +172,13 @@ class IsaidubProvider : MainAPI() {
                 }
                 
                 validMovieLinks.add(Pair(title, link))
-                if (validMovieLinks.size >= 10) break
+                if (validMovieLinks.size >= 6) break
             }
 
             val responses = validMovieLinks.amap { (title, _) ->
                 val cleanTitle = title.replace("isaiDub.me", "").replace("-", "").trim()
                 val (tmdbPoster, resolvedYear) = fetchTmdbPoster(cleanTitle, sectionYear)
                 
-                // Drop media if no valid artwork path could be extracted from TMDB
                 if (tmdbPoster == null) {
                     null
                 } else {
@@ -235,7 +258,7 @@ class IsaidubProvider : MainAPI() {
 
         for (baseUrl in tmdbUrls) {
             try {
-                val url = "$baseUrl/search/movie?api_key=$tmdbApiKey&query=$encodedQuery"
+                val url = "$baseUrl/search/movie?api_key=${getRandomApiKey()}&query=$encodedQuery"
                 val response = app.get(url, timeout = 3)
                 if (response.isSuccessful && response.text.contains("results")) {
                     tmdbJson = response
