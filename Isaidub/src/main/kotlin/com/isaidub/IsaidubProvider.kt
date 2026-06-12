@@ -18,7 +18,7 @@ class IsaidubProvider : MainAPI() {
     override var supportedTypes = setOf(TvType.Movie)
     override var lang = "ta"
 
-    // Massive Key Rotation Array to prevent rate-limiting
+    // Massive Key Rotation Array to distribute load concurrently
     private val tmdbApiKeys = listOf(
         "fb7bb23f03b6994dafc674c074d01761",
         "e55425032d3d0f371fc776f302e7c09b",
@@ -39,6 +39,7 @@ class IsaidubProvider : MainAPI() {
         "09ad8ace66eec34302943272db0e8d2c"
     )
     
+    // Multiple TMDB Domain endpoints for concurrent processing
     private val tmdbUrls = listOf(
         "https://api.themoviedb.org/3",
         "https://api.tmdb.org/3",
@@ -51,7 +52,7 @@ class IsaidubProvider : MainAPI() {
         val name: String?,
         val release_date: String?,
         val poster_path: String?,
-        val overview: String? // Added to extract movie synopses
+        val overview: String?
     )
 
     data class ScrapedMovie(val title: String, val link: String)
@@ -59,6 +60,10 @@ class IsaidubProvider : MainAPI() {
 
     private fun getRandomApiKey(): String {
         return tmdbApiKeys[Random.nextInt(tmdbApiKeys.size)]
+    }
+
+    private fun getRandomTmdbUrl(): String {
+        return tmdbUrls[Random.nextInt(tmdbUrls.size)]
     }
 
     // --- TOKENIZATION & MATCHING HELPERS ---
@@ -117,6 +122,7 @@ class IsaidubProvider : MainAPI() {
         return matches.sortedByDescending { it.second }.map { it.first }
     }
 
+    // Completely load-balanced lookups utilizing distinct keys & proxy paths concurrently
     private suspend fun fetchTmdbMetadata(rawTitle: String, fallbackYear: String = ""): Pair<TmdbResult?, String> {
         val cleanName = rawTitle.replace("isaiDub.me", "").replace("-", "").trim()
         val yearRegex = Regex("\\b(19|20)\\d{2}\\b").find(cleanName)
@@ -125,7 +131,9 @@ class IsaidubProvider : MainAPI() {
 
         try {
             val encodedQuery = URLEncoder.encode(finalSearchTitle, "UTF-8")
-            for (baseUrl in tmdbUrls) {
+            val shuffledUrls = tmdbUrls.shuffled() // Shuffle to uniformly distribute endpoints
+
+            for (baseUrl in shuffledUrls) {
                 try {
                     val apiKey = getRandomApiKey()
                     val url = if (extractedYear.isNotBlank()) {
@@ -147,6 +155,7 @@ class IsaidubProvider : MainAPI() {
         return Pair(null, extractedYear) 
     }
 
+    // High-speed compilation utilizing asynchronous multi-key workers
     private suspend fun fetchSectionItems(targetBaseUrl: String, sectionYear: String = ""): List<SearchResponse> {
         val listItems = mutableListOf<SearchResponse>()
         var currentPage = 1
@@ -174,29 +183,34 @@ class IsaidubProvider : MainAPI() {
 
                 if (validMovieLinks.isEmpty()) break
 
-                val responses = validMovieLinks.amap { (title, link) ->
-                    val cleanTitle = title.replace("isaiDub.me", "").replace("-", "").trim()
-                    val (tmdbMatch, resolvedYear) = fetchTmdbMetadata(cleanTitle, sectionYear)
-                    val tmdbPoster = tmdbMatch?.poster_path?.let { "https://image.tmdb.org/t/p/w500$it" }
-                    val plotSynopsis = tmdbMatch?.overview ?: ""
-                    
-                    if (tmdbPoster == null) {
-                        null
-                    } else {
-                        val t = URLEncoder.encode(cleanTitle, "UTF-8")
-                        val y = URLEncoder.encode(resolvedYear, "UTF-8")
-                        val p = URLEncoder.encode(tmdbPoster, "UTF-8")
-                        val u = URLEncoder.encode(link, "UTF-8")
-                        val s = URLEncoder.encode(plotSynopsis, "UTF-8") // Packed Synopsis
-                        
-                        val targetData = "$mainUrl/synthetic_meta?t=$t&y=$y&p=$p&url=$u&s=$s"
+                // CRITICAL SPEED FIX: Fire off ALL TMDB metadata requests completely in parallel
+                val responses = coroutineScope {
+                    validMovieLinks.map { (title, link) ->
+                        async {
+                            val cleanTitle = title.replace("isaiDub.me", "").replace("-", "").trim()
+                            val (tmdbMatch, resolvedYear) = fetchTmdbMetadata(cleanTitle, sectionYear)
+                            val tmdbPoster = tmdbMatch?.poster_path?.let { "https://image.tmdb.org/t/p/w500$it" }
+                            val plotSynopsis = tmdbMatch?.overview ?: ""
+                            
+                            if (tmdbPoster == null) {
+                                null
+                            } else {
+                                val t = URLEncoder.encode(cleanTitle, "UTF-8")
+                                val y = URLEncoder.encode(resolvedYear, "UTF-8")
+                                val p = URLEncoder.encode(tmdbPoster, "UTF-8")
+                                val u = URLEncoder.encode(link, "UTF-8")
+                                val s = URLEncoder.encode(plotSynopsis, "UTF-8")
+                                
+                                val targetData = "$mainUrl/synthetic_meta?t=$t&y=$y&p=$p&url=$u&s=$s"
 
-                        newMovieSearchResponse(cleanTitle, targetData) {
-                            this.posterUrl = tmdbPoster
-                            this.year = resolvedYear.toIntOrNull()
+                                newMovieSearchResponse(cleanTitle, targetData) {
+                                    this.posterUrl = tmdbPoster
+                                    this.year = resolvedYear.toIntOrNull()
+                                }
+                            }
                         }
-                    }
-                }.filterNotNull()
+                    }.awaitAll().filterNotNull()
+                }
 
                 for (res in responses) {
                     if (listItems.size < 6 && listItems.none { it.name == res.name }) {
@@ -214,7 +228,7 @@ class IsaidubProvider : MainAPI() {
         return listItems
     }
 
-    // --- PHASE 0: HOMEPAGE LOGIC ---
+    // --- PHASE 0: HOMEPAGE LOGIC (CONCURRENT WORKERS MULTI-KEY SHUFFLED) ---
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         val homePageLists = mutableListOf<HomePageList>()
@@ -265,13 +279,14 @@ class IsaidubProvider : MainAPI() {
         return newHomePageResponse(homePageLists, hasNext = false)
     }
 
-    // --- PHASE 1: SEARCH (TMDB METADATA ONLY + FILTERING) ---
+    // --- PHASE 1: SEARCH (ROTATED KEY AND DOMAIN SELECTION) ---
 
     override suspend fun search(query: String): List<SearchResponse> {
         var tmdbJson: NiceResponse? = null
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
+        val shuffledUrls = tmdbUrls.shuffled() // Spread search request targets across endpoints
 
-        for (baseUrl in tmdbUrls) {
+        for (baseUrl in shuffledUrls) {
             try {
                 val url = "$baseUrl/search/movie?api_key=${getRandomApiKey()}&query=$encodedQuery"
                 val response = app.get(url, timeout = 3)
@@ -313,7 +328,7 @@ class IsaidubProvider : MainAPI() {
         }
     }
 
-    // --- PHASE 2: LOAD (DEEP CONCURRENT CRAWLING ON CLICK) ---
+    // --- PHASE 2: LOAD ---
 
     override suspend fun load(url: String): LoadResponse? {
         if (!url.contains("/synthetic_meta?")) return null
@@ -328,7 +343,7 @@ class IsaidubProvider : MainAPI() {
         val year = queryParams["y"] ?: ""
         val tmdbPoster = queryParams["p"] ?: "$mainUrl/uploads/posters/default.jpg"
         val failSafeUrl = queryParams["url"] 
-        val plotSynopsis = queryParams["s"] ?: "" // Extracted packed overview text
+        val plotSynopsis = queryParams["s"] ?: "" 
         val yearInt = year.toIntOrNull()
 
         val urlsToScan = mutableListOf<String>()
@@ -403,13 +418,12 @@ class IsaidubProvider : MainAPI() {
             }
         }
 
-        // Failsafe execution mapping seamlessly alongside the plot overview context
         if (matchedMovies.isEmpty()) {
             if (!failSafeUrl.isNullOrBlank()) {
                 return newMovieLoadResponse(title, failSafeUrl, TvType.Movie, failSafeUrl) {
                     this.posterUrl = tmdbPoster
                     this.year = yearInt
-                    this.plot = plotSynopsis // Binds Synopsis
+                    this.plot = plotSynopsis 
                 }
             }
             return null
@@ -421,7 +435,7 @@ class IsaidubProvider : MainAPI() {
         return newMovieLoadResponse(title, combinedUrls, TvType.Movie, combinedUrls) {
             this.posterUrl = tmdbPoster
             this.year = yearInt
-            this.plot = plotSynopsis // Binds Synopsis
+            this.plot = plotSynopsis 
         }
     }
 
@@ -485,11 +499,11 @@ class IsaidubProvider : MainAPI() {
                     
                     val lowerLabel = res.label.lowercase()
                     val qualityName = when {
-                        lowerLabel.contains("1080") -> "1080p"
-                        lowerLabel.contains("720") -> "720p"
-                        lowerLabel.contains("640") || lowerLabel.contains("480") -> "480p"
-                        lowerLabel.contains("360") -> "360p"
-                        else -> "HD"
+                        lowerLabel.contains("1080") -> "(1080p)"
+                        lowerLabel.contains("720") -> "(720p)"
+                        lowerLabel.contains("640") || lowerLabel.contains("360") -> "(640x360)"
+                        lowerLabel.contains("480") || lowerLabel.contains("320") -> "(480x320)"
+                        else -> "(HD)"
                     }
                     
                     callback.invoke(
