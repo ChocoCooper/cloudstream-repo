@@ -17,8 +17,6 @@ class MegaStreamProvider : MainAPI() {
     override var supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
     override var lang = "en"
 
-    // Initializes extraction router securely with 'this' reference for newExtractorLink capability
-    private val extractors by lazy { MegaStreamExtractors(this) }
     private var activeOmdbKeys = MegaStreamConstants.OMDB_KEYS.toMutableList()
 
     // OMDb JSON Data Models
@@ -53,7 +51,6 @@ class MegaStreamProvider : MainAPI() {
                 val poster = element.selectFirst("img")?.attr("src") ?: ""
                 val fullLink = if (link.startsWith("/")) "$mainUrl$link" else link
                 
-                // FIXED: Use HTTP-compliant routing to prevent Cloudstream from breaking the URL
                 val encodedLink = URLEncoder.encode(fullLink, "UTF-8")
                 val payload = "$mainUrl/megastream_scrape?url=$encodedLink"
                 scrapedResults.add(newMovieSearchResponse(title, payload) { this.posterUrl = poster })
@@ -89,7 +86,6 @@ class MegaStreamProvider : MainAPI() {
                     val imdbId = item.imdbID ?: return@mapNotNull null
                     val type = if (item.Type == "series") TvType.TvSeries else TvType.Movie
                     
-                    // FIXED: HTTP-compliant OMDb routing
                     val payload = "$mainUrl/megastream_omdb?id=$imdbId&type=${type.name}"
                     newMovieSearchResponse(title, payload, type) {
                         this.posterUrl = item.Poster
@@ -106,7 +102,6 @@ class MegaStreamProvider : MainAPI() {
                         val link = element.selectFirst("a")?.attr("href") ?: return@mapNotNull null
                         val fullLink = if (link.startsWith("/")) "$mainUrl$link" else link
                         
-                        // FIXED: HTTP-compliant scrape routing
                         val encodedLink = URLEncoder.encode(fullLink, "UTF-8")
                         val payload = "$mainUrl/megastream_scrape?url=$encodedLink"
                         
@@ -137,7 +132,6 @@ class MegaStreamProvider : MainAPI() {
         var tvType = TvType.Movie
 
         if (url.contains("/megastream_omdb")) {
-            // Unpack OMDb synthetic URL
             val uri = URI(url)
             val queryParams = uri.query?.split("&")?.associate {
                 val parts = it.split("=")
@@ -159,13 +153,11 @@ class MegaStreamProvider : MainAPI() {
             resolvedPlot = metaRes.Plot.takeIf { it != "N/A" } ?: ""
             resolvedYear = metaRes.Year?.replace(Regex("[^0-9]"), "")?.toIntOrNull()
 
-            // Pass the exact IMDb ID into the provider endpoints
             MegaStreamConstants.ID_PROVIDERS.forEach { provider ->
                 streamLinks.add("$provider/embed/$endpoint/$imdbId")
             }
 
         } else if (url.contains("/megastream_scrape") || url.startsWith(mainUrl)) {
-            // Unpack StreamPlay synthetic URL OR fallback to raw URL load
             val targetUrl = if (url.contains("/megastream_scrape")) {
                 val uri = URI(url)
                 val queryParams = uri.query?.split("&")?.associate {
@@ -174,7 +166,7 @@ class MegaStreamProvider : MainAPI() {
                 }
                 queryParams?.get("url") ?: return null
             } else {
-                url // Direct fallback if an old bookmark is loaded
+                url 
             }
 
             val doc = app.get(targetUrl).document
@@ -184,7 +176,6 @@ class MegaStreamProvider : MainAPI() {
             resolvedPlot = doc.selectFirst(".synopsis")?.text() ?: ""
             resolvedYear = doc.selectFirst(".release-year")?.text()?.toIntOrNull()
 
-            // Extract embed iframes natively from StreamPlay
             doc.select("iframe").forEach { iframe ->
                 val src = iframe.attr("src")
                 if (MegaStreamConstants.EXTRACTOR_DOMAINS.any { src.contains(it) }) {
@@ -218,6 +209,7 @@ class MegaStreamProvider : MainAPI() {
             urls.map { targetUrl ->
                 async {
                     if (targetUrl.isNotBlank()) {
+                        // FIXED: invokeExtractor is now a top-level extension function mapped to this provider.
                         invokeExtractor(targetUrl, name, subtitleCallback, callback)
                         foundAny = true
                     }
