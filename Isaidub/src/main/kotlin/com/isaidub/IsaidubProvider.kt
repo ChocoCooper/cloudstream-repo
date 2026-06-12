@@ -19,7 +19,6 @@ class IsaidubProvider : MainAPI() {
 
     private val tmdbApiKey = "1b3113663c9004682ed61086cf967c44"
     
-    // Prioritized order for regions with ISP blocks
     private val tmdbUrls = listOf(
         "https://api.themoviedb.org/3",
         "https://api.tmdb.org/3",
@@ -99,8 +98,8 @@ class IsaidubProvider : MainAPI() {
         return matches.sortedByDescending { it.second }.map { it.first }
     }
 
-    // High-performance fallback engine optimized to skip ISP blocks within 2 seconds
-    private suspend fun fetchTmdbPoster(rawTitle: String, fallbackYear: String = ""): Pair<String, String> {
+    // Returns null if TMDB has no data, signaling fetchSectionItems to discard this item
+    private suspend fun fetchTmdbPoster(rawTitle: String, fallbackYear: String = ""): Pair<String?, String> {
         val cleanName = rawTitle.replace("isaiDub.me", "").replace("-", "").trim()
         val yearRegex = Regex("\\b(19|20)\\d{2}\\b").find(cleanName)
         val extractedYear = yearRegex?.value ?: fallbackYear
@@ -115,7 +114,6 @@ class IsaidubProvider : MainAPI() {
                     } else {
                         "$baseUrl/search/movie?api_key=$tmdbApiKey&query=$encodedQuery"
                     }
-                    // Low timeout constraint ensures swift fallback execution
                     val response = app.get(url, timeout = 2)
                     if (response.isSuccessful && response.text.contains("results")) {
                         val parsed = AppUtils.parseJson<TmdbSearchResponse>(response.text)
@@ -124,12 +122,10 @@ class IsaidubProvider : MainAPI() {
                             return Pair("https://image.tmdb.org/t/p/w500${firstMatch.poster_path}", extractedYear)
                         }
                     }
-                } catch (e: Exception) {
-                    // Suppress and immediately cycle to next proxy option
-                }
+                } catch (e: Exception) { }
             }
         } catch (e: Exception) { }
-        return Pair("$mainUrl/uploads/posters/default.jpg", extractedYear) 
+        return Pair(null, extractedYear) 
     }
 
     private suspend fun fetchSectionItems(targetUrl: String, sectionYear: String = ""): List<SearchResponse> {
@@ -159,15 +155,20 @@ class IsaidubProvider : MainAPI() {
                 val cleanTitle = title.replace("isaiDub.me", "").replace("-", "").trim()
                 val (tmdbPoster, resolvedYear) = fetchTmdbPoster(cleanTitle, sectionYear)
                 
-                val t = URLEncoder.encode(cleanTitle, "UTF-8")
-                val y = URLEncoder.encode(resolvedYear, "UTF-8")
-                val p = URLEncoder.encode(tmdbPoster, "UTF-8")
-                
-                val targetData = "$mainUrl/synthetic_meta?t=$t&y=$y&p=$p"
+                // Drop media if no valid artwork path could be extracted from TMDB
+                if (tmdbPoster == null) {
+                    null
+                } else {
+                    val t = URLEncoder.encode(cleanTitle, "UTF-8")
+                    val y = URLEncoder.encode(resolvedYear, "UTF-8")
+                    val p = URLEncoder.encode(tmdbPoster, "UTF-8")
+                    
+                    val targetData = "$mainUrl/synthetic_meta?t=$t&y=$y&p=$p"
 
-                newMovieSearchResponse(cleanTitle, targetData) {
-                    this.posterUrl = tmdbPoster
-                    this.year = resolvedYear.toIntOrNull()
+                    newMovieSearchResponse(cleanTitle, targetData) {
+                        this.posterUrl = tmdbPoster
+                        this.year = resolvedYear.toIntOrNull()
+                    }
                 }
             }
             listItems.addAll(responses.filterNotNull())
@@ -194,7 +195,6 @@ class IsaidubProvider : MainAPI() {
                 }
             }
 
-            // Streamlined to pull only requested sections concurrently
             coroutineScope {
                 val newMoviesDeferred = async { if (latestYearUrl.isNotEmpty()) fetchSectionItems(latestYearUrl, latestYear) else emptyList() }
                 val actionDeferred = async { fetchSectionItems("$mainUrl/tamil-action-dubbed-movies/") }
@@ -236,7 +236,6 @@ class IsaidubProvider : MainAPI() {
         for (baseUrl in tmdbUrls) {
             try {
                 val url = "$baseUrl/search/movie?api_key=$tmdbApiKey&query=$encodedQuery"
-                // Shortened search timeout for consistent user experience
                 val response = app.get(url, timeout = 3)
                 if (response.isSuccessful && response.text.contains("results")) {
                     tmdbJson = response
