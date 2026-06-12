@@ -10,7 +10,7 @@ import java.net.URLEncoder
 class IsaidubProvider : MainAPI() {
     override var mainUrl = "https://isaidub.guru"
     override var name = "Isaidub"
-    override val hasMainPage = false // Keeps the homescreen empty
+    override val hasMainPage = false
     override var supportedTypes = setOf(TvType.Movie)
     override var lang = "ta"
 
@@ -18,6 +18,7 @@ class IsaidubProvider : MainAPI() {
     
     // TMDB Fallback array: Official -> Mirror -> Proxy
     private val tmdbUrls = listOf(
+        "https://api.themoviedb.org/3",
         "https://api.tmdb.org/3",
         "https://tmdb-proxy.cubecity.cloud/3"
     )
@@ -52,22 +53,29 @@ class IsaidubProvider : MainAPI() {
         if (tmdbJson == null) return emptyList()
         val parsed = AppUtils.parseJson<TmdbSearchResponse>(tmdbJson.text)
 
-        val validTmdbResults = parsed.results?.filter { it.poster_path != null }?.take(8) ?: emptyList()
+        val validTmdbResults = parsed.results?.filter { it.poster_path != null } ?: emptyList()
 
         val results = validTmdbResults.amap { item ->
             val title = item.title ?: item.name ?: return@amap null
             val year = item.release_date?.split("-")?.firstOrNull() ?: ""
             
             // STRICT CHECK: Does it exist on Isaidub?
-            // This returns the exact, valid Isaidub URL!
             val isaidubUrl = findIsaidubMoviePage(title, year)
             
             if (isaidubUrl != null) {
-                val posterUrl = "https://image.tmdb.org/t/p/w500${item.poster_path}"
+                // Generate the NATIVE Isaidub poster directly from the verified URL slug
+                val slug = isaidubUrl.trimEnd('/').substringAfterLast("/")
+                val cleanSlug = slug.replace("-tamil-dubbed-movie", "").replace("-tamil-dubbed-web-series", "")
+                val sitePoster = "$mainUrl/uploads/posters/$cleanSlug.jpg"
 
-                // Pass the real Isaidub URL directly, bypassing the custom string injection
-                newMovieSearchResponse(title, isaidubUrl) {
-                    this.posterUrl = posterUrl
+                val t = URLEncoder.encode(title, "UTF-8")
+                val y = URLEncoder.encode(year, "UTF-8")
+                val p = URLEncoder.encode(sitePoster, "UTF-8")
+                
+                val targetData = "$mainUrl/synthetic?t=$t&y=$y&p=$p"
+
+                newMovieSearchResponse(title, targetData) {
+                    this.posterUrl = sitePoster // Using Native Poster
                     this.year = year.toIntOrNull()
                 }
             } else {
@@ -79,19 +87,21 @@ class IsaidubProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        // Because the URL passed from search is the real URL, we can safely scrape it
-        val res = app.get(url, timeout = 8).document
-        
-        // Fallback to URL parsing if title is empty
-        val title = res.selectFirst("title")?.text()?.replace("isaiDub.me -", "")?.trim() ?: "Movie"
-        
+        if (!url.contains("/synthetic?")) return null
+
+        val uri = java.net.URI(url)
+        val queryParams = uri.query?.split("&")?.associate {
+            val parts = it.split("=")
+            parts[0] to java.net.URLDecoder.decode(parts.getOrElse(1) { "" }, "UTF-8")
+        } ?: return null
+
+        val title = queryParams["t"] ?: return null
+        val year = queryParams["y"] ?: ""
+        val posterUrl = queryParams["p"].takeIf { !it.isNullOrBlank() }
+
         return newMovieLoadResponse(title, url, TvType.Movie, url) {
-            // Cloudstream will automatically carry over the poster and year from the search cache,
-            // but we can optionally scrape the site's native thumbnail just in case
-            val sitePoster = res.selectFirst("img")?.attr("src")
-            if (sitePoster != null) {
-                this.posterUrl = if (sitePoster.startsWith("http")) sitePoster else "$mainUrl$sitePoster"
-            }
+            this.posterUrl = posterUrl
+            this.year = year.toIntOrNull()
         }
     }
 
@@ -101,8 +111,17 @@ class IsaidubProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // Data is the real Isaidub URL, so we jump straight into resolution extraction!
-        val resolutions = getResolutions(data)
+        val uri = java.net.URI(data)
+        val queryParams = uri.query?.split("&")?.associate {
+            val parts = it.split("=")
+            parts[0] to java.net.URLDecoder.decode(parts.getOrElse(1) { "" }, "UTF-8")
+        } ?: return false
+
+        val title = queryParams["t"] ?: return false
+        val year = queryParams["y"] ?: ""
+
+        val targetUrl = findIsaidubMoviePage(title, year) ?: return false
+        val resolutions = getResolutions(targetUrl)
 
         resolutions.forEach { res ->
             val finalLink = extractFinalLink(res.url, 0, mutableSetOf())
@@ -118,6 +137,11 @@ class IsaidubProvider : MainAPI() {
                     ) {
                         this.referer = "$mainUrl/"
                         this.quality = Qualities.Unknown.value
+                        this.headers = mapOf(
+                            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+                            "Accept" to "*/*",
+                            "Connection" to "keep-alive"
+                        )
                     }
                 )
             }
@@ -156,13 +180,9 @@ class IsaidubProvider : MainAPI() {
             val matchCount = tmdbTokens.count { isaidubTokens.contains(it) }
             val matchPercentage = matchCount.toDouble() / tmdbTokens.size
 
-            // STRICTER SEQUEL LOGIC: 
             return if (tmdbTokens.size <= 2) {
-                // Short titles like "Hangover 2" MUST match 100% of their words
                 matchPercentage == 1.0
             } else {
-                // Longer titles require 60% match AND at least one major word to match
-                // (Prevents matching solely on numbers like "2" or "3")
                 val significantMatches = tmdbTokens.filter { isaidubTokens.contains(it) && it.length > 2 }
                 matchPercentage >= 0.6 && significantMatches.isNotEmpty()
             }
@@ -176,8 +196,9 @@ class IsaidubProvider : MainAPI() {
         val advancedNormalizedTitle = title.lowercase()
             .replace(Regex("part ii\\b"), "2")
             .replace(Regex("part iii\\b"), "3")
+            .replace(Regex("part iv\\b"), "4")
             .replace("judgment", "judgement")
-            .replace(Regex("^(the|a|an)\\s+"), "")
+            .trim()
 
         val slugsToTest = listOfNotNull(
             toSlug(title).takeIf { it.isNotBlank() },
@@ -199,6 +220,7 @@ class IsaidubProvider : MainAPI() {
             }
         }
 
+        // 1. FAST PATH: Test Slugs
         for (guess in guesses.distinct()) {
             val url = "$mainUrl/movie/$guess/"
             try {
@@ -209,33 +231,66 @@ class IsaidubProvider : MainAPI() {
             } catch (e: Exception) { }
         }
 
-        val categories = mutableListOf("$mainUrl/")
-        if (year.isNotBlank()) categories.add("$mainUrl/tamil-$year-dubbed-movies/")
+        // 2. DEEP PATH: Dynamic Pagination Category Fallback
+        val baseCategories = mutableListOf<String>()
+        if (year.isNotBlank()) {
+            baseCategories.add("$mainUrl/tamil-$year-dubbed-movies/")
+        }
 
         val firstLetterTitle = title.lowercase().replace(Regex("^(the|a|an)\\s+"), "").replace(Regex("[^a-z0-9]"), "")
         if (firstLetterTitle.isNotEmpty() && firstLetterTitle[0].isLetter()) {
             val firstChar = firstLetterTitle[0]
-            categories.add("$mainUrl/tamil-atoz-dubbed-movies/$firstChar/")
-            categories.add("$mainUrl/tamil-atoz-dubbed-movies/$firstChar/2/")
+            baseCategories.add("$mainUrl/tamil-atoz-dubbed-movies/$firstChar/")
         }
 
-        for (catUrl in categories) {
-            try {
-                val res = app.get(catUrl, timeout = 5).document
-                for (a in res.select("a[href]")) {
-                    val href = a.attr("href")
-                    val text = a.text().trim().ifBlank { a.selectFirst("img")?.attr("alt") ?: "" }
+        for (baseCatUrl in baseCategories) {
+            var currentPage = 1
+            var maxPage = 1
 
-                    if (href.contains("/movie/") || href.contains("-dubbed-movie")) {
-                        val isFuzzy = isFuzzyMatch(title, text, year)
-                        val isSlugMatch = slugsToTest.any { href.contains(it) }
+            while (currentPage <= maxPage) {
+                val url = if (currentPage == 1) baseCatUrl else "$baseCatUrl?get-page=$currentPage"
+                
+                try {
+                    val res = app.get(url, timeout = 5).document
+                    
+                    // Check if movie exists on this page
+                    for (a in res.select("a[href]")) {
+                        val href = a.attr("href")
+                        val text = a.text().trim().ifBlank { a.selectFirst("img")?.attr("alt") ?: "" }
 
-                        if (isFuzzy || isSlugMatch) {
-                            return if (href.startsWith("http")) href else "$mainUrl$href"
+                        if (href.contains("/movie/") || href.contains("-dubbed-movie")) {
+                            val isFuzzy = isFuzzyMatch(title, text, year)
+                            val isSlugMatch = slugsToTest.any { href.contains(it) }
+
+                            if (isFuzzy || isSlugMatch) {
+                                return if (href.startsWith("http")) href else "$mainUrl$href"
+                            }
                         }
                     }
-                }
-            } catch (e: Exception) { }
+
+                    // Dynamically extract the last existing page number from the pagination block
+                    if (currentPage == 1) {
+                        res.select("a[href]").forEach { a ->
+                            val href = a.attr("href")
+                            val text = a.text().trim()
+                            
+                            if (href.contains("?get-page=") || href.contains("/page/")) {
+                                val num = Regex("""(?:get-page=|page/)(\d+)""").find(href)?.groupValues?.get(1)?.toIntOrNull()
+                                if (num != null && num > maxPage && num <= 25) { // Cap at 25 to prevent infinite loops
+                                    maxPage = num
+                                }
+                            } else if (text.toIntOrNull() != null) {
+                                val num = text.toIntOrNull()
+                                if (num != null && num > maxPage && num <= 25 && href.length < 50) {
+                                    maxPage = num
+                                }
+                            }
+                        }
+                    }
+                } catch (e: Exception) { }
+                
+                currentPage++
+            }
         }
         return null
     }
