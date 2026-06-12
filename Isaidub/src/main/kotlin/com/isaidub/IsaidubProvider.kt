@@ -191,19 +191,18 @@ class IsaidubProvider : MainAPI() {
             }
         }
 
-        var matchedMovie: ScrapedMovie? = null
+        // List to hold all potential duplicate movie entries
+        val matchedMovies = mutableListOf<ScrapedMovie>()
 
         for (targetBaseUrl in urlsToScan.distinct()) {
-            if (matchedMovie != null) break 
+            if (matchedMovies.isNotEmpty()) break 
 
-            // Grab page 1 and extract the max pagination boundaries simultaneously
             val (page1Movies, totalPages) = scrapePageAndGetTotal(targetBaseUrl)
             
-            // Instantly verify page 1 before firing off coroutines
             val page1Hits = searchByTokenAndYear(page1Movies, title, year)
             if (page1Hits.isNotEmpty()) {
-                matchedMovie = page1Hits.first()
-                break
+                matchedMovies.addAll(page1Hits)
+                break // Break out to ensure we aggregate all duplicates found on this page
             }
 
             if (totalPages > 1) {
@@ -211,7 +210,7 @@ class IsaidubProvider : MainAPI() {
                 val totalChunks = (totalPages - 1 + chunkSize - 1) / chunkSize 
 
                 for (chunkIdx in 0 until totalChunks) {
-                    if (matchedMovie != null) break
+                    if (matchedMovies.isNotEmpty()) break
 
                     val startPage = chunkIdx * chunkSize + 2 
                     val endPage = minOf(startPage + chunkSize - 1, totalPages)
@@ -229,25 +228,28 @@ class IsaidubProvider : MainAPI() {
                     for (pageMovies in chunkResults) {
                         val hits = searchByTokenAndYear(pageMovies, title, year)
                         if (hits.isNotEmpty()) {
-                            matchedMovie = hits.first()
-                            break
+                            matchedMovies.addAll(hits)
                         }
                     }
+                    if (matchedMovies.isNotEmpty()) break
                 }
             }
         }
 
-        val finalMoviePage = matchedMovie?.link ?: return null
-        val finalPoster = fetchPosterUrl(finalMoviePage) ?: fallbackPoster
+        if (matchedMovies.isEmpty()) return null
 
-        // Passes the ACTUAL scraped URL forward for loadLinks
-        return newMovieLoadResponse(title, finalMoviePage, TvType.Movie, finalMoviePage) {
+        // Deduplicate links just in case, and combine them using a comma separator
+        val finalMoviePages = matchedMovies.map { it.link }.distinct()
+        val combinedUrls = finalMoviePages.joinToString(",")
+        val finalPoster = fetchPosterUrl(finalMoviePages.first()) ?: fallbackPoster
+
+        // Pass the comma-separated string to loadLinks via the URL parameter
+        return newMovieLoadResponse(title, combinedUrls, TvType.Movie, combinedUrls) {
             this.posterUrl = finalPoster
             this.year = yearInt
         }
     }
 
-    // Scrapes movie elements and calculates pagination maximum in a single HTTP request
     private suspend fun scrapePageAndGetTotal(url: String): Pair<List<ScrapedMovie>, Int> {
         val movies = mutableListOf<ScrapedMovie>()
         var maxPage = 1
@@ -313,34 +315,39 @@ class IsaidubProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // 'data' is the actual Isaidub movie URL passed directly from Phase 2
-        val resolutions = getResolutions(data)
-        if (resolutions.isEmpty()) return false
+        // Data can now contain multiple comma-separated URLs
+        val urls = data.split(",")
+        var foundAnyLinks = false
 
-        resolutions.forEach { res ->
-            val finalLink = extractFinalLink(res.url, 0, mutableSetOf())
-            if (finalLink != null) {
-                val isM3u8 = finalLink.contains(".m3u8", ignoreCase = true)
-                
-                callback.invoke(
-                    newExtractorLink(
-                        source = this.name,
-                        name = res.label,
-                        url = finalLink,
-                        type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                    ) {
-                        this.referer = "$mainUrl/"
-                        this.quality = Qualities.Unknown.value
-                        this.headers = mapOf(
-                            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                            "Accept" to "*/*",
-                            "Connection" to "keep-alive"
-                        )
-                    }
-                )
+        urls.forEach { targetUrl ->
+            val resolutions = getResolutions(targetUrl.trim())
+
+            resolutions.forEach { res ->
+                val finalLink = extractFinalLink(res.url, 0, mutableSetOf())
+                if (finalLink != null) {
+                    val isM3u8 = finalLink.contains(".m3u8", ignoreCase = true)
+                    
+                    callback.invoke(
+                        newExtractorLink(
+                            source = this.name,
+                            name = res.label,
+                            url = finalLink,
+                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                        ) {
+                            this.referer = "$mainUrl/"
+                            this.quality = Qualities.Unknown.value
+                            this.headers = mapOf(
+                                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                                "Accept" to "*/*",
+                                "Connection" to "keep-alive"
+                            )
+                        }
+                    )
+                    foundAnyLinks = true
+                }
             }
         }
-        return true
+        return foundAnyLinks
     }
 
     private suspend fun getResolutions(pageUrl: String, depth: Int = 0, maxDepth: Int = 2): List<ResolutionNode> {
