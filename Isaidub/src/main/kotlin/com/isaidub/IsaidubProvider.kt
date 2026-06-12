@@ -22,7 +22,6 @@ class IsaidubProvider : MainAPI() {
         "https://tmdb-proxy.cubecity.cloud/3"
     )
 
-    // Data classes for TMDB JSON parsing
     data class TmdbSearchResponse(val results: List<TmdbResult>?)
     data class TmdbResult(
         val title: String?,
@@ -59,13 +58,15 @@ class IsaidubProvider : MainAPI() {
             val title = item.title ?: item.name ?: return@amap null
             val year = item.release_date?.split("-")?.firstOrNull() ?: ""
             
-            val existsOnIsaidub = findIsaidubMoviePage(title, year) != null
+            // STRICT CHECK: Does it exist on Isaidub?
+            // This returns the exact, valid Isaidub URL!
+            val isaidubUrl = findIsaidubMoviePage(title, year)
             
-            if (existsOnIsaidub) {
+            if (isaidubUrl != null) {
                 val posterUrl = "https://image.tmdb.org/t/p/w500${item.poster_path}"
-                val targetData = "$mainUrl/${title}||${year}||${posterUrl}"
 
-                newMovieSearchResponse(title, targetData) {
+                // Pass the real Isaidub URL directly, bypassing the custom string injection
+                newMovieSearchResponse(title, isaidubUrl) {
                     this.posterUrl = posterUrl
                     this.year = year.toIntOrNull()
                 }
@@ -78,17 +79,19 @@ class IsaidubProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val cleanData = url.substringAfter("$mainUrl/")
-        val parts = cleanData.split("||")
-        if (parts.isEmpty()) return null
+        // Because the URL passed from search is the real URL, we can safely scrape it
+        val res = app.get(url, timeout = 8).document
         
-        val title = parts.getOrNull(0) ?: return null
-        val year = parts.getOrNull(1) ?: ""
-        val posterUrl = parts.getOrNull(2).takeIf { !it.isNullOrBlank() }
-
-        return newMovieLoadResponse(title, cleanData, TvType.Movie, cleanData) {
-            this.posterUrl = posterUrl
-            this.year = year.toIntOrNull()
+        // Fallback to URL parsing if title is empty
+        val title = res.selectFirst("title")?.text()?.replace("isaiDub.me -", "")?.trim() ?: "Movie"
+        
+        return newMovieLoadResponse(title, url, TvType.Movie, url) {
+            // Cloudstream will automatically carry over the poster and year from the search cache,
+            // but we can optionally scrape the site's native thumbnail just in case
+            val sitePoster = res.selectFirst("img")?.attr("src")
+            if (sitePoster != null) {
+                this.posterUrl = if (sitePoster.startsWith("http")) sitePoster else "$mainUrl$sitePoster"
+            }
         }
     }
 
@@ -98,14 +101,8 @@ class IsaidubProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val cleanData = data.substringAfter("$mainUrl/")
-        val parts = cleanData.split("||")
-        
-        val title = parts.getOrNull(0) ?: return false
-        val year = parts.getOrNull(1) ?: ""
-
-        val targetUrl = findIsaidubMoviePage(title, year) ?: return false
-        val resolutions = getResolutions(targetUrl)
+        // Data is the real Isaidub URL, so we jump straight into resolution extraction!
+        val resolutions = getResolutions(data)
 
         resolutions.forEach { res ->
             val finalLink = extractFinalLink(res.url, 0, mutableSetOf())
@@ -128,17 +125,14 @@ class IsaidubProvider : MainAPI() {
         return true
     }
 
-    // NEW: Intelligent Fuzzy Matcher anchored by Release Year
+    // Intelligent Fuzzy Matcher anchored by Release Year
     private fun isFuzzyMatch(tmdbTitle: String, isaidubText: String, year: String): Boolean {
         val cleanTmdbRaw = tmdbTitle.lowercase().replace(Regex("[^a-z0-9]"), "")
         val cleanIsaidubRaw = isaidubText.lowercase().replace(Regex("[^a-z0-9]"), "")
         
-        // 1. Direct substring match (covers 90% of normal movies)
         if (cleanIsaidubRaw.contains(cleanTmdbRaw) || cleanTmdbRaw.contains(cleanIsaidubRaw)) return true
 
-        // 2. Year-anchored Token Overlap (For franchise renames, Roman numeral drops, etc.)
         if (year.isNotBlank() && isaidubText.contains(year)) {
-            // Convert 'Part II' to '2', remove 'The', drop punctuation
             val normTmdb = tmdbTitle.lowercase()
                 .replace(Regex("part ii\\b"), "2")
                 .replace(Regex("part iii\\b"), "3")
@@ -149,7 +143,7 @@ class IsaidubProvider : MainAPI() {
                 .trim()
 
             val normIsaidub = isaidubText.lowercase()
-                .replace(year, "") // Remove year to prevent false positives in token matching
+                .replace(year, "")
                 .replace(Regex("[^a-z0-9\\s]"), " ")
                 .replace(Regex("^(the|a|an)\\s+"), "")
                 .trim()
@@ -159,15 +153,18 @@ class IsaidubProvider : MainAPI() {
 
             if (tmdbTokens.isEmpty() || isaidubTokens.isEmpty()) return false
 
-            // Count how many significant TMDB words exist in the Isaidub title
             val matchCount = tmdbTokens.count { isaidubTokens.contains(it) }
             val matchPercentage = matchCount.toDouble() / tmdbTokens.size
 
-            // If it's a single word title, require exact token. Otherwise, 50% overlap is enough if the year is perfect.
-            return if (tmdbTokens.size == 1) {
+            // STRICTER SEQUEL LOGIC: 
+            return if (tmdbTokens.size <= 2) {
+                // Short titles like "Hangover 2" MUST match 100% of their words
                 matchPercentage == 1.0
             } else {
-                matchPercentage >= 0.5
+                // Longer titles require 60% match AND at least one major word to match
+                // (Prevents matching solely on numbers like "2" or "3")
+                val significantMatches = tmdbTokens.filter { isaidubTokens.contains(it) && it.length > 2 }
+                matchPercentage >= 0.6 && significantMatches.isNotEmpty()
             }
         }
         return false
@@ -176,7 +173,6 @@ class IsaidubProvider : MainAPI() {
     private suspend fun findIsaidubMoviePage(title: String, year: String): String? {
         val cleanTitle = title.replace(" ", "")
         
-        // Apply our roman numeral / 'the' normalizer to the slug guesser as well
         val advancedNormalizedTitle = title.lowercase()
             .replace(Regex("part ii\\b"), "2")
             .replace(Regex("part iii\\b"), "3")
@@ -213,7 +209,6 @@ class IsaidubProvider : MainAPI() {
             } catch (e: Exception) { }
         }
 
-        // Category Fallback Search
         val categories = mutableListOf("$mainUrl/")
         if (year.isNotBlank()) categories.add("$mainUrl/tamil-$year-dubbed-movies/")
 
@@ -232,7 +227,6 @@ class IsaidubProvider : MainAPI() {
                     val text = a.text().trim().ifBlank { a.selectFirst("img")?.attr("alt") ?: "" }
 
                     if (href.contains("/movie/") || href.contains("-dubbed-movie")) {
-                        // Pass to our intelligent fuzzy matcher
                         val isFuzzy = isFuzzyMatch(title, text, year)
                         val isSlugMatch = slugsToTest.any { href.contains(it) }
 
