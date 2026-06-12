@@ -13,7 +13,7 @@ import java.net.URLEncoder
 class IsaidubProvider : MainAPI() {
     override var mainUrl = "https://isaidub.guru"
     override var name = "Isaidub"
-    override val hasMainPage = true // HOMEPAGE ENABLED
+    override val hasMainPage = true 
     override var supportedTypes = setOf(TvType.Movie)
     override var lang = "ta"
 
@@ -100,7 +100,7 @@ class IsaidubProvider : MainAPI() {
 
     // --- PHASE 0: HOMEPAGE LOGIC ---
 
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         val movies = mutableListOf<SearchResponse>()
         try {
             // 1. Hit the Yearly Categories page
@@ -118,7 +118,7 @@ class IsaidubProvider : MainAPI() {
                 }
             }
 
-            if (latestYearUrl.isEmpty()) return HomePageResponse(emptyList())
+            if (latestYearUrl.isEmpty()) return newHomePageResponse(emptyList(), false)
 
             // 2. Fetch the movies from the newest year
             val latestDoc = app.get(latestYearUrl, timeout = 15).document
@@ -133,7 +133,6 @@ class IsaidubProvider : MainAPI() {
                 val lowerTitle = title.lowercase()
                 val lowerLink = link.lowercase()
                 
-                // Strictly bypass TV/Web Series based on naming conventions
                 if (lowerTitle.contains("web series") || lowerLink.contains("web-series") ||
                     lowerTitle.contains("season") || lowerTitle.contains("episode")) {
                     continue
@@ -143,18 +142,15 @@ class IsaidubProvider : MainAPI() {
                 if (validMovieLinks.size >= 10) break
             }
 
-            // 4. Concurrently fetch the exact native posters from the movie pages
+            // 4. Concurrently fetch posters
             val searchResponses = validMovieLinks.amap { (title, link) ->
                 val posterUrl = fetchPosterUrl(link) ?: "$mainUrl/uploads/posters/default.jpg"
-                
-                // Clean up title for UI
                 val cleanTitle = title.replace("isaiDub.me", "").replace("-", "").trim()
                 
                 val t = URLEncoder.encode(cleanTitle, "UTF-8")
                 val y = URLEncoder.encode(latestYear, "UTF-8")
                 val p = URLEncoder.encode(posterUrl, "UTF-8")
                 
-                // Pack metadata so load() catches it flawlessly
                 val targetData = "$mainUrl/synthetic_meta?t=$t&y=$y&p=$p"
 
                 newMovieSearchResponse(cleanTitle, targetData) {
@@ -168,17 +164,18 @@ class IsaidubProvider : MainAPI() {
             e.printStackTrace()
         }
 
-        return HomePageResponse(
+        // Fixed using the updated newHomePageResponse factory function
+        return newHomePageResponse(
             listOf(
                 HomePageList(
                     "New Tamil Dubbed Movies",
                     movies,
                     isHorizontalImages = false
                 )
-            )
+            ),
+            hasNext = false
         )
     }
-
 
     // --- PHASE 1: SEARCH (TMDB METADATA ONLY + FILTERING) ---
 
@@ -372,7 +369,6 @@ class IsaidubProvider : MainAPI() {
         return Pair(movies, maxPage)
     }
 
-    // Extended with picture > img targeting for accuracy on homepage media
     private suspend fun fetchPosterUrl(movieUrl: String): String? {
         return try {
             val doc = app.get(movieUrl, timeout = 15).document
