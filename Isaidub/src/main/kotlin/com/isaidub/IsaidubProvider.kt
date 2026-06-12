@@ -1,4 +1,4 @@
-package com.isaidub // Fixed package name for successful GitHub Actions build!
+package com.isaidub // Correct package for your build
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
@@ -39,7 +39,6 @@ class IsaidubProvider : MainAPI() {
         "09ad8ace66eec34302943272db0e8d2c"
     )
     
-    // Aggressive fallback routing to bypass Indian ISP blocks instantly
     private val tmdbUrls = listOf(
         "https://api.themoviedb.org/3",
         "https://api.tmdb.org/3",
@@ -52,7 +51,7 @@ class IsaidubProvider : MainAPI() {
         val name: String?,
         val release_date: String?,
         val poster_path: String?,
-        val backdrop_path: String? // ADDED: Grabs the wide hero artwork!
+        val backdrop_path: String? // Essential for TV Hero Carousel
     )
 
     data class ScrapedMovie(val title: String, val link: String)
@@ -100,14 +99,10 @@ class IsaidubProvider : MainAPI() {
 
         for (movie in movies) {
             val titleLower = movie.title.lowercase()
-
-            if (tmdbYear.isNotBlank() && !titleLower.contains(tmdbYear)) {
-                continue
-            }
+            if (tmdbYear.isNotBlank() && !titleLower.contains(tmdbYear)) continue
 
             val siteTokens = tokenize(normalizeTitle(movie.title), yearToRemove = tmdbYear)
             val commonTokens = tmdbTokens.intersect(siteTokens)
-
             val matchPercentage = commonTokens.size.toDouble() / tmdbTokens.size
 
             val isMatch = if (tmdbTokens.size <= 2) {
@@ -117,14 +112,12 @@ class IsaidubProvider : MainAPI() {
                 matchPercentage >= 0.6 && significantMatches.isNotEmpty()
             }
 
-            if (isMatch) {
-                matches.add(Pair(movie, commonTokens.size))
-            }
+            if (isMatch) matches.add(Pair(movie, commonTokens.size))
         }
         return matches.sortedByDescending { it.second }.map { it.first }
     }
 
-    // Fetches full TMDB metadata object to access both Poster and Backdrop
+    // Returns full TmdbResult to access both backdrops and posters
     private suspend fun fetchTmdbMetadata(rawTitle: String, fallbackYear: String = ""): Pair<TmdbResult?, String> {
         val cleanName = rawTitle.replace("isaiDub.me", "").replace("-", "").trim()
         val yearRegex = Regex("\\b(19|20)\\d{2}\\b").find(cleanName)
@@ -141,7 +134,6 @@ class IsaidubProvider : MainAPI() {
                     } else {
                         "$baseUrl/search/movie?api_key=$apiKey&query=$encodedQuery"
                     }
-                    // 2-second timeout guarantees ultra-fast ISP bypass jumping
                     val response = app.get(url, timeout = 2)
                     if (response.isSuccessful && response.text.contains("results")) {
                         val parsed = AppUtils.parseJson<TmdbSearchResponse>(response.text)
@@ -156,7 +148,67 @@ class IsaidubProvider : MainAPI() {
         return Pair(null, extractedYear) 
     }
 
-    private suspend fun fetchSectionItems(targetUrl: String, sectionYear: String = "", isCarousel: Boolean = false): List<SearchResponse> {
+    // Fetches top 12 items, splits top 5 to Carousel (wide) and next 7 to Standard (tall)
+    private suspend fun fetchFeaturedAndNew(targetUrl: String, sectionYear: String = ""): Pair<List<SearchResponse>, List<SearchResponse>> {
+        val carouselList = mutableListOf<SearchResponse>()
+        val standardList = mutableListOf<SearchResponse>()
+        try {
+            val doc = app.get(targetUrl, timeout = 15).document
+            val validMovieLinks = mutableListOf<Pair<String, String>>()
+            
+            for (a in doc.select("div.f a")) {
+                val title = a.text().trim()
+                var link = a.attr("href")
+                if (link.startsWith("/")) link = "$mainUrl$link"
+                
+                val lowerTitle = title.lowercase()
+                val lowerLink = link.lowercase()
+                
+                if (lowerTitle.contains("web series") || lowerLink.contains("web-series") ||
+                    lowerTitle.contains("season") || lowerTitle.contains("episode")) continue
+                
+                validMovieLinks.add(Pair(title, link))
+                if (validMovieLinks.size >= 12) break // Fetch 12 total
+            }
+
+            val responses = validMovieLinks.amap { (title, _) ->
+                val cleanTitle = title.replace("isaiDub.me", "").replace("-", "").trim()
+                val (tmdbMatch, resolvedYear) = fetchTmdbMetadata(cleanTitle, sectionYear)
+                
+                if (tmdbMatch != null && !tmdbMatch.poster_path.isNullOrBlank()) {
+                    Triple(cleanTitle, resolvedYear, tmdbMatch)
+                } else null
+            }.filterNotNull()
+
+            responses.forEachIndexed { index, (cleanTitle, resolvedYear, tmdbMatch) ->
+                val tallPoster = "https://image.tmdb.org/t/p/w500${tmdbMatch.poster_path}"
+                val wideBackdrop = tmdbMatch.backdrop_path?.let { "https://image.tmdb.org/t/p/w780$it" } ?: tallPoster
+                
+                val t = URLEncoder.encode(cleanTitle, "UTF-8")
+                val y = URLEncoder.encode(resolvedYear, "UTF-8")
+                val p = URLEncoder.encode(tallPoster, "UTF-8") // Securely packs tall poster for Continue Watching
+                
+                val targetData = "$mainUrl/synthetic_meta?t=$t&y=$y&p=$p"
+
+                if (index < 5) {
+                    // Inject into Wide Hero Carousel
+                    carouselList.add(newMovieSearchResponse(cleanTitle, targetData) {
+                        this.posterUrl = wideBackdrop
+                        this.year = resolvedYear.toIntOrNull()
+                    })
+                } else {
+                    // Inject into Standard Vertical List
+                    standardList.add(newMovieSearchResponse(cleanTitle, targetData) {
+                        this.posterUrl = tallPoster
+                        this.year = resolvedYear.toIntOrNull()
+                    })
+                }
+            }
+        } catch (e: Exception) { }
+        return Pair(carouselList, standardList)
+    }
+
+    private suspend fun fetchSectionItems(targetUrl: String, sectionYear: String = ""): List<SearchResponse> {
         val listItems = mutableListOf<SearchResponse>()
         try {
             val doc = app.get(targetUrl, timeout = 15).document
@@ -170,11 +222,8 @@ class IsaidubProvider : MainAPI() {
                 val lowerTitle = title.lowercase()
                 val lowerLink = link.lowercase()
                 
-                // Blocks TV shows and Web Series from injecting into movie directories
                 if (lowerTitle.contains("web series") || lowerLink.contains("web-series") ||
-                    lowerTitle.contains("season") || lowerTitle.contains("episode")) {
-                    continue
-                }
+                    lowerTitle.contains("season") || lowerTitle.contains("episode")) continue
                 
                 validMovieLinks.add(Pair(title, link))
                 if (validMovieLinks.size >= 6) break
@@ -184,24 +233,19 @@ class IsaidubProvider : MainAPI() {
                 val cleanTitle = title.replace("isaiDub.me", "").replace("-", "").trim()
                 val (tmdbMatch, resolvedYear) = fetchTmdbMetadata(cleanTitle, sectionYear)
                 
-                // Drop entirely if TMDB metadata or posters are unavailable
                 if (tmdbMatch == null || tmdbMatch.poster_path.isNullOrBlank()) {
                     null
                 } else {
                     val tallPoster = "https://image.tmdb.org/t/p/w500${tmdbMatch.poster_path}"
-                    val wideBackdrop = tmdbMatch.backdrop_path?.let { "https://image.tmdb.org/t/p/w780$it" } ?: tallPoster
-                    
-                    // Determines whether to display the tall poster or the wide backdrop
-                    val displayImage = if (isCarousel) wideBackdrop else tallPoster
                     
                     val t = URLEncoder.encode(cleanTitle, "UTF-8")
                     val y = URLEncoder.encode(resolvedYear, "UTF-8")
-                    val p = URLEncoder.encode(tallPoster, "UTF-8") // Securely packs the tall poster for Continue Watching!
+                    val p = URLEncoder.encode(tallPoster, "UTF-8")
                     
                     val targetData = "$mainUrl/synthetic_meta?t=$t&y=$y&p=$p"
 
                     newMovieSearchResponse(cleanTitle, targetData) {
-                        this.posterUrl = displayImage
+                        this.posterUrl = tallPoster
                         this.year = resolvedYear.toIntOrNull()
                     }
                 }
@@ -231,17 +275,25 @@ class IsaidubProvider : MainAPI() {
             }
 
             coroutineScope {
-                // Passes 'isCarousel = true' exclusively to the first list to fetch backdrop artwork
-                val newMoviesDeferred = async { if (latestYearUrl.isNotEmpty()) fetchSectionItems(latestYearUrl, latestYear, isCarousel = true) else emptyList() }
+                val heroAndNewDeferred = async { 
+                    if (latestYearUrl.isNotEmpty()) fetchFeaturedAndNew(latestYearUrl, latestYear) 
+                    else Pair(emptyList(), emptyList()) 
+                }
                 val actionDeferred = async { fetchSectionItems("$mainUrl/tamil-action-dubbed-movies/") }
                 val comedyDeferred = async { fetchSectionItems("$mainUrl/tamil-comedy-dubbed-movies/") }
                 val horrorDeferred = async { fetchSectionItems("$mainUrl/tamil-horror-dubbed-movies/") }
                 val familyDeferred = async { fetchSectionItems("$mainUrl/tamil-family-dubbed-movies/") }
 
-                val newMoviesList = newMoviesDeferred.await()
-                if (newMoviesList.isNotEmpty()) {
-                    // isHorizontalImages = true triggers Cloudstream to mount it into the TV/Desktop Hero Carousel!
-                    homePageLists.add(HomePageList("New Tamil Dubbed Movies", newMoviesList, isHorizontalImages = true))
+                val (carouselList, standardNewList) = heroAndNewDeferred.await()
+
+                // Mounts as Hero Carousel on TV, and sleek wide cards on Mobile
+                if (carouselList.isNotEmpty()) {
+                    homePageLists.add(HomePageList("Featured", carouselList, isHorizontalImages = true))
+                }
+                
+                // Mounts as standard tall posters under the Carousel
+                if (standardNewList.isNotEmpty()) {
+                    homePageLists.add(HomePageList("New Tamil Dubbed Movies", standardNewList, isHorizontalImages = false))
                 }
                 
                 val sections = listOf(
