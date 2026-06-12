@@ -16,9 +16,7 @@ class IsaidubProvider : MainAPI() {
 
     private val tmdbApiKey = "1b3113663c9004682ed61086cf967c44"
     
-    // TMDB Fallback array: Official -> Mirror -> Proxy
     private val tmdbUrls = listOf(
-        "https://api.themoviedb.org/3",
         "https://api.tmdb.org/3",
         "https://tmdb-proxy.cubecity.cloud/3"
     )
@@ -59,23 +57,23 @@ class IsaidubProvider : MainAPI() {
             val title = item.title ?: item.name ?: return@amap null
             val year = item.release_date?.split("-")?.firstOrNull() ?: ""
             
-            // STRICT CHECK: Does it exist on Isaidub?
-            val isaidubUrl = findIsaidubMoviePage(title, year)
+            // Returns Pair(VerifiedUrl, ScrapedSitePosterUrl)
+            val isaidubData = findIsaidubMoviePage(title, year)
             
-            if (isaidubUrl != null) {
-                // Generate the NATIVE Isaidub poster directly from the verified URL slug
-                val slug = isaidubUrl.trimEnd('/').substringAfterLast("/")
-                val cleanSlug = slug.replace("-tamil-dubbed-movie", "").replace("-tamil-dubbed-web-series", "")
-                val sitePoster = "$mainUrl/uploads/posters/$cleanSlug.jpg"
+            if (isaidubData != null) {
+                val (isaidubUrl, sitePoster) = isaidubData
+                
+                // If we found a native Isaidub poster, use it! Otherwise, fallback to TMDB to prevent grey boxes.
+                val finalPoster = sitePoster ?: "https://image.tmdb.org/t/p/w500${item.poster_path}"
 
                 val t = URLEncoder.encode(title, "UTF-8")
                 val y = URLEncoder.encode(year, "UTF-8")
-                val p = URLEncoder.encode(sitePoster, "UTF-8")
+                val p = URLEncoder.encode(finalPoster, "UTF-8")
                 
                 val targetData = "$mainUrl/synthetic?t=$t&y=$y&p=$p"
 
                 newMovieSearchResponse(title, targetData) {
-                    this.posterUrl = sitePoster // Using Native Poster
+                    this.posterUrl = finalPoster 
                     this.year = year.toIntOrNull()
                 }
             } else {
@@ -120,7 +118,8 @@ class IsaidubProvider : MainAPI() {
         val title = queryParams["t"] ?: return false
         val year = queryParams["y"] ?: ""
 
-        val targetUrl = findIsaidubMoviePage(title, year) ?: return false
+        // Extract just the URL from the Pair
+        val targetUrl = findIsaidubMoviePage(title, year)?.first ?: return false
         val resolutions = getResolutions(targetUrl)
 
         resolutions.forEach { res ->
@@ -149,7 +148,6 @@ class IsaidubProvider : MainAPI() {
         return true
     }
 
-    // Intelligent Fuzzy Matcher anchored by Release Year
     private fun isFuzzyMatch(tmdbTitle: String, isaidubText: String, year: String): Boolean {
         val cleanTmdbRaw = tmdbTitle.lowercase().replace(Regex("[^a-z0-9]"), "")
         val cleanIsaidubRaw = isaidubText.lowercase().replace(Regex("[^a-z0-9]"), "")
@@ -190,7 +188,8 @@ class IsaidubProvider : MainAPI() {
         return false
     }
 
-    private suspend fun findIsaidubMoviePage(title: String, year: String): String? {
+    // Returns Pair(VerifiedIsaidubUrl, ScrapedPosterUrl)
+    private suspend fun findIsaidubMoviePage(title: String, year: String): Pair<String, String?>? {
         val cleanTitle = title.replace(" ", "")
         
         val advancedNormalizedTitle = title.lowercase()
@@ -225,8 +224,13 @@ class IsaidubProvider : MainAPI() {
             val url = "$mainUrl/movie/$guess/"
             try {
                 val res = app.get(url, timeout = 5)
-                if (res.isSuccessful && res.code == 200) {
-                    return url
+                // PREVENT GHOSTS: Verify the resolved URL actually contains our slug (No homepage redirects!)
+                if (res.isSuccessful && res.code == 200 && res.url.contains(guess, ignoreCase = true)) {
+                    val rawImg = res.document.selectFirst("img")?.attr("src")
+                    val sitePoster = if (rawImg != null) {
+                        if (rawImg.startsWith("http")) rawImg else "$mainUrl$rawImg"
+                    } else null
+                    return Pair(url, sitePoster)
                 }
             } catch (e: Exception) { }
         }
@@ -253,7 +257,6 @@ class IsaidubProvider : MainAPI() {
                 try {
                     val res = app.get(url, timeout = 5).document
                     
-                    // Check if movie exists on this page
                     for (a in res.select("a[href]")) {
                         val href = a.attr("href")
                         val text = a.text().trim().ifBlank { a.selectFirst("img")?.attr("alt") ?: "" }
@@ -263,12 +266,19 @@ class IsaidubProvider : MainAPI() {
                             val isSlugMatch = slugsToTest.any { href.contains(it) }
 
                             if (isFuzzy || isSlugMatch) {
-                                return if (href.startsWith("http")) href else "$mainUrl$href"
+                                val finalUrl = if (href.startsWith("http")) href else "$mainUrl$href"
+                                
+                                // Scrape the poster directly from the category list item!
+                                val rawImg = a.selectFirst("img")?.attr("src") ?: a.parent()?.selectFirst("img")?.attr("src")
+                                val sitePoster = if (rawImg != null) {
+                                    if (rawImg.startsWith("http")) rawImg else "$mainUrl$rawImg"
+                                } else null
+                                
+                                return Pair(finalUrl, sitePoster)
                             }
                         }
                     }
 
-                    // Dynamically extract the last existing page number from the pagination block
                     if (currentPage == 1) {
                         res.select("a[href]").forEach { a ->
                             val href = a.attr("href")
@@ -276,7 +286,7 @@ class IsaidubProvider : MainAPI() {
                             
                             if (href.contains("?get-page=") || href.contains("/page/")) {
                                 val num = Regex("""(?:get-page=|page/)(\d+)""").find(href)?.groupValues?.get(1)?.toIntOrNull()
-                                if (num != null && num > maxPage && num <= 25) { // Cap at 25 to prevent infinite loops
+                                if (num != null && num > maxPage && num <= 25) { 
                                     maxPage = num
                                 }
                             } else if (text.toIntOrNull() != null) {
