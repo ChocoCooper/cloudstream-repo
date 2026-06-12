@@ -1,4 +1,4 @@
-package com.lagradost.cloudstream3.extractors // Adjust package name to match your repository
+package com.isaidub // Adjust package name to match your repository
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
