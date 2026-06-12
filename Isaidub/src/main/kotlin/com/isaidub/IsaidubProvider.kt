@@ -38,32 +38,60 @@ class IsaidubProvider : MainAPI() {
 
     // --- TOKENIZATION & MATCHING HELPERS ---
 
-    private fun tokenize(text: String): Set<String> {
-        return text.lowercase()
+    private fun normalizeTitle(title: String): String {
+        var text = title.lowercase().trim()
+        text = text.replace("&", "and")
+        text = text.replace("judgment", "judgement")
+
+        val romanMap = mapOf(
+            "ii" to "2", "iii" to "3", "iv" to "4", "v" to "5",
+            "vi" to "6", "vii" to "7", "viii" to "8", "ix" to "9"
+        )
+        romanMap.forEach { (roman, digit) ->
+            text = text.replace(Regex("\\b(part|vol|chapter|volume)\\s+$roman\\b"), digit)
+        }
+        return text
+    }
+
+    private fun tokenize(text: String, yearToRemove: String = ""): Set<String> {
+        var cleanText = text.lowercase()
+        if (yearToRemove.isNotBlank()) {
+            cleanText = cleanText.replace(yearToRemove, "")
+        }
+        
+        return cleanText
             .replace(Regex("[^\u0000-\u007F]"), " ") 
             .replace(Regex("[^a-z0-9\\s]"), " ")   
+            .replace(Regex("^(the|a|an)\\s+"), "")
             .split(Regex("\\s+"))
             .filter { it.isNotBlank() }
             .toSet()
     }
 
     private fun searchByTokenAndYear(movies: List<ScrapedMovie>, tmdbTitle: String, tmdbYear: String): List<ScrapedMovie> {
-        val tmdbTokens = tokenize(tmdbTitle)
+        val tmdbTokens = tokenize(normalizeTitle(tmdbTitle))
         val matches = mutableListOf<Pair<ScrapedMovie, Int>>()
 
         for (movie in movies) {
             val titleLower = movie.title.lowercase()
 
-            // Year Verification
             if (tmdbYear.isNotBlank() && !titleLower.contains(tmdbYear)) {
                 continue
             }
 
-            // Token Intersection
-            val siteTokens = tokenize(movie.title)
+            val siteTokens = tokenize(normalizeTitle(movie.title), yearToRemove = tmdbYear)
             val commonTokens = tmdbTokens.intersect(siteTokens)
 
-            if (commonTokens.size >= 2) {
+            val matchPercentage = commonTokens.size.toDouble() / tmdbTokens.size
+
+            val isMatch = if (tmdbTokens.size <= 2) {
+                matchPercentage == 1.0
+            } else {
+                val significantMatches = tmdbTokens.filter { siteTokens.contains(it) && it.length > 2 }
+                matchPercentage >= 0.6 && significantMatches.isNotEmpty()
+            }
+
+            if (isMatch) {
                 matches.add(Pair(movie, commonTokens.size))
             }
         }
@@ -79,7 +107,7 @@ class IsaidubProvider : MainAPI() {
         for (baseUrl in tmdbUrls) {
             try {
                 val url = "$baseUrl/search/movie?api_key=$tmdbApiKey&query=$encodedQuery"
-                val response = app.get(url, timeout = 5)
+                val response = app.get(url, timeout = 15)
                 if (response.isSuccessful && response.text.contains("results")) {
                     tmdbJson = response
                     break
@@ -90,7 +118,6 @@ class IsaidubProvider : MainAPI() {
         if (tmdbJson == null) return emptyList()
         val parsed = AppUtils.parseJson<TmdbSearchResponse>(tmdbJson.text)
         
-        // Filter out unreleased movies and those missing posters
         val currentDate = "2026-06-12"
         val validTmdbResults = parsed.results?.filter { item ->
             val hasPoster = !item.poster_path.isNullOrBlank()
@@ -108,7 +135,6 @@ class IsaidubProvider : MainAPI() {
             val y = URLEncoder.encode(year, "UTF-8")
             val p = URLEncoder.encode(fullPoster, "UTF-8")
             
-            // Pack metadata into a temporary synthetic data payload for the load stage
             val targetData = "$mainUrl/synthetic_meta?t=$t&y=$y&p=$p"
 
             newMovieSearchResponse(title, targetData) {
@@ -134,15 +160,12 @@ class IsaidubProvider : MainAPI() {
         val fallbackPoster = queryParams["p"]
         val yearInt = year.toIntOrNull()
 
-        // Generate Target Navigation Paths
         val urlsToScan = mutableListOf<String>()
 
-        // 1. Year Directory Check (1980 - 2026 Boundaries)
         if (yearInt != null && yearInt in 1980..2026) {
             urlsToScan.add("$mainUrl/tamil-$yearInt-dubbed-movies/")
         }
 
-        // 2. Fallback to Targeted Alphabet Directories
         val cleanedTitle = title.trim()
         val firstChar = cleanedTitle.firstOrNull()?.lowercaseChar()
         if (firstChar != null) {
@@ -153,7 +176,6 @@ class IsaidubProvider : MainAPI() {
             }
         }
 
-        // Skip leading grammar articles for parallel options
         val articles = listOf("the ", "a ", "an ")
         for (article in articles) {
             if (cleanedTitle.lowercase().startsWith(article)) {
@@ -171,28 +193,35 @@ class IsaidubProvider : MainAPI() {
 
         var matchedMovie: ScrapedMovie? = null
 
-        // Crawl through resolved directory paths
         for (targetBaseUrl in urlsToScan.distinct()) {
             if (matchedMovie != null) break 
 
-            val totalPages = getTotalPages(targetBaseUrl)
-            if (totalPages > 0) {
+            // Grab page 1 and extract the max pagination boundaries simultaneously
+            val (page1Movies, totalPages) = scrapePageAndGetTotal(targetBaseUrl)
+            
+            // Instantly verify page 1 before firing off coroutines
+            val page1Hits = searchByTokenAndYear(page1Movies, title, year)
+            if (page1Hits.isNotEmpty()) {
+                matchedMovie = page1Hits.first()
+                break
+            }
+
+            if (totalPages > 1) {
                 val chunkSize = 5
-                val totalChunks = (totalPages + chunkSize - 1) / chunkSize
+                val totalChunks = (totalPages - 1 + chunkSize - 1) / chunkSize 
 
                 for (chunkIdx in 0 until totalChunks) {
                     if (matchedMovie != null) break
 
-                    val startPage = chunkIdx * chunkSize + 1
+                    val startPage = chunkIdx * chunkSize + 2 
                     val endPage = minOf(startPage + chunkSize - 1, totalPages)
                     val pagesToScan = (startPage..endPage).toList()
 
-                    // Concurrently pull 5 index pages via Coroutines
                     val chunkResults = coroutineScope {
                         pagesToScan.map { page ->
                             async {
-                                val targetUrl = if (page == 1) targetBaseUrl else "$targetBaseUrl$page/"
-                                scrapeSinglePage(targetUrl)
+                                val targetUrl = "$targetBaseUrl?get-page=$page"
+                                scrapePageAndGetTotal(targetUrl).first
                             }
                         }.awaitAll()
                     }
@@ -208,30 +237,23 @@ class IsaidubProvider : MainAPI() {
             }
         }
 
-        // Return the resolved Isaidub page or cancel if not found
         val finalMoviePage = matchedMovie?.link ?: return null
         val finalPoster = fetchPosterUrl(finalMoviePage) ?: fallbackPoster
 
+        // Passes the ACTUAL scraped URL forward for loadLinks
         return newMovieLoadResponse(title, finalMoviePage, TvType.Movie, finalMoviePage) {
             this.posterUrl = finalPoster
             this.year = yearInt
         }
     }
 
-    private suspend fun getTotalPages(url: String): Int {
-        return try {
-            val doc = app.get(url, timeout = 5).document
-            val totalPagesSpan = doc.selectFirst("span#totalPages")
-            totalPagesSpan?.text()?.trim()?.toIntOrNull() ?: 1
-        } catch (e: Exception) {
-            0
-        }
-    }
-
-    private suspend fun scrapeSinglePage(url: String): List<ScrapedMovie> {
+    // Scrapes movie elements and calculates pagination maximum in a single HTTP request
+    private suspend fun scrapePageAndGetTotal(url: String): Pair<List<ScrapedMovie>, Int> {
         val movies = mutableListOf<ScrapedMovie>()
+        var maxPage = 1
         try {
-            val doc = app.get(url, timeout = 5).document
+            val doc = app.get(url, timeout = 15).document
+            
             val movieDivs = doc.select("div.f")
             for (div in movieDivs) {
                 val aTag = div.selectFirst("a")
@@ -244,13 +266,34 @@ class IsaidubProvider : MainAPI() {
                     movies.add(ScrapedMovie(title, link))
                 }
             }
+
+            val totalPagesSpan = doc.selectFirst("span#totalPages")
+            if (totalPagesSpan != null) {
+                maxPage = totalPagesSpan.text().trim().toIntOrNull() ?: 1
+            } else {
+                doc.select("a[href]").forEach { a ->
+                    val href = a.attr("href")
+                    val text = a.text().trim()
+                    if (href.contains("?get-page=") || href.contains("/page/")) {
+                        val num = Regex("""(?:get-page=|page/)(\d+)""").find(href)?.groupValues?.get(1)?.toIntOrNull()
+                        if (num != null && num > maxPage && num <= 25) { 
+                            maxPage = num
+                        }
+                    } else if (text.toIntOrNull() != null) {
+                        val num = text.toIntOrNull()
+                        if (num != null && num > maxPage && num <= 25 && href.length < 50) {
+                            maxPage = num
+                        }
+                    }
+                }
+            }
         } catch (e: Exception) { }
-        return movies
+        return Pair(movies, maxPage)
     }
 
     private suspend fun fetchPosterUrl(movieUrl: String): String? {
         return try {
-            val doc = app.get(movieUrl, timeout = 5).document
+            val doc = app.get(movieUrl, timeout = 15).document
             val container = doc.selectFirst("div.movie-info-container")
             val img = container?.selectFirst("img") ?: doc.selectFirst("img[src*=poster]")
             val src = img?.attr("src")
@@ -270,12 +313,11 @@ class IsaidubProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // Find internal server links/nodes from the matched movie entry page
+        // 'data' is the actual Isaidub movie URL passed directly from Phase 2
         val resolutions = getResolutions(data)
         if (resolutions.isEmpty()) return false
 
         resolutions.forEach { res ->
-            // Deep crawl to final download.php or stream location
             val finalLink = extractFinalLink(res.url, 0, mutableSetOf())
             if (finalLink != null) {
                 val isM3u8 = finalLink.contains(".m3u8", ignoreCase = true)
@@ -308,7 +350,7 @@ class IsaidubProvider : MainAPI() {
         val folderPages = mutableListOf<String>()
 
         try {
-            val doc = app.get(pageUrl, timeout = 6).document
+            val doc = app.get(pageUrl, timeout = 15).document
             for (a in doc.select("a[href]")) {
                 val href = a.attr("href")
                 val text = a.text().trim()
@@ -354,7 +396,7 @@ class IsaidubProvider : MainAPI() {
         seen.add(url)
 
         try {
-            val res = app.get(url, timeout = 8)
+            val res = app.get(url, timeout = 15)
             if (res.headers["content-type"]?.contains("video/") == true) {
                 return res.url
             }
