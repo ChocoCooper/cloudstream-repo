@@ -17,7 +17,8 @@ class MegaStreamProvider : MainAPI() {
     override var supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
     override var lang = "en"
 
-    private val extractors = MegaStreamExtractors()
+    // Initializes extraction router securely with 'this' reference for newExtractorLink capability
+    private val extractors by lazy { MegaStreamExtractors(this) }
     private var activeOmdbKeys = MegaStreamConstants.OMDB_KEYS.toMutableList()
 
     // OMDb JSON Data Models
@@ -72,7 +73,9 @@ class MegaStreamProvider : MainAPI() {
                     return@async emptyList<SearchResponse>()
                 }
 
-                val parsed = AppUtils.parseJson<OmdbSearchResponse>(res.text)
+                // BYPASSES COMPILER DAEMON CRASH: Using explicit class mapping instead of inline reified generics
+                val parsed = AppUtils.mapper.readValue(res.text, OmdbSearchResponse::class.java)
+                
                 parsed.Search?.filter { it.Poster != "N/A" }?.mapNotNull { item ->
                     val title = item.Title ?: return@mapNotNull null
                     val imdbId = item.imdbID ?: return@mapNotNull null
@@ -131,7 +134,9 @@ class MegaStreamProvider : MainAPI() {
             // Fetch detailed Plot/Metadata from OMDb
             val apiKey = getRandomApiKey()
             val metaUrl = "${MegaStreamConstants.OMDB_BASE_URL}/?apikey=$apiKey&i=$imdbId&plot=full"
-            val metaRes = AppUtils.parseJson<OmdbTitleResponse>(app.get(metaUrl).text)
+            
+            // BYPASSES COMPILER DAEMON CRASH: Using explicit class mapping
+            val metaRes = AppUtils.mapper.readValue(app.get(metaUrl).text, OmdbTitleResponse::class.java)
             
             resolvedTitle = metaRes.Title ?: "Unknown"
             resolvedPoster = metaRes.Poster.takeIf { it != "N/A" } ?: ""
