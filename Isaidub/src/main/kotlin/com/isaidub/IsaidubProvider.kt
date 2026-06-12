@@ -10,6 +10,7 @@ import java.net.URLEncoder
 import kotlin.random.Random
 
 class IsaidubProvider : MainAPI() {
+    // ⬇️ UPDATE DOMAINS HERE IF THEY EVER CHANGE ⬇️
     override var mainUrl = "https://isaidub.guru" 
     val kuttyUrl = "https://kuttymovies1.fast"
     
@@ -18,7 +19,6 @@ class IsaidubProvider : MainAPI() {
     override var supportedTypes = setOf(TvType.Movie)
     override var lang = "ta"
 
-    // Massive OMDb Key Rotation Array
     private val omdbApiKeys = listOf(
         "4b447405", "eb0c0475", "7776cbde", "ff28f90b",
         "6c3a2d45", "b07b58c8", "ad04b643", "a95b5205",
@@ -26,7 +26,6 @@ class IsaidubProvider : MainAPI() {
         "73a9858a", "efbd8357"
     )
 
-    // OMDb JSON Data Models
     data class OmdbSearchResponse(val Search: List<OmdbSearchResult>?, val Response: String?)
     data class OmdbSearchResult(val Title: String?, val Year: String?, val Poster: String?)
     data class OmdbTitleResponse(val Title: String?, val Year: String?, val Poster: String?, val Plot: String?, val Response: String?)
