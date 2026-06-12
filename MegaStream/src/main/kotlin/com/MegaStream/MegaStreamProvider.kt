@@ -17,8 +17,11 @@ class MegaStreamProvider : MainAPI() {
     override var supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
     override var lang = "en"
 
+    // Initializes extraction router securely with 'this' reference for newExtractorLink capability
+    private val extractors by lazy { MegaStreamExtractors(this) }
     private var activeOmdbKeys = MegaStreamConstants.OMDB_KEYS.toMutableList()
 
+    // OMDb JSON Data Models
     data class OmdbSearchResponse(val Search: List<OmdbSearchResult>?, val Response: String?)
     data class OmdbSearchResult(val Title: String?, val Year: String?, val imdbID: String?, val Type: String?, val Poster: String?)
     data class OmdbTitleResponse(val Title: String?, val Year: String?, val Plot: String?, val Poster: String?, val imdbID: String?)
@@ -37,9 +40,11 @@ class MegaStreamProvider : MainAPI() {
         return AppUtils.tryParseJson<OmdbTitleResponse>(json)
     }
 
+    // --- PHASE 0: HOMEPAGE (StreamPlay DOM Scraping) ---
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val homePageLists = mutableListOf<HomePageList>()
         val scrapedResults = mutableListOf<SearchResponse>()
+        
         try {
             val doc = app.get(mainUrl).document
             doc.select(".items .item").forEach { element ->
@@ -48,7 +53,9 @@ class MegaStreamProvider : MainAPI() {
                 val poster = element.selectFirst("img")?.attr("src") ?: ""
                 val fullLink = if (link.startsWith("/")) "$mainUrl$link" else link
                 
-                val payload = "streamplay://$fullLink"
+                // FIXED: Use HTTP-compliant routing to prevent Cloudstream from breaking the URL
+                val encodedLink = URLEncoder.encode(fullLink, "UTF-8")
+                val payload = "$mainUrl/megastream_scrape?url=$encodedLink"
                 scrapedResults.add(newMovieSearchResponse(title, payload) { this.posterUrl = poster })
             }
             if (scrapedResults.isNotEmpty()) {
@@ -59,6 +66,7 @@ class MegaStreamProvider : MainAPI() {
         return newHomePageResponse(homePageLists, hasNext = false)
     }
 
+    // --- PHASE 1: HYBRID SEARCH (OMDb + StreamPlay) ---
     override suspend fun search(query: String): List<SearchResponse> {
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
         val results = mutableListOf<SearchResponse>()
@@ -74,7 +82,6 @@ class MegaStreamProvider : MainAPI() {
                     return@async emptyList<SearchResponse>()
                 }
 
-                // Explicitly parsed using safe helper method
                 val parsed = parseOmdbSearch(res.text) ?: return@async emptyList<SearchResponse>()
                 
                 parsed.Search?.filter { it.Poster != "N/A" }?.mapNotNull { item ->
@@ -82,7 +89,9 @@ class MegaStreamProvider : MainAPI() {
                     val imdbId = item.imdbID ?: return@mapNotNull null
                     val type = if (item.Type == "series") TvType.TvSeries else TvType.Movie
                     
-                    newMovieSearchResponse(title, "omdb://$imdbId?type=${type.name}", type) {
+                    // FIXED: HTTP-compliant OMDb routing
+                    val payload = "$mainUrl/megastream_omdb?id=$imdbId&type=${type.name}"
+                    newMovieSearchResponse(title, payload, type) {
                         this.posterUrl = item.Poster
                         this.year = item.Year?.replace(Regex("[^0-9]"), "")?.toIntOrNull()
                     }
@@ -95,7 +104,11 @@ class MegaStreamProvider : MainAPI() {
                     doc.select(".search-results .item").mapNotNull { element ->
                         val title = element.selectFirst(".title")?.text() ?: return@mapNotNull null
                         val link = element.selectFirst("a")?.attr("href") ?: return@mapNotNull null
-                        val payload = "streamplay://${if (link.startsWith("/")) "$mainUrl$link" else link}"
+                        val fullLink = if (link.startsWith("/")) "$mainUrl$link" else link
+                        
+                        // FIXED: HTTP-compliant scrape routing
+                        val encodedLink = URLEncoder.encode(fullLink, "UTF-8")
+                        val payload = "$mainUrl/megastream_scrape?url=$encodedLink"
                         
                         newMovieSearchResponse(title, payload) {
                             this.posterUrl = element.selectFirst("img")?.attr("src")
@@ -114,6 +127,7 @@ class MegaStreamProvider : MainAPI() {
         return results.distinctBy { it.name }
     }
 
+    // --- PHASE 2: LOAD METADATA AND GENERATE EMBED LINKS ---
     override suspend fun load(url: String): LoadResponse? {
         val streamLinks = mutableListOf<String>()
         var resolvedTitle = ""
@@ -122,17 +136,22 @@ class MegaStreamProvider : MainAPI() {
         var resolvedYear: Int? = null
         var tvType = TvType.Movie
 
-        if (url.startsWith("omdb://")) {
+        if (url.contains("/megastream_omdb")) {
+            // Unpack OMDb synthetic URL
             val uri = URI(url)
-            val imdbId = uri.host
-            val typeQuery = uri.query?.split("=")?.get(1) ?: "Movie"
+            val queryParams = uri.query?.split("&")?.associate {
+                val parts = it.split("=")
+                parts[0] to java.net.URLDecoder.decode(parts.getOrElse(1) { "" }, "UTF-8")
+            } ?: return null
+
+            val imdbId = queryParams["id"] ?: return null
+            val typeQuery = queryParams["type"] ?: "Movie"
             tvType = if (typeQuery == "TvSeries") TvType.TvSeries else TvType.Movie
             val endpoint = if (tvType == TvType.TvSeries) "tv" else "movie"
             
             val apiKey = getRandomApiKey()
             val metaUrl = "${MegaStreamConstants.OMDB_BASE_URL}/?apikey=$apiKey&i=$imdbId&plot=full"
             
-            // Explicitly parsed using safe helper method
             val metaRes = parseOmdbTitle(app.get(metaUrl).text) ?: return null
             
             resolvedTitle = metaRes.Title ?: "Unknown"
@@ -140,12 +159,24 @@ class MegaStreamProvider : MainAPI() {
             resolvedPlot = metaRes.Plot.takeIf { it != "N/A" } ?: ""
             resolvedYear = metaRes.Year?.replace(Regex("[^0-9]"), "")?.toIntOrNull()
 
+            // Pass the exact IMDb ID into the provider endpoints
             MegaStreamConstants.ID_PROVIDERS.forEach { provider ->
                 streamLinks.add("$provider/embed/$endpoint/$imdbId")
             }
 
-        } else if (url.startsWith("streamplay://")) {
-            val targetUrl = url.removePrefix("streamplay://")
+        } else if (url.contains("/megastream_scrape") || url.startsWith(mainUrl)) {
+            // Unpack StreamPlay synthetic URL OR fallback to raw URL load
+            val targetUrl = if (url.contains("/megastream_scrape")) {
+                val uri = URI(url)
+                val queryParams = uri.query?.split("&")?.associate {
+                    val parts = it.split("=")
+                    parts[0] to java.net.URLDecoder.decode(parts.getOrElse(1) { "" }, "UTF-8")
+                }
+                queryParams?.get("url") ?: return null
+            } else {
+                url // Direct fallback if an old bookmark is loaded
+            }
+
             val doc = app.get(targetUrl).document
             
             resolvedTitle = doc.selectFirst("h1.title")?.text() ?: return null
@@ -153,23 +184,27 @@ class MegaStreamProvider : MainAPI() {
             resolvedPlot = doc.selectFirst(".synopsis")?.text() ?: ""
             resolvedYear = doc.selectFirst(".release-year")?.text()?.toIntOrNull()
 
+            // Extract embed iframes natively from StreamPlay
             doc.select("iframe").forEach { iframe ->
                 val src = iframe.attr("src")
                 if (MegaStreamConstants.EXTRACTOR_DOMAINS.any { src.contains(it) }) {
                     streamLinks.add(if (src.startsWith("//")) "https:$src" else src)
                 }
             }
+        } else {
+            return null
         }
 
         val dataPayload = streamLinks.distinct().joinToString(",")
 
-        return newMovieLoadResponse(resolvedTitle, dataPayload, tvType, dataPayload) {
+        return newMovieLoadResponse(resolvedTitle, url, tvType, dataPayload) {
             this.posterUrl = resolvedPoster
             this.plot = resolvedPlot
             this.year = resolvedYear
         }
     }
 
+    // --- PHASE 3: DISTRIBUTED EXTRACTION ---
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
