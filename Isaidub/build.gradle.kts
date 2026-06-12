@@ -1,10 +1,10 @@
 // use an integer for version numbers
-version = 1
+version = 26
 
 cloudstream {
     // All of these properties are optional, you can safely remove them
 
-    description = "Isaidub"
+    description = "Tamil Dubbed Movies"
     language = "ta"
     authors = listOf("ChocoCooper")
 
@@ -22,8 +22,7 @@ cloudstream {
     // https://recloudstream.github.io/cloudstream/html/app/com.lagradost.cloudstream3/-tv-type/index.html
     tvTypes = listOf(
         "Movie",
-        "TvSeries",
     )
-    iconUrl = "https://isaidub.guru/favicon.ico"
+    iconUrl = "https://play-lh.googleusercontent.com/s8kgwZMlmuCW8rje8e6l5ypkBjW16VVKUCy4StPkbjhZOgbTv7P5YetFFpsZHWGeOX6n=w480-h960-rw"
     isCrossPlatform = true
 }
