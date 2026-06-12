@@ -114,7 +114,11 @@ object KuttyMoviesSource {
             extractFinalLink(provider, res.url, 0, mutableSetOf())?.let { finalUrl ->
                 val label = res.label.lowercase()
                 val q = when { label.contains("1080") -> "(1080p)"; label.contains("720") -> "(720p)"; label.contains("640") || label.contains("360") -> "(640x360)"; label.contains("480") || label.contains("320") -> "(480x320)"; else -> "(HD)" }
-                callback.invoke(newExtractorLink("KuttyMovies", "KuttyMovies $q", finalUrl, finalUrl.contains(".m3u8")) { this.referer = "${provider.kuttyUrl}/" })
+                
+                // FIXED: Passed correct ExtractorLinkType based on URL content
+                val linkType = if (finalUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                
+                callback.invoke(provider.newExtractorLink("KuttyMovies", "KuttyMovies $q", finalUrl, linkType) { this.referer = "${provider.kuttyUrl}/" })
                 found = true
             }
         }
