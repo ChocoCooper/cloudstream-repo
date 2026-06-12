@@ -20,7 +20,8 @@ class IsaidubProvider : MainAPI() {
     private val tmdbApiKey = "1b3113663c9004682ed61086cf967c44"
     
     private val tmdbUrls = listOf(
-        "https://api.tmdb.org/3"
+        "https://api.tmdb.org/3",
+        "https://tmdb-proxy.cubecity.cloud/3"
     )
 
     data class TmdbSearchResponse(val results: List<TmdbResult>?)
