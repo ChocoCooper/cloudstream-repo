@@ -50,7 +50,8 @@ class IsaidubProvider : MainAPI() {
         val title: String?,
         val name: String?,
         val release_date: String?,
-        val poster_path: String?
+        val poster_path: String?,
+        val overview: String? // Added to extract movie synopses
     )
 
     data class ScrapedMovie(val title: String, val link: String)
@@ -98,14 +99,10 @@ class IsaidubProvider : MainAPI() {
 
         for (movie in movies) {
             val titleLower = movie.title.lowercase()
-
-            if (tmdbYear.isNotBlank() && !titleLower.contains(tmdbYear)) {
-                continue
-            }
+            if (tmdbYear.isNotBlank() && !titleLower.contains(tmdbYear)) continue
 
             val siteTokens = tokenize(normalizeTitle(movie.title), yearToRemove = tmdbYear)
             val commonTokens = tmdbTokens.intersect(siteTokens)
-
             val matchPercentage = commonTokens.size.toDouble() / tmdbTokens.size
 
             val isMatch = if (tmdbTokens.size <= 2) {
@@ -115,14 +112,12 @@ class IsaidubProvider : MainAPI() {
                 matchPercentage >= 0.6 && significantMatches.isNotEmpty()
             }
 
-            if (isMatch) {
-                matches.add(Pair(movie, commonTokens.size))
-            }
+            if (isMatch) matches.add(Pair(movie, commonTokens.size))
         }
         return matches.sortedByDescending { it.second }.map { it.first }
     }
 
-    private suspend fun fetchTmdbPoster(rawTitle: String, fallbackYear: String = ""): Pair<String?, String> {
+    private suspend fun fetchTmdbMetadata(rawTitle: String, fallbackYear: String = ""): Pair<TmdbResult?, String> {
         val cleanName = rawTitle.replace("isaiDub.me", "").replace("-", "").trim()
         val yearRegex = Regex("\\b(19|20)\\d{2}\\b").find(cleanName)
         val extractedYear = yearRegex?.value ?: fallbackYear
@@ -143,7 +138,7 @@ class IsaidubProvider : MainAPI() {
                         val parsed = AppUtils.parseJson<TmdbSearchResponse>(response.text)
                         val firstMatch = parsed.results?.firstOrNull { !it.poster_path.isNullOrBlank() }
                         if (firstMatch != null) {
-                            return Pair("https://image.tmdb.org/t/p/w500${firstMatch.poster_path}", extractedYear)
+                            return Pair(firstMatch, extractedYear)
                         }
                     }
                 } catch (e: Exception) { }
@@ -152,11 +147,10 @@ class IsaidubProvider : MainAPI() {
         return Pair(null, extractedYear) 
     }
 
-    // Dynamic fetcher loops through pagination to guarantee 6 items are found
     private suspend fun fetchSectionItems(targetBaseUrl: String, sectionYear: String = ""): List<SearchResponse> {
         val listItems = mutableListOf<SearchResponse>()
         var currentPage = 1
-        val maxPagesToScrape = 3 // Hard cap prevents infinite network looping if an entire genre lacks TMDB matches
+        val maxPagesToScrape = 3
 
         while (listItems.size < 6 && currentPage <= maxPagesToScrape) {
             val targetUrl = if (currentPage == 1) targetBaseUrl else "$targetBaseUrl?get-page=$currentPage"
@@ -173,18 +167,18 @@ class IsaidubProvider : MainAPI() {
                     val lowerLink = link.lowercase()
                     
                     if (lowerTitle.contains("web series") || lowerLink.contains("web-series") ||
-                        lowerTitle.contains("season") || lowerTitle.contains("episode")) {
-                        continue
-                    }
+                        lowerTitle.contains("season") || lowerTitle.contains("episode")) continue
                     
                     validMovieLinks.add(Pair(title, link))
                 }
 
                 if (validMovieLinks.isEmpty()) break
 
-                val responses = validMovieLinks.amap { (title, _) ->
+                val responses = validMovieLinks.amap { (title, link) ->
                     val cleanTitle = title.replace("isaiDub.me", "").replace("-", "").trim()
-                    val (tmdbPoster, resolvedYear) = fetchTmdbPoster(cleanTitle, sectionYear)
+                    val (tmdbMatch, resolvedYear) = fetchTmdbMetadata(cleanTitle, sectionYear)
+                    val tmdbPoster = tmdbMatch?.poster_path?.let { "https://image.tmdb.org/t/p/w500$it" }
+                    val plotSynopsis = tmdbMatch?.overview ?: ""
                     
                     if (tmdbPoster == null) {
                         null
@@ -192,8 +186,10 @@ class IsaidubProvider : MainAPI() {
                         val t = URLEncoder.encode(cleanTitle, "UTF-8")
                         val y = URLEncoder.encode(resolvedYear, "UTF-8")
                         val p = URLEncoder.encode(tmdbPoster, "UTF-8")
+                        val u = URLEncoder.encode(link, "UTF-8")
+                        val s = URLEncoder.encode(plotSynopsis, "UTF-8") // Packed Synopsis
                         
-                        val targetData = "$mainUrl/synthetic_meta?t=$t&y=$y&p=$p"
+                        val targetData = "$mainUrl/synthetic_meta?t=$t&y=$y&p=$p&url=$u&s=$s"
 
                         newMovieSearchResponse(cleanTitle, targetData) {
                             this.posterUrl = tmdbPoster
@@ -210,12 +206,9 @@ class IsaidubProvider : MainAPI() {
 
                 val totalPagesSpan = doc.selectFirst("span#totalPages")
                 val maxPageStr = totalPagesSpan?.text()?.trim()?.toIntOrNull()
-                if (maxPageStr != null && currentPage >= maxPageStr) {
-                    break
-                }
-            } catch (e: Exception) {
-                break 
-            }
+                if (maxPageStr != null && currentPage >= maxPageStr) break
+                
+            } catch (e: Exception) { break }
             currentPage++
         }
         return listItems
@@ -304,12 +297,14 @@ class IsaidubProvider : MainAPI() {
             val title = item.title ?: item.name ?: ""
             val year = item.release_date?.split("-")?.firstOrNull() ?: ""
             val fullPoster = "https://image.tmdb.org/t/p/w500${item.poster_path}"
+            val plotSynopsis = item.overview ?: ""
 
             val t = URLEncoder.encode(title, "UTF-8")
             val y = URLEncoder.encode(year, "UTF-8")
             val p = URLEncoder.encode(fullPoster, "UTF-8")
+            val s = URLEncoder.encode(plotSynopsis, "UTF-8")
             
-            val targetData = "$mainUrl/synthetic_meta?t=$t&y=$y&p=$p"
+            val targetData = "$mainUrl/synthetic_meta?t=$t&y=$y&p=$p&s=$s"
 
             newMovieSearchResponse(title, targetData) {
                 this.posterUrl = fullPoster
@@ -332,6 +327,8 @@ class IsaidubProvider : MainAPI() {
         val title = queryParams["t"] ?: return null
         val year = queryParams["y"] ?: ""
         val tmdbPoster = queryParams["p"] ?: "$mainUrl/uploads/posters/default.jpg"
+        val failSafeUrl = queryParams["url"] 
+        val plotSynopsis = queryParams["s"] ?: "" // Extracted packed overview text
         val yearInt = year.toIntOrNull()
 
         val urlsToScan = mutableListOf<String>()
@@ -371,7 +368,6 @@ class IsaidubProvider : MainAPI() {
             if (matchedMovies.isNotEmpty()) break 
 
             val (page1Movies, totalPages) = scrapePageAndGetTotal(targetBaseUrl)
-            
             val page1Hits = searchByTokenAndYear(page1Movies, title, year)
             if (page1Hits.isNotEmpty()) {
                 matchedMovies.addAll(page1Hits)
@@ -400,16 +396,24 @@ class IsaidubProvider : MainAPI() {
 
                     for (pageMovies in chunkResults) {
                         val hits = searchByTokenAndYear(pageMovies, title, year)
-                        if (hits.isNotEmpty()) {
-                            matchedMovies.addAll(hits)
-                        }
+                        if (hits.isNotEmpty()) matchedMovies.addAll(hits)
                     }
                     if (matchedMovies.isNotEmpty()) break
                 }
             }
         }
 
-        if (matchedMovies.isEmpty()) return null
+        // Failsafe execution mapping seamlessly alongside the plot overview context
+        if (matchedMovies.isEmpty()) {
+            if (!failSafeUrl.isNullOrBlank()) {
+                return newMovieLoadResponse(title, failSafeUrl, TvType.Movie, failSafeUrl) {
+                    this.posterUrl = tmdbPoster
+                    this.year = yearInt
+                    this.plot = plotSynopsis // Binds Synopsis
+                }
+            }
+            return null
+        }
 
         val finalMoviePages = matchedMovies.map { it.link }.distinct()
         val combinedUrls = finalMoviePages.joinToString(",")
@@ -417,6 +421,7 @@ class IsaidubProvider : MainAPI() {
         return newMovieLoadResponse(title, combinedUrls, TvType.Movie, combinedUrls) {
             this.posterUrl = tmdbPoster
             this.year = yearInt
+            this.plot = plotSynopsis // Binds Synopsis
         }
     }
 
@@ -448,14 +453,10 @@ class IsaidubProvider : MainAPI() {
                     val text = a.text().trim()
                     if (href.contains("?get-page=") || href.contains("/page/")) {
                         val num = Regex("""(?:get-page=|page/)(\d+)""").find(href)?.groupValues?.get(1)?.toIntOrNull()
-                        if (num != null && num > maxPage && num <= 25) { 
-                            maxPage = num
-                        }
+                        if (num != null && num > maxPage && num <= 25) maxPage = num
                     } else if (text.toIntOrNull() != null) {
                         val num = text.toIntOrNull()
-                        if (num != null && num > maxPage && num <= 25 && href.length < 50) {
-                            maxPage = num
-                        }
+                        if (num != null && num > maxPage && num <= 25 && href.length < 50) maxPage = num
                     }
                 }
             }
@@ -482,10 +483,19 @@ class IsaidubProvider : MainAPI() {
                 if (finalLink != null) {
                     val isM3u8 = finalLink.contains(".m3u8", ignoreCase = true)
                     
+                    val lowerLabel = res.label.lowercase()
+                    val qualityName = when {
+                        lowerLabel.contains("1080") -> "1080p"
+                        lowerLabel.contains("720") -> "720p"
+                        lowerLabel.contains("640") || lowerLabel.contains("480") -> "480p"
+                        lowerLabel.contains("360") -> "360p"
+                        else -> "HD"
+                    }
+                    
                     callback.invoke(
                         newExtractorLink(
                             source = this.name,
-                            name = res.label,
+                            name = "Isaidub $qualityName",
                             url = finalLink,
                             type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                         ) {
