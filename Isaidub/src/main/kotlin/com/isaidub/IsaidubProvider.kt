@@ -6,6 +6,8 @@ import com.lagradost.nicehttp.NiceResponse
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import org.jsoup.Jsoup
 import java.net.URI
 import java.net.URLEncoder
@@ -18,13 +20,24 @@ class IsaidubProvider : MainAPI() {
     override var supportedTypes = setOf(TvType.Movie)
     override var lang = "ta"
 
-    // Massive OMDb Key Rotation Array to prevent rate-limiting
-    private val omdbApiKeys = listOf(
+    // --- OPTIMIZATION: CONCURRENCY LIMITERS ---
+    // Prevents socket timeouts and network thread exhaustion
+    private val omdbSemaphore = Semaphore(5)
+    private val scrapeSemaphore = Semaphore(5)
+
+    // --- OPTIMIZATION: IN-MEMORY CACHE ---
+    // Stores directory index pages for 5 minutes to prevent redundant network pinging
+    private val pageCache = mutableMapOf<String, Pair<Long, Pair<List<ScrapedMovie>, Int>>>()
+    private val CACHE_DURATION = 5 * 60 * 1000L // 5 minutes
+
+    // --- OPTIMIZATION: SMART KEY EVICTION ---
+    private val baseOmdbKeys = listOf(
         "4b447405", "eb0c0475", "7776cbde", "ff28f90b",
         "6c3a2d45", "b07b58c8", "ad04b643", "a95b5205",
         "777d9323", "2c2c3314", "b5cff164", "89a9f57d",
         "73a9858a", "efbd8357"
     )
+    private var activeOmdbKeys = baseOmdbKeys.toMutableList()
 
     data class OmdbSearchResponse(val Search: List<OmdbSearchResult>?, val Response: String?)
     data class OmdbSearchResult(val Title: String?, val Year: String?, val Poster: String?)
@@ -34,7 +47,15 @@ class IsaidubProvider : MainAPI() {
     data class ResolutionNode(val label: String, val url: String)
 
     private fun getRandomApiKey(): String {
-        return omdbApiKeys[Random.nextInt(omdbApiKeys.size)]
+        // Fallback: If all keys are exhausted, reset the active pool
+        if (activeOmdbKeys.isEmpty()) {
+            activeOmdbKeys.addAll(baseOmdbKeys)
+        }
+        return activeOmdbKeys[Random.nextInt(activeOmdbKeys.size)]
+    }
+
+    private fun removeDeadKey(key: String) {
+        activeOmdbKeys.remove(key)
     }
 
     // --- TOKENIZATION & MATCHING HELPERS ---
@@ -94,7 +115,7 @@ class IsaidubProvider : MainAPI() {
         return matches.sortedByDescending { it.second }.map { it.first }
     }
 
-    // High-speed OMDb single title lookup
+    // High-speed OMDb single title lookup (With Smart Eviction & Semaphore)
     private suspend fun fetchOmdbMetadata(rawTitle: String, fallbackYear: String = ""): Pair<OmdbTitleResponse?, String> {
         val cleanName = rawTitle.replace("isaiDub.me", "").replace("-", " ").trim()
         val yearRegex = Regex("\\b(19|20)\\d{2}\\b").find(cleanName)
@@ -110,8 +131,11 @@ class IsaidubProvider : MainAPI() {
                 "https://www.omdbapi.com/?apikey=$apiKey&t=$encodedQuery"
             }
             
-            val response = app.get(url, timeout = 3)
-            if (response.isSuccessful && response.text.contains("\"Response\":\"True\"")) {
+            val response = omdbSemaphore.withPermit { app.get(url, timeout = 3) }
+
+            if (response.code == 401 || response.text.contains("Limit reached", ignoreCase = true) || response.text.contains("Invalid API key", ignoreCase = true)) {
+                removeDeadKey(apiKey)
+            } else if (response.isSuccessful && response.text.contains("\"Response\":\"True\"")) {
                 val parsed = AppUtils.parseJson<OmdbTitleResponse>(response.text)
                 if (parsed.Poster != null && parsed.Poster != "N/A") {
                     return Pair(parsed, extractedYear)
@@ -160,7 +184,8 @@ class IsaidubProvider : MainAPI() {
         while (listItems.size < 6 && currentPage <= maxPagesToScrape) {
             val targetUrl = if (currentPage == 1) targetBaseUrl else "$targetBaseUrl?get-page=$currentPage"
             try {
-                val doc = app.get(targetUrl, timeout = 15).document
+                // Utilizing Semaphore to prevent socket exhaustion during page load
+                val doc = scrapeSemaphore.withPermit { app.get(targetUrl, timeout = 15).document }
                 val validMovieLinks = mutableListOf<Pair<String, String>>()
                 
                 for (a in doc.select("div.f a")) {
@@ -187,7 +212,7 @@ class IsaidubProvider : MainAPI() {
                             val (omdbMatch, resolvedYear) = fetchOmdbMetadata(cleanTitle, sectionYear)
                             
                             val omdbPoster = omdbMatch?.Poster?.takeIf { it != "N/A" }
-                            val plotSynopsis = omdbMatch?.Plot?.takeIf { it != "N/A" } ?: ""
+                            val plotSynopsis = omdbMatch?.Plot?.takeIf { it != "N/A" } ?: "No synopsis available."
                             
                             if (omdbPoster == null) {
                                 null
@@ -231,7 +256,7 @@ class IsaidubProvider : MainAPI() {
         val homePageLists = mutableListOf<HomePageList>()
         
         try {
-            val yearlyDoc = app.get("$mainUrl/tamil-yearly-dubbed-movies/", timeout = 15).document
+            val yearlyDoc = scrapeSemaphore.withPermit { app.get("$mainUrl/tamil-yearly-dubbed-movies/", timeout = 15).document }
             var latestYearUrl = ""
             var latestYear = ""
             
@@ -276,16 +301,20 @@ class IsaidubProvider : MainAPI() {
         return newHomePageResponse(homePageLists, hasNext = false)
     }
 
-    // --- PHASE 1: SEARCH (WITH OMDb AND REAL-TIME PING FILTER) ---
+    // --- PHASE 1: SEARCH (WITH OMDb, REAL-TIME PING FILTER, AND PLOT SYNOPSIS) ---
 
     override suspend fun search(query: String): List<SearchResponse> {
         var omdbJson: NiceResponse? = null
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
 
         try {
-            val url = "https://www.omdbapi.com/?apikey=${getRandomApiKey()}&s=$encodedQuery&type=movie"
-            val response = app.get(url, timeout = 3)
-            if (response.isSuccessful && response.text.contains("\"Response\":\"True\"")) {
+            val apiKey = getRandomApiKey()
+            val url = "https://www.omdbapi.com/?apikey=$apiKey&s=$encodedQuery&type=movie"
+            val response = omdbSemaphore.withPermit { app.get(url, timeout = 3) }
+
+            if (response.code == 401 || response.text.contains("Limit reached", ignoreCase = true) || response.text.contains("Invalid API key", ignoreCase = true)) {
+                removeDeadKey(apiKey)
+            } else if (response.isSuccessful && response.text.contains("\"Response\":\"True\"")) {
                 omdbJson = response
             }
         } catch (e: Exception) { }
@@ -308,12 +337,15 @@ class IsaidubProvider : MainAPI() {
                     val isaidubLinks = searchIsaidubMovieLinks(title, year)
                     val combinedLinks = isaidubLinks.joinToString(",")
 
-                    // If it exists, pack it. If not, silently drop it.
+                    // If it exists, fetch the individual detailed metadata for the Plot synopsis
                     if (combinedLinks.isNotBlank()) {
+                        val (detailedMeta, _) = fetchOmdbMetadata(title, year)
+                        val plotSynopsis = detailedMeta?.Plot?.takeIf { it != "N/A" } ?: "No synopsis available."
+
                         val t = URLEncoder.encode(title, "UTF-8")
                         val y = URLEncoder.encode(year, "UTF-8")
                         val p = URLEncoder.encode(fullPoster, "UTF-8")
-                        val s = URLEncoder.encode("", "UTF-8") 
+                        val s = URLEncoder.encode(plotSynopsis, "UTF-8") 
                         val u = URLEncoder.encode(combinedLinks, "UTF-8")
                         
                         val targetData = "$mainUrl/synthetic_meta?t=$t&y=$y&p=$p&url=$u&s=$s"
@@ -359,9 +391,7 @@ class IsaidubProvider : MainAPI() {
 
         // Deep fallback crawl if URL is missing
         val isaidubLinks = searchIsaidubMovieLinks(title, year)
-        
         if (isaidubLinks.isEmpty()) return null
-
         val combinedUrls = isaidubLinks.joinToString(",")
 
         return newMovieLoadResponse(title, combinedUrls, TvType.Movie, combinedUrls) {
@@ -371,11 +401,17 @@ class IsaidubProvider : MainAPI() {
         }
     }
 
+    // Caching layer integrated directly into the DOM extraction phase
     private suspend fun scrapePageAndGetTotal(url: String): Pair<List<ScrapedMovie>, Int> {
+        val cached = pageCache[url]
+        if (cached != null && System.currentTimeMillis() - cached.first < CACHE_DURATION) {
+            return cached.second
+        }
+
         val movies = mutableListOf<ScrapedMovie>()
         var maxPage = 1
         try {
-            val doc = app.get(url, timeout = 15).document
+            val doc = scrapeSemaphore.withPermit { app.get(url, timeout = 15).document }
             
             val movieDivs = doc.select("div.f")
             for (div in movieDivs) {
@@ -407,7 +443,10 @@ class IsaidubProvider : MainAPI() {
                 }
             }
         } catch (e: Exception) { }
-        return Pair(movies, maxPage)
+
+        val result = Pair(movies, maxPage)
+        pageCache[url] = Pair(System.currentTimeMillis(), result)
+        return result
     }
 
     // --- PHASE 3: CRAWL AND RESOLVE MEDIA STREAM LINKS ---
@@ -470,7 +509,7 @@ class IsaidubProvider : MainAPI() {
         val folderPages = mutableListOf<String>()
 
         try {
-            val doc = app.get(pageUrl, timeout = 15).document
+            val doc = scrapeSemaphore.withPermit { app.get(pageUrl, timeout = 15).document }
             for (a in doc.select("a[href]")) {
                 val href = a.attr("href")
                 val text = a.text().trim()
@@ -516,7 +555,7 @@ class IsaidubProvider : MainAPI() {
         seen.add(url)
 
         try {
-            val res = app.get(url, timeout = 15)
+            val res = scrapeSemaphore.withPermit { app.get(url, timeout = 15) }
             if (res.headers["content-type"]?.contains("video/") == true) {
                 return res.url
             }
