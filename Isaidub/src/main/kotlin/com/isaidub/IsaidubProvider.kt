@@ -94,7 +94,7 @@ class IsaidubProvider : MainAPI() {
         return matches.sortedByDescending { it.second }.map { it.first }
     }
 
-    // High-speed OMDb lookup
+    // High-speed OMDb single title lookup
     private suspend fun fetchOmdbMetadata(rawTitle: String, fallbackYear: String = ""): Pair<OmdbTitleResponse?, String> {
         val cleanName = rawTitle.replace("isaiDub.me", "").replace("-", " ").trim()
         val yearRegex = Regex("\\b(19|20)\\d{2}\\b").find(cleanName)
@@ -119,6 +119,36 @@ class IsaidubProvider : MainAPI() {
             }
         } catch (e: Exception) { }
         return Pair(null, extractedYear) 
+    }
+
+    // Isaidub Direct Background Scraper (Ping Tool)
+    private suspend fun searchIsaidubMovieLinks(title: String, year: String): List<String> {
+        val targets = mutableListOf<String>()
+        year.toIntOrNull()?.let { targets.add("$mainUrl/tamil-$it-dubbed-movies/") }
+        title.trim().firstOrNull()?.lowercaseChar()?.let {
+            if (it.isLetter()) targets.add("$mainUrl/tamil-atoz-dubbed-movies/$it/") 
+            else if (it.isDigit()) targets.add("$mainUrl/tamil-atoz-dubbed-movies/0-9/")
+        }
+        
+        val matched = mutableListOf<ScrapedMovie>()
+        for (url in targets.distinct()) {
+            if (matched.isNotEmpty()) break
+            val (movies, max) = scrapePageAndGetTotal(url)
+            val hits = searchByTokenAndYear(movies, title, year)
+            if (hits.isNotEmpty()) { matched.addAll(hits); break }
+            
+            if (max > 1) {
+                coroutineScope {
+                    (2..minOf(max, 6)).map { p -> 
+                        async { scrapePageAndGetTotal("$url?get-page=$p").first }
+                    }.awaitAll().forEach { pMovies ->
+                        val pHits = searchByTokenAndYear(pMovies, title, year)
+                        if (pHits.isNotEmpty()) matched.addAll(pHits)
+                    }
+                }
+            }
+        }
+        return matched.map { it.link }.distinct()
     }
 
     // High-speed compilation utilizing asynchronous multi-key workers
@@ -195,7 +225,7 @@ class IsaidubProvider : MainAPI() {
         return listItems
     }
 
-    // --- PHASE 0: HOMEPAGE LOGIC (CONCURRENT WORKERS) ---
+    // --- PHASE 0: HOMEPAGE LOGIC ---
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         val homePageLists = mutableListOf<HomePageList>()
@@ -246,7 +276,7 @@ class IsaidubProvider : MainAPI() {
         return newHomePageResponse(homePageLists, hasNext = false)
     }
 
-    // --- PHASE 1: SEARCH ---
+    // --- PHASE 1: SEARCH (WITH OMDb AND REAL-TIME PING FILTER) ---
 
     override suspend fun search(query: String): List<SearchResponse> {
         var omdbJson: NiceResponse? = null
@@ -267,27 +297,40 @@ class IsaidubProvider : MainAPI() {
             !item.Poster.isNullOrBlank() && item.Poster != "N/A"
         } ?: emptyList()
 
-        return validOmdbResults.map { item ->
-            val title = item.Title ?: ""
-            // Clean year text since OMDb search endpoint sometimes returns things like "2021–"
-            val year = item.Year?.replace(Regex("[^0-9]"), "") ?: "" 
-            val fullPoster = item.Poster ?: ""
+        return coroutineScope {
+            validOmdbResults.map { item ->
+                async {
+                    val title = item.Title ?: ""
+                    val year = item.Year?.replace(Regex("[^0-9]"), "") ?: "" 
+                    val fullPoster = item.Poster ?: ""
 
-            val t = URLEncoder.encode(title, "UTF-8")
-            val y = URLEncoder.encode(year, "UTF-8")
-            val p = URLEncoder.encode(fullPoster, "UTF-8")
-            val s = URLEncoder.encode("", "UTF-8") // Search endpoint lacks plot, leave blank
-            
-            val targetData = "$mainUrl/synthetic_meta?t=$t&y=$y&p=$p&url=&s=$s"
+                    // REAL-TIME PING: Check if it actually exists on Isaidub
+                    val isaidubLinks = searchIsaidubMovieLinks(title, year)
+                    val combinedLinks = isaidubLinks.joinToString(",")
 
-            newMovieSearchResponse(title, targetData) {
-                this.posterUrl = fullPoster
-                this.year = year.toIntOrNull()
-            }
+                    // If it exists, pack it. If not, silently drop it.
+                    if (combinedLinks.isNotBlank()) {
+                        val t = URLEncoder.encode(title, "UTF-8")
+                        val y = URLEncoder.encode(year, "UTF-8")
+                        val p = URLEncoder.encode(fullPoster, "UTF-8")
+                        val s = URLEncoder.encode("", "UTF-8") 
+                        val u = URLEncoder.encode(combinedLinks, "UTF-8")
+                        
+                        val targetData = "$mainUrl/synthetic_meta?t=$t&y=$y&p=$p&url=$u&s=$s"
+
+                        newMovieSearchResponse(title, targetData) {
+                            this.posterUrl = fullPoster
+                            this.year = year.toIntOrNull()
+                        }
+                    } else {
+                        null
+                    }
+                }
+            }.awaitAll().filterNotNull()
         }
     }
 
-    // --- PHASE 2: LOAD ---
+    // --- PHASE 2: INSTANT LOAD ---
 
     override suspend fun load(url: String): LoadResponse? {
         if (!url.contains("/synthetic_meta?")) return null
@@ -305,91 +348,21 @@ class IsaidubProvider : MainAPI() {
         val plotSynopsis = queryParams["s"] ?: "" 
         val yearInt = year.toIntOrNull()
 
-        val urlsToScan = mutableListOf<String>()
-
-        if (yearInt != null && yearInt in 1980..2026) {
-            urlsToScan.add("$mainUrl/tamil-$yearInt-dubbed-movies/")
-        }
-
-        val cleanedTitle = title.trim()
-        val firstChar = cleanedTitle.firstOrNull()?.lowercaseChar()
-        if (firstChar != null) {
-            when {
-                firstChar.isLetter() -> urlsToScan.add("$mainUrl/tamil-atoz-dubbed-movies/$firstChar/")
-                firstChar.isDigit() -> urlsToScan.add("$mainUrl/tamil-atoz-dubbed-movies/0-9/")
-                else -> urlsToScan.add("$mainUrl/tamil-atoz-dubbed-movies/a/")
+        // Bypass full directory crawl if we already pinged the URL in Phase 1 or 0
+        if (!failSafeUrl.isNullOrBlank()) {
+            return newMovieLoadResponse(title, failSafeUrl, TvType.Movie, failSafeUrl) {
+                this.posterUrl = omdbPoster
+                this.year = yearInt
+                this.plot = plotSynopsis 
             }
         }
 
-        val articles = listOf("the ", "a ", "an ")
-        for (article in articles) {
-            if (cleanedTitle.lowercase().startsWith(article)) {
-                val coreTitle = cleanedTitle.substring(article.length).trim()
-                val nextChar = coreTitle.firstOrNull()?.lowercaseChar()
-                if (nextChar != null) {
-                    when {
-                        nextChar.isLetter() -> urlsToScan.add("$mainUrl/tamil-atoz-dubbed-movies/$nextChar/")
-                        nextChar.isDigit() -> urlsToScan.add("$mainUrl/tamil-atoz-dubbed-movies/0-9/")
-                    }
-                }
-                break
-            }
-        }
+        // Deep fallback crawl if URL is missing
+        val isaidubLinks = searchIsaidubMovieLinks(title, year)
+        
+        if (isaidubLinks.isEmpty()) return null
 
-        val matchedMovies = mutableListOf<ScrapedMovie>()
-
-        for (targetBaseUrl in urlsToScan.distinct()) {
-            if (matchedMovies.isNotEmpty()) break 
-
-            val (page1Movies, totalPages) = scrapePageAndGetTotal(targetBaseUrl)
-            val page1Hits = searchByTokenAndYear(page1Movies, title, year)
-            if (page1Hits.isNotEmpty()) {
-                matchedMovies.addAll(page1Hits)
-                break 
-            }
-
-            if (totalPages > 1) {
-                val chunkSize = 5
-                val totalChunks = (totalPages - 1 + chunkSize - 1) / chunkSize 
-
-                for (chunkIdx in 0 until totalChunks) {
-                    if (matchedMovies.isNotEmpty()) break
-
-                    val startPage = chunkIdx * chunkSize + 2 
-                    val endPage = minOf(startPage + chunkSize - 1, totalPages)
-                    val pagesToScan = (startPage..endPage).toList()
-
-                    val chunkResults = coroutineScope {
-                        pagesToScan.map { page ->
-                            async {
-                                val targetUrl = "$targetBaseUrl?get-page=$page"
-                                scrapePageAndGetTotal(targetUrl).first
-                            }
-                        }.awaitAll()
-                    }
-
-                    for (pageMovies in chunkResults) {
-                        val hits = searchByTokenAndYear(pageMovies, title, year)
-                        if (hits.isNotEmpty()) matchedMovies.addAll(hits)
-                    }
-                    if (matchedMovies.isNotEmpty()) break
-                }
-            }
-        }
-
-        if (matchedMovies.isEmpty()) {
-            if (!failSafeUrl.isNullOrBlank()) {
-                return newMovieLoadResponse(title, failSafeUrl, TvType.Movie, failSafeUrl) {
-                    this.posterUrl = omdbPoster
-                    this.year = yearInt
-                    this.plot = plotSynopsis 
-                }
-            }
-            return null
-        }
-
-        val finalMoviePages = matchedMovies.map { it.link }.distinct()
-        val combinedUrls = finalMoviePages.joinToString(",")
+        val combinedUrls = isaidubLinks.joinToString(",")
 
         return newMovieLoadResponse(title, combinedUrls, TvType.Movie, combinedUrls) {
             this.posterUrl = omdbPoster
@@ -465,12 +438,14 @@ class IsaidubProvider : MainAPI() {
                         else -> "(HD)"
                     }
                     
+                    val linkType = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+
                     callback.invoke(
                         newExtractorLink(
                             source = this.name,
                             name = "Isaidub $qualityName",
                             url = finalLink,
-                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                            type = linkType
                         ) {
                             this.referer = "$mainUrl/"
                             this.quality = Qualities.Unknown.value
