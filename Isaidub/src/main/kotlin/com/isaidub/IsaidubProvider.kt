@@ -98,34 +98,42 @@ class IsaidubProvider : MainAPI() {
         return matches.sortedByDescending { it.second }.map { it.first }
     }
 
-    // --- PHASE 0: HOMEPAGE LOGIC ---
+    // New helper to dynamically search and fetch a high-res TMDB poster during scraping
+    private suspend fun fetchTmdbPoster(rawTitle: String, fallbackYear: String = ""): Pair<String, String> {
+        val cleanName = rawTitle.replace("isaiDub.me", "").replace("-", "").trim()
+        val yearRegex = Regex("\\b(19|20)\\d{2}\\b").find(cleanName)
+        val extractedYear = yearRegex?.value ?: fallbackYear
+        val finalSearchTitle = if (yearRegex != null) cleanName.replace(yearRegex.value, "").trim() else cleanName
 
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
-        val movies = mutableListOf<SearchResponse>()
         try {
-            // 1. Hit the Yearly Categories page
-            val yearlyDoc = app.get("$mainUrl/tamil-yearly-dubbed-movies/", timeout = 15).document
-            var latestYearUrl = ""
-            var latestYear = ""
-            
-            // Extract the first (latest) year directory dynamically
-            for (a in yearlyDoc.select("a[href]")) {
-                val href = a.attr("href")
-                if (href.contains(Regex("tamil-\\d{4}-dubbed-movies"))) {
-                    latestYearUrl = if (href.startsWith("http")) href else "$mainUrl$href"
-                    latestYear = Regex("\\d{4}").find(href)?.value ?: ""
-                    break
+            val encodedQuery = URLEncoder.encode(finalSearchTitle, "UTF-8")
+            for (baseUrl in tmdbUrls) {
+                val url = if (extractedYear.isNotBlank()) {
+                    "$baseUrl/search/movie?api_key=$tmdbApiKey&query=$encodedQuery&year=$extractedYear"
+                } else {
+                    "$baseUrl/search/movie?api_key=$tmdbApiKey&query=$encodedQuery"
+                }
+                val response = app.get(url, timeout = 5)
+                if (response.isSuccessful && response.text.contains("results")) {
+                    val parsed = AppUtils.parseJson<TmdbSearchResponse>(response.text)
+                    val firstMatch = parsed.results?.firstOrNull { !it.poster_path.isNullOrBlank() }
+                    if (firstMatch != null) {
+                        return Pair("https://image.tmdb.org/t/p/w500${firstMatch.poster_path}", extractedYear)
+                    }
                 }
             }
+        } catch (e: Exception) { }
+        return Pair("$mainUrl/uploads/posters/default.jpg", extractedYear) 
+    }
 
-            if (latestYearUrl.isEmpty()) return newHomePageResponse(emptyList(), false)
-
-            // 2. Fetch the movies from the newest year
-            val latestDoc = app.get(latestYearUrl, timeout = 15).document
+    // Helper to scrape any target Isaidub listing page for standard movies
+    private suspend fun fetchSectionItems(targetUrl: String, sectionYear: String = ""): List<SearchResponse> {
+        val listItems = mutableListOf<SearchResponse>()
+        try {
+            val doc = app.get(targetUrl, timeout = 15).document
             val validMovieLinks = mutableListOf<Pair<String, String>>()
             
-            // 3. Filter out TV Shows/Web Series and limit to 10 movies
-            for (a in latestDoc.select("div.f a")) {
+            for (a in doc.select("div.f a")) {
                 val title = a.text().trim()
                 var link = a.attr("href")
                 if (link.startsWith("/")) link = "$mainUrl$link"
@@ -142,39 +150,86 @@ class IsaidubProvider : MainAPI() {
                 if (validMovieLinks.size >= 10) break
             }
 
-            // 4. Concurrently fetch posters
-            val searchResponses = validMovieLinks.amap { (title, link) ->
-                val posterUrl = fetchPosterUrl(link) ?: "$mainUrl/uploads/posters/default.jpg"
+            // Map links concurrently while binding TMDB assets
+            val responses = validMovieLinks.amap { (title, _) ->
                 val cleanTitle = title.replace("isaiDub.me", "").replace("-", "").trim()
+                val (tmdbPoster, resolvedYear) = fetchTmdbPoster(cleanTitle, sectionYear)
                 
                 val t = URLEncoder.encode(cleanTitle, "UTF-8")
-                val y = URLEncoder.encode(latestYear, "UTF-8")
-                val p = URLEncoder.encode(posterUrl, "UTF-8")
+                val y = URLEncoder.encode(resolvedYear, "UTF-8")
+                val p = URLEncoder.encode(tmdbPoster, "UTF-8")
                 
                 val targetData = "$mainUrl/synthetic_meta?t=$t&y=$y&p=$p"
 
                 newMovieSearchResponse(cleanTitle, targetData) {
-                    this.posterUrl = posterUrl
-                    this.year = latestYear.toIntOrNull()
+                    this.posterUrl = tmdbPoster
+                    this.year = resolvedYear.toIntOrNull()
                 }
             }
-            movies.addAll(searchResponses.filterNotNull())
+            listItems.addAll(responses.filterNotNull())
+        } catch (e: Exception) { }
+        return listItems
+    }
 
-        } catch (e: Exception) { 
+    // --- PHASE 0: HOMEPAGE LOGIC ---
+
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
+        val homePageLists = mutableListOf<HomePageList>()
+        
+        try {
+            // 1. Resolve Latest Year dynamic URL
+            val yearlyDoc = app.get("$mainUrl/tamil-yearly-dubbed-movies/", timeout = 15).document
+            var latestYearUrl = ""
+            var latestYear = ""
+            
+            for (a in yearlyDoc.select("a[href]")) {
+                val href = a.attr("href")
+                if (href.contains(Regex("tamil-\\d{4}-dubbed-movies"))) {
+                    latestYearUrl = if (href.startsWith("http")) href else "$mainUrl$href"
+                    latestYear = Regex("\\d{4}").find(href)?.value ?: ""
+                    break
+                }
+            }
+
+            // 2. Schedule and execute layout streams concurrently
+            coroutineScope {
+                val newMoviesDeferred = async { if (latestYearUrl.isNotEmpty()) fetchSectionItems(latestYearUrl, latestYear) else emptyList() }
+                val actionDeferred = async { fetchSectionItems("$mainUrl/tamil-action-dubbed-movies/") }
+                val adventureDeferred = async { fetchSectionItems("$mainUrl/tamil-adventure-dubbed-movies/") }
+                val comedyDeferred = async { fetchSectionItems("$mainUrl/tamil-comedy-dubbed-movies/") }
+                val horrorDeferred = async { fetchSectionItems("$mainUrl/tamil-horror-dubbed-movies/") }
+                val dramaDeferred = async { fetchSectionItems("$mainUrl/tamil-drama-dubbed-movies/") }
+                val familyDeferred = async { fetchSectionItems("$mainUrl/tamil-family-dubbed-movies/") }
+                val fantasyDeferred = async { fetchSectionItems("$mainUrl/tamil-fantasy-dubbed-movies/") }
+                val romanceDeferred = async { fetchSectionItems("$mainUrl/tamil-romance-dubbed-movies/") }
+
+                val newMoviesList = newMoviesDeferred.await()
+                if (newMoviesList.isNotEmpty()) {
+                    homePageLists.add(HomePageList("New Tamil Dubbed Movies", newMoviesList, false))
+                }
+                
+                val sections = listOf(
+                    Pair("Tamil Dubbed Action Movies", actionDeferred.await()),
+                    Pair("Tamil Dubbed Adventure Movies", adventureDeferred.await()),
+                    Pair("Tamil Dubbed Comedy Movies", comedyDeferred.await()),
+                    Pair("Tamil Dubbed Horror Movies", horrorDeferred.await()),
+                    Pair("Tamil Dubbed Drama Movies", dramaDeferred.await()),
+                    Pair("Tamil Dubbed Family Movies", familyDeferred.await()),
+                    Pair("Tamil Dubbed Fantasy Movies", fantasyDeferred.await()),
+                    Pair("Tamil Dubbed Romance Movies", romanceDeferred.await())
+                )
+
+                for ((title, listData) in sections) {
+                    if (listData.isNotEmpty()) {
+                        homePageLists.add(HomePageList(title, listData, false))
+                    }
+                }
+            }
+        } catch (e: Exception) {
             e.printStackTrace()
         }
 
-        // Fixed using the updated newHomePageResponse factory function
-        return newHomePageResponse(
-            listOf(
-                HomePageList(
-                    "New Tamil Dubbed Movies",
-                    movies,
-                    isHorizontalImages = false
-                )
-            ),
-            hasNext = false
-        )
+        return newHomePageResponse(homePageLists, hasNext = false)
     }
 
     // --- PHASE 1: SEARCH (TMDB METADATA ONLY + FILTERING) ---
@@ -236,7 +291,7 @@ class IsaidubProvider : MainAPI() {
 
         val title = queryParams["t"] ?: return null
         val year = queryParams["y"] ?: ""
-        val fallbackPoster = queryParams["p"]
+        val tmdbPoster = queryParams["p"] ?: "$mainUrl/uploads/posters/default.jpg"
         val yearInt = year.toIntOrNull()
 
         val urlsToScan = mutableListOf<String>()
@@ -318,10 +373,10 @@ class IsaidubProvider : MainAPI() {
 
         val finalMoviePages = matchedMovies.map { it.link }.distinct()
         val combinedUrls = finalMoviePages.joinToString(",")
-        val finalPoster = fetchPosterUrl(finalMoviePages.first()) ?: fallbackPoster
 
+        // Bypassed Isaidub HTML poster scraping entirely to preserve your crisp TMDB artwork
         return newMovieLoadResponse(title, combinedUrls, TvType.Movie, combinedUrls) {
-            this.posterUrl = finalPoster
+            this.posterUrl = tmdbPoster
             this.year = yearInt
         }
     }
@@ -367,20 +422,6 @@ class IsaidubProvider : MainAPI() {
             }
         } catch (e: Exception) { }
         return Pair(movies, maxPage)
-    }
-
-    private suspend fun fetchPosterUrl(movieUrl: String): String? {
-        return try {
-            val doc = app.get(movieUrl, timeout = 15).document
-            val container = doc.selectFirst("div.movie-info-container") ?: doc.selectFirst("div.movieinfo")
-            val img = container?.selectFirst("picture img") ?: container?.selectFirst("img") ?: doc.selectFirst("img[src*=poster]")
-            val src = img?.attr("src")
-            if (!src.isNullOrBlank()) {
-                if (src.startsWith("/")) "$mainUrl$src" else src
-            } else null
-        } catch (e: Exception) {
-            null
-        }
     }
 
     // --- PHASE 3: CRAWL AND RESOLVE MEDIA STREAM LINKS ---
