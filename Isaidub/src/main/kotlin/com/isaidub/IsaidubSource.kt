@@ -1,6 +1,8 @@
 package com.isaidub
 
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.app
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -14,7 +16,7 @@ object IsaidubSource {
     suspend fun getHomePages(provider: IsaidubProvider): List<HomePageList> {
         val lists = mutableListOf<HomePageList>()
         try {
-            val doc = provider.app.get("${provider.mainUrl}/tamil-yearly-dubbed-movies/", timeout = 15).document
+            val doc = app.get("${provider.mainUrl}/tamil-yearly-dubbed-movies/", timeout = 15).document
             var latestYearUrl = ""; var latestYear = ""
             for (a in doc.select("a[href]")) {
                 if (a.attr("href").contains(Regex("tamil-\\d{4}-dubbed-movies"))) {
@@ -43,7 +45,7 @@ object IsaidubSource {
         while (listItems.size < 6 && currentPage <= 3) {
             val targetUrl = if (currentPage == 1) targetBaseUrl else "$targetBaseUrl?get-page=$currentPage"
             try {
-                val doc = provider.app.get(targetUrl, timeout = 15).document
+                val doc = app.get(targetUrl, timeout = 15).document
                 val validLinks = mutableListOf<Pair<String, String>>()
                 for (a in doc.select("div.f a")) {
                     val title = a.text().trim()
@@ -111,7 +113,7 @@ object IsaidubSource {
         val movies = mutableListOf<IsaidubProvider.ScrapedMovie>()
         var maxPage = 1
         try {
-            val doc = provider.app.get(url, timeout = 10).document
+            val doc = app.get(url, timeout = 10).document
             for (div in doc.select("div.f")) {
                 div.selectFirst("a")?.let { movies.add(IsaidubProvider.ScrapedMovie(it.text().trim(), if(it.attr("href").startsWith("/")) "${provider.mainUrl}${it.attr("href")}" else it.attr("href"))) }
             }
@@ -126,7 +128,7 @@ object IsaidubSource {
             extractFinalLink(provider, res.url, 0, mutableSetOf())?.let { finalUrl ->
                 val label = res.label.lowercase()
                 val q = when { label.contains("1080") -> "(1080p)"; label.contains("720") -> "(720p)"; label.contains("640") || label.contains("360") -> "(640x360)"; label.contains("480") || label.contains("320") -> "(480x320)"; else -> "(HD)" }
-                callback.invoke(provider.newExtractorLink("Isaidub", "Isaidub $q", finalUrl, finalUrl.contains(".m3u8")) { this.referer = "${provider.mainUrl}/" })
+                callback.invoke(newExtractorLink("Isaidub", "Isaidub $q", finalUrl, finalUrl.contains(".m3u8")) { this.referer = "${provider.mainUrl}/" })
                 found = true
             }
         }
@@ -137,7 +139,7 @@ object IsaidubSource {
         if (depth > 2) return emptyList()
         val found = mutableListOf<ResolutionNode>(); val folders = mutableListOf<String>()
         try {
-            for (a in provider.app.get(pageUrl, timeout = 10).document.select("a[href]")) {
+            for (a in app.get(pageUrl, timeout = 10).document.select("a[href]")) {
                 val href = a.attr("href"); val txt = a.text().trim().lowercase()
                 if (!href.contains("/movie/") || txt.contains("sample") || href == pageUrl) continue
                 val fullUrl = if (href.startsWith("http")) href else "${provider.mainUrl}$href"
@@ -152,7 +154,7 @@ object IsaidubSource {
     private suspend fun extractFinalLink(provider: IsaidubProvider, url: String, depth: Int, seen: MutableSet<String>): String? {
         if (depth > 5 || !seen.add(url)) return null
         try {
-            val res = provider.app.get(url, timeout = 10)
+            val res = app.get(url, timeout = 10)
             if (res.headers["content-type"]?.contains("video/") == true) return res.url
             val txt = res.text
             Regex("""https?://[^\s"'<>]*download\.php\?[^\s"'<>]*""", RegexOption.IGNORE_CASE).find(txt)?.value?.let { return it }
