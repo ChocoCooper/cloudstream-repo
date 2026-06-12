@@ -3,7 +3,7 @@ package com.megastream
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 
-class MegaStreamExtractors {
+class MegaStreamExtractors(private val provider: MegaStreamProvider) {
 
     suspend fun invokeExtractor(url: String, name: String, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit) {
         val target = url.lowercase()
@@ -18,9 +18,16 @@ class MegaStreamExtractors {
                 target.contains("streamwish") -> extractStreamWish(url, name, callback)
                 target.contains("mixdrop") -> extractMixDrop(url, name, callback)
                 url.endsWith(".m3u8") || url.endsWith(".mp4") -> {
+                    val type = if (url.endsWith(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                     callback.invoke(
-                        ExtractorLink(name, "$name Auto", url, url, Qualities.Unknown.value, 
-                            if (url.endsWith(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO)
+                        provider.newExtractorLink(
+                            source = name,
+                            name = "$name Auto",
+                            url = url,
+                            referer = url,
+                            quality = Qualities.Unknown.value,
+                            type = type
+                        )
                     )
                 }
             }
@@ -35,7 +42,7 @@ class MegaStreamExtractors {
             ?: Regex("""hls": ?"([^"]+)"""").find(html)?.groupValues?.get(1)
             
         hlsLink?.let {
-            callback.invoke(ExtractorLink(name, "$name Voe", it, url, Qualities.Unknown.value, ExtractorLinkType.M3U8))
+            callback.invoke(provider.newExtractorLink(source = name, name = "$name Voe", url = it, referer = url, quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8))
         }
     }
 
@@ -45,7 +52,7 @@ class MegaStreamExtractors {
         val hlsLink = Regex("""file:\s*"([^"]+\.m3u8[^"]*)"""").find(unpacked)?.groupValues?.get(1)
         
         hlsLink?.let {
-            callback.invoke(ExtractorLink(name, "$name Filemoon", it, url, Qualities.Unknown.value, ExtractorLinkType.M3U8))
+            callback.invoke(provider.newExtractorLink(source = name, name = "$name Filemoon", url = it, referer = url, quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8))
         }
     }
 
@@ -55,7 +62,7 @@ class MegaStreamExtractors {
         val hlsLink = Regex("""file:\s*"([^"]+\.m3u8[^"]*)"""").find(unpacked)?.groupValues?.get(1)
         
         hlsLink?.let {
-            callback.invoke(ExtractorLink(name, "$name Upstream", it, url, Qualities.Unknown.value, ExtractorLinkType.M3U8))
+            callback.invoke(provider.newExtractorLink(source = name, name = "$name Upstream", url = it, referer = url, quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8))
         }
     }
 
@@ -72,7 +79,7 @@ class MegaStreamExtractors {
                 val apiRes = app.get("https://vidsrc.me/api/source/$hashMatch").text
                 Regex("""file":"([^"]+)"""").find(apiRes)?.groupValues?.get(1)?.let { stream ->
                     val finalStream = stream.replace("\\/", "/")
-                    callback.invoke(ExtractorLink(name, "$name VidSrc", finalStream, url, Qualities.Unknown.value, ExtractorLinkType.M3U8))
+                    callback.invoke(provider.newExtractorLink(source = name, name = "$name VidSrc", url = finalStream, referer = url, quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8))
                 }
             }
         }
@@ -82,7 +89,7 @@ class MegaStreamExtractors {
         val html = app.get(url).text
         Regex("""play_url":"([^"]+)"""").find(html)?.groupValues?.get(1)?.let { stream ->
             val decoded = stream.replace("\\/", "/")
-            callback.invoke(ExtractorLink(name, "$name SuperEmbed", decoded, url, Qualities.Unknown.value, ExtractorLinkType.M3U8))
+            callback.invoke(provider.newExtractorLink(source = name, name = "$name SuperEmbed", url = decoded, referer = url, quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8))
         }
     }
 
@@ -97,14 +104,14 @@ class MegaStreamExtractors {
         val randomString = (1..10).map { ('a'..'z').random() }.joinToString("")
         val finalUrl = "$downloadUrl$randomString?token=$md5Token&expiry=${System.currentTimeMillis()}"
         
-        callback.invoke(ExtractorLink(name, "$name DoodStream", finalUrl, url, Qualities.Unknown.value, ExtractorLinkType.VIDEO))
+        callback.invoke(provider.newExtractorLink(source = name, name = "$name DoodStream", url = finalUrl, referer = url, quality = Qualities.Unknown.value, type = ExtractorLinkType.VIDEO))
     }
 
     private suspend fun extractStreamWish(url: String, name: String, callback: (ExtractorLink) -> Unit) {
         val html = app.get(url).text
         val unpacked = MegaStreamUtils.unpack(html)
         Regex("""file:\s*"([^"]+\.m3u8[^"]*)"""").find(unpacked)?.groupValues?.get(1)?.let {
-            callback.invoke(ExtractorLink(name, "$name StreamWish", it, url, Qualities.Unknown.value, ExtractorLinkType.M3U8))
+            callback.invoke(provider.newExtractorLink(source = name, name = "$name StreamWish", url = it, referer = url, quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8))
         }
     }
 
@@ -113,7 +120,7 @@ class MegaStreamExtractors {
         val unpacked = MegaStreamUtils.unpack(html)
         Regex("""wurl="([^"]+)"""").find(unpacked)?.groupValues?.get(1)?.let {
             val finalUrl = if (it.startsWith("//")) "https:$it" else it
-            callback.invoke(ExtractorLink(name, "$name MixDrop", finalUrl, url, Qualities.Unknown.value, ExtractorLinkType.VIDEO))
+            callback.invoke(provider.newExtractorLink(source = name, name = "$name MixDrop", url = finalUrl, referer = url, quality = Qualities.Unknown.value, type = ExtractorLinkType.VIDEO))
         }
     }
 }
