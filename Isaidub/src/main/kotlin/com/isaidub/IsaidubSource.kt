@@ -129,9 +129,9 @@ object IsaidubSource {
                 val label = res.label.lowercase()
                 val q = when { label.contains("1080") -> "(1080p)"; label.contains("720") -> "(720p)"; label.contains("640") || label.contains("360") -> "(640x360)"; label.contains("480") || label.contains("320") -> "(480x320)"; else -> "(HD)" }
                 
-                // FIXED: Passed correct ExtractorLinkType based on URL content
                 val linkType = if (finalUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                 
+                // FIXED: Re-added 'provider.' prefix here
                 callback.invoke(provider.newExtractorLink("Isaidub", "Isaidub $q", finalUrl, linkType) { this.referer = "${provider.mainUrl}/" })
                 found = true
             }
