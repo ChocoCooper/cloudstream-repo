@@ -23,10 +23,11 @@ suspend fun MegaStreamProvider.invokeExtractor(url: String, name: String, subtit
                         source = name,
                         name = "$name Auto",
                         url = url,
-                        referer = url,
-                        quality = Qualities.Unknown.value,
                         type = type
-                    )
+                    ) {
+                        this.referer = url
+                        this.quality = Qualities.Unknown.value
+                    }
                 )
             }
         }
@@ -41,7 +42,12 @@ private suspend fun MegaStreamProvider.extractVoe(url: String, name: String, cal
         ?: Regex("""hls": ?"([^"]+)"""").find(html)?.groupValues?.get(1)
         
     hlsLink?.let {
-        callback.invoke(newExtractorLink(source = name, name = "$name Voe", url = it, referer = url, quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8))
+        callback.invoke(
+            newExtractorLink(source = name, name = "$name Voe", url = it, type = ExtractorLinkType.M3U8) {
+                this.referer = url
+                this.quality = Qualities.Unknown.value
+            }
+        )
     }
 }
 
@@ -51,7 +57,12 @@ private suspend fun MegaStreamProvider.extractFilemoon(url: String, name: String
     val hlsLink = Regex("""file:\s*"([^"]+\.m3u8[^"]*)"""").find(unpacked)?.groupValues?.get(1)
     
     hlsLink?.let {
-        callback.invoke(newExtractorLink(source = name, name = "$name Filemoon", url = it, referer = url, quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8))
+        callback.invoke(
+            newExtractorLink(source = name, name = "$name Filemoon", url = it, type = ExtractorLinkType.M3U8) {
+                this.referer = url
+                this.quality = Qualities.Unknown.value
+            }
+        )
     }
 }
 
@@ -61,7 +72,12 @@ private suspend fun MegaStreamProvider.extractUpstream(url: String, name: String
     val hlsLink = Regex("""file:\s*"([^"]+\.m3u8[^"]*)"""").find(unpacked)?.groupValues?.get(1)
     
     hlsLink?.let {
-        callback.invoke(newExtractorLink(source = name, name = "$name Upstream", url = it, referer = url, quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8))
+        callback.invoke(
+            newExtractorLink(source = name, name = "$name Upstream", url = it, type = ExtractorLinkType.M3U8) {
+                this.referer = url
+                this.quality = Qualities.Unknown.value
+            }
+        )
     }
 }
 
@@ -78,7 +94,12 @@ private suspend fun MegaStreamProvider.extractVidSrc(url: String, name: String, 
             val apiRes = app.get("https://vidsrc.me/api/source/$hashMatch").text
             Regex("""file":"([^"]+)"""").find(apiRes)?.groupValues?.get(1)?.let { stream ->
                 val finalStream = stream.replace("\\/", "/")
-                callback.invoke(newExtractorLink(source = name, name = "$name VidSrc", url = finalStream, referer = url, quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8))
+                callback.invoke(
+                    newExtractorLink(source = name, name = "$name VidSrc", url = finalStream, type = ExtractorLinkType.M3U8) {
+                        this.referer = url
+                        this.quality = Qualities.Unknown.value
+                    }
+                )
             }
         }
     }
@@ -88,7 +109,12 @@ private suspend fun MegaStreamProvider.extractSuperEmbed(url: String, name: Stri
     val html = app.get(url).text
     Regex("""play_url":"([^"]+)"""").find(html)?.groupValues?.get(1)?.let { stream ->
         val decoded = stream.replace("\\/", "/")
-        callback.invoke(newExtractorLink(source = name, name = "$name SuperEmbed", url = decoded, referer = url, quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8))
+        callback.invoke(
+            newExtractorLink(source = name, name = "$name SuperEmbed", url = decoded, type = ExtractorLinkType.M3U8) {
+                this.referer = url
+                this.quality = Qualities.Unknown.value
+            }
+        )
     }
 }
 
@@ -103,14 +129,24 @@ private suspend fun MegaStreamProvider.extractDoodStream(url: String, name: Stri
     val randomString = (1..10).map { ('a'..'z').random() }.joinToString("")
     val finalUrl = "$downloadUrl$randomString?token=$md5Token&expiry=${System.currentTimeMillis()}"
     
-    callback.invoke(newExtractorLink(source = name, name = "$name DoodStream", url = finalUrl, referer = url, quality = Qualities.Unknown.value, type = ExtractorLinkType.VIDEO))
+    callback.invoke(
+        newExtractorLink(source = name, name = "$name DoodStream", url = finalUrl, type = ExtractorLinkType.VIDEO) {
+            this.referer = url
+            this.quality = Qualities.Unknown.value
+        }
+    )
 }
 
 private suspend fun MegaStreamProvider.extractStreamWish(url: String, name: String, callback: (ExtractorLink) -> Unit) {
     val html = app.get(url).text
     val unpacked = MegaStreamUtils.unpack(html)
     Regex("""file:\s*"([^"]+\.m3u8[^"]*)"""").find(unpacked)?.groupValues?.get(1)?.let {
-        callback.invoke(newExtractorLink(source = name, name = "$name StreamWish", url = it, referer = url, quality = Qualities.Unknown.value, type = ExtractorLinkType.M3U8))
+        callback.invoke(
+            newExtractorLink(source = name, name = "$name StreamWish", url = it, type = ExtractorLinkType.M3U8) {
+                this.referer = url
+                this.quality = Qualities.Unknown.value
+            }
+        )
     }
 }
 
@@ -119,6 +155,11 @@ private suspend fun MegaStreamProvider.extractMixDrop(url: String, name: String,
     val unpacked = MegaStreamUtils.unpack(html)
     Regex("""wurl="([^"]+)"""").find(unpacked)?.groupValues?.get(1)?.let {
         val finalUrl = if (it.startsWith("//")) "https:$it" else it
-        callback.invoke(newExtractorLink(source = name, name = "$name MixDrop", url = finalUrl, referer = url, quality = Qualities.Unknown.value, type = ExtractorLinkType.VIDEO))
+        callback.invoke(
+            newExtractorLink(source = name, name = "$name MixDrop", url = finalUrl, type = ExtractorLinkType.VIDEO) {
+                this.referer = url
+                this.quality = Qualities.Unknown.value
+            }
+        )
     }
 }
