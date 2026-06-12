@@ -117,8 +117,22 @@ object KuttyMoviesSource {
                 
                 val linkType = if (finalUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                 
-                // FIXED: Re-added 'provider.' prefix here
-                callback.invoke(provider.newExtractorLink("KuttyMovies", "KuttyMovies $q", finalUrl, linkType) { this.referer = "${provider.kuttyUrl}/" })
+                // FIXED: Using direct ExtractorLink constructor to bypass protected visibility issues
+                callback.invoke(
+                    ExtractorLink(
+                        source = "KuttyMovies",
+                        name = "KuttyMovies $q",
+                        url = finalUrl,
+                        referer = "${provider.kuttyUrl}/",
+                        quality = Qualities.Unknown.value,
+                        type = linkType,
+                        headers = mapOf(
+                            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                            "Accept" to "*/*",
+                            "Connection" to "keep-alive"
+                        )
+                    )
+                )
                 found = true
             }
         }
