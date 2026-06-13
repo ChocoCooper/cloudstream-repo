@@ -1,4 +1,4 @@
-package com.isaidub // Correct package for your build
+package com.isaidub
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
@@ -12,6 +12,7 @@ import org.jsoup.Jsoup
 import java.net.URI
 import java.net.URLEncoder
 import kotlin.random.Random
+import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 
 class IsaidubProvider : MainAPI() {
     override var mainUrl = "https://isaidub.guru"
@@ -20,15 +21,11 @@ class IsaidubProvider : MainAPI() {
     override var supportedTypes = setOf(TvType.Movie)
     override var lang = "ta"
 
-    // --- OPTIMIZATION: CONCURRENCY LIMITERS ---
     private val omdbSemaphore = Semaphore(5)
     private val scrapeSemaphore = Semaphore(5)
-
-    // --- OPTIMIZATION: IN-MEMORY CACHE ---
     private val pageCache = mutableMapOf<String, Pair<Long, Pair<List<ScrapedMovie>, Int>>>()
-    private val CACHE_DURATION = 5 * 60 * 1000L // 5 minutes
+    private val CACHE_DURATION = 5 * 60 * 1000L 
 
-    // --- OPTIMIZATION: SMART KEY EVICTION ---
     private val baseOmdbKeys = listOf(
         "4b447405", "eb0c0475", "7776cbde", "ff28f90b",
         "6c3a2d45", "b07b58c8", "ad04b643", "a95b5205",
@@ -36,6 +33,9 @@ class IsaidubProvider : MainAPI() {
         "73a9858a", "efbd8357"
     )
     private var activeOmdbKeys = baseOmdbKeys.toMutableList()
+    
+    // BYPASS COMPILER CRASH: Use Jackson directly instead of inline AppUtils
+    private val mapper = jacksonObjectMapper()
 
     data class OmdbSearchResponse(val Search: List<OmdbSearchResult>?, val Response: String?)
     data class OmdbSearchResult(val Title: String?, val Year: String?, val Poster: String?)
@@ -53,34 +53,18 @@ class IsaidubProvider : MainAPI() {
         activeOmdbKeys.remove(key)
     }
 
-    // --- TOKENIZATION & MATCHING HELPERS ---
-
     private fun normalizeTitle(title: String): String {
         var text = title.lowercase().trim()
-        text = text.replace("&", "and")
-        text = text.replace("judgment", "judgement")
-        text = text.replace("_", " ")
-
-        val romanMap = mapOf(
-            "ii" to "2", "iii" to "3", "iv" to "4", "v" to "5",
-            "vi" to "6", "vii" to "7", "viii" to "8", "ix" to "9"
-        )
-        romanMap.forEach { (roman, digit) ->
-            text = text.replace(Regex("\\b(part|vol|chapter|volume)\\s+$roman\\b"), digit)
-        }
+        text = text.replace("&", "and").replace("judgment", "judgement").replace("_", " ")
+        val romanMap = mapOf("ii" to "2", "iii" to "3", "iv" to "4", "v" to "5", "vi" to "6", "vii" to "7", "viii" to "8", "ix" to "9")
+        romanMap.forEach { (roman, digit) -> text = text.replace(Regex("\\b(part|vol|chapter|volume)\\s+$roman\\b"), digit) }
         return text
     }
 
     private fun tokenize(text: String, yearToRemove: String = ""): Set<String> {
         var cleanText = text.lowercase()
         if (yearToRemove.isNotBlank()) cleanText = cleanText.replace(yearToRemove, "")
-        return cleanText
-            .replace(Regex("[^\u0000-\u007F]"), " ") 
-            .replace(Regex("[^a-z0-9\\s]"), " ")   
-            .replace(Regex("^(the|a|an)\\s+"), "")
-            .split(Regex("\\s+"))
-            .filter { it.isNotBlank() }
-            .toSet()
+        return cleanText.replace(Regex("[^\u0000-\u007F]"), " ").replace(Regex("[^a-z0-9\\s]"), " ").replace(Regex("^(the|a|an)\\s+"), "").split(Regex("\\s+")).filter { it.isNotBlank() }.toSet()
     }
 
     private fun searchByTokenAndYear(movies: List<ScrapedMovie>, queryTitle: String, queryYear: String): List<ScrapedMovie> {
@@ -90,18 +74,14 @@ class IsaidubProvider : MainAPI() {
         for (movie in movies) {
             val titleLower = movie.title.lowercase()
             if (queryYear.isNotBlank() && !titleLower.contains(queryYear)) continue
-
             val siteTokens = tokenize(normalizeTitle(movie.title), yearToRemove = queryYear)
             val commonTokens = queryTokens.intersect(siteTokens)
             val matchPercentage = commonTokens.size.toDouble() / queryTokens.size
 
-            val isMatch = if (queryTokens.size <= 2) {
-                matchPercentage == 1.0
-            } else {
+            val isMatch = if (queryTokens.size <= 2) matchPercentage == 1.0 else {
                 val significantMatches = queryTokens.filter { siteTokens.contains(it) && it.length > 2 }
                 matchPercentage >= 0.6 && significantMatches.isNotEmpty()
             }
-
             if (isMatch) matches.add(Pair(movie, commonTokens.size))
         }
         return matches.sortedByDescending { it.second }.map { it.first }
@@ -116,18 +96,15 @@ class IsaidubProvider : MainAPI() {
         try {
             val encodedQuery = URLEncoder.encode(finalSearchTitle, "UTF-8")
             val apiKey = getRandomApiKey()
-            val url = if (extractedYear.isNotBlank()) {
-                "https://www.omdbapi.com/?apikey=$apiKey&t=$encodedQuery&y=$extractedYear"
-            } else {
-                "https://www.omdbapi.com/?apikey=$apiKey&t=$encodedQuery"
-            }
+            val url = if (extractedYear.isNotBlank()) "https://www.omdbapi.com/?apikey=$apiKey&t=$encodedQuery&y=$extractedYear" else "https://www.omdbapi.com/?apikey=$apiKey&t=$encodedQuery"
             
             val response = omdbSemaphore.withPermit { app.get(url, timeout = 3) }
 
             if (response.code == 401 || response.text.contains("Limit reached", ignoreCase = true) || response.text.contains("Invalid API key", ignoreCase = true)) {
                 removeDeadKey(apiKey)
             } else if (response.isSuccessful && response.text.contains("\"Response\":\"True\"")) {
-                val parsed = AppUtils.parseJson<OmdbTitleResponse>(response.text)
+                // BYPASS COMPILER CRASH
+                val parsed = mapper.readValue(response.text, OmdbTitleResponse::class.java)
                 if (parsed.Poster != null && parsed.Poster != "N/A") {
                     return Pair(parsed, extractedYear)
                 }
@@ -180,13 +157,9 @@ class IsaidubProvider : MainAPI() {
                     val title = a.text().trim()
                     var link = a.attr("href")
                     if (link.startsWith("/")) link = "$mainUrl$link"
-                    
                     val lowerTitle = title.lowercase()
                     val lowerLink = link.lowercase()
-                    
-                    if (lowerTitle.contains("web series") || lowerLink.contains("web-series") ||
-                        lowerTitle.contains("season") || lowerTitle.contains("episode")) continue
-                    
+                    if (lowerTitle.contains("web series") || lowerLink.contains("web-series") || lowerTitle.contains("season") || lowerTitle.contains("episode")) continue
                     validMovieLinks.add(Pair(title, link))
                 }
 
@@ -197,7 +170,6 @@ class IsaidubProvider : MainAPI() {
                         async {
                             val cleanTitle = title.replace("isaiDub.me", "").replace("-", " ").trim()
                             val (omdbMatch, resolvedYear) = fetchOmdbMetadata(cleanTitle, sectionYear)
-                            
                             val omdbPoster = omdbMatch?.Poster?.takeIf { it != "N/A" }
                             val plotSynopsis = omdbMatch?.Plot?.takeIf { it != "N/A" } ?: "No synopsis available."
                             
@@ -207,7 +179,6 @@ class IsaidubProvider : MainAPI() {
                                 val p = URLEncoder.encode(omdbPoster, "UTF-8")
                                 val u = URLEncoder.encode(link, "UTF-8")
                                 val s = URLEncoder.encode(plotSynopsis, "UTF-8")
-                                
                                 val targetData = "$mainUrl/synthetic_meta?t=$t&y=$y&p=$p&url=$u&s=$s"
 
                                 newMovieSearchResponse(cleanTitle, targetData) {
@@ -220,15 +191,11 @@ class IsaidubProvider : MainAPI() {
                 }
 
                 for (res in responses) {
-                    if (listItems.size < 6 && listItems.none { it.name == res.name }) {
-                        listItems.add(res)
-                    }
+                    if (listItems.size < 6 && listItems.none { it.name == res.name }) listItems.add(res)
                 }
 
-                val totalPagesSpan = doc.selectFirst("span#totalPages")
-                val maxPageStr = totalPagesSpan?.text()?.trim()?.toIntOrNull()
+                val maxPageStr = doc.selectFirst("span#totalPages")?.text()?.trim()?.toIntOrNull()
                 if (maxPageStr != null && currentPage >= maxPageStr) break
-                
             } catch (e: Exception) { break }
             currentPage++
         }
@@ -237,7 +204,6 @@ class IsaidubProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         val homePageLists = mutableListOf<HomePageList>()
-        
         try {
             val yearlyDoc = scrapeSemaphore.withPermit { app.get("$mainUrl/tamil-yearly-dubbed-movies/", timeout = 15).document }
             var latestYearUrl = ""
@@ -260,9 +226,7 @@ class IsaidubProvider : MainAPI() {
                 val familyDeferred = async { fetchSectionItems("$mainUrl/tamil-family-dubbed-movies/") }
 
                 val newMoviesList = newMoviesDeferred.await()
-                if (newMoviesList.isNotEmpty()) {
-                    homePageLists.add(HomePageList("New Tamil Dubbed Movies", newMoviesList, isHorizontalImages = false))
-                }
+                if (newMoviesList.isNotEmpty()) homePageLists.add(HomePageList("New Tamil Dubbed Movies", newMoviesList, isHorizontalImages = false))
                 
                 val sections = listOf(
                     Pair("Tamil Dubbed Action Movies", actionDeferred.await()),
@@ -272,15 +236,10 @@ class IsaidubProvider : MainAPI() {
                 )
 
                 for ((title, listData) in sections) {
-                    if (listData.isNotEmpty()) {
-                        homePageLists.add(HomePageList(title, listData, isHorizontalImages = false))
-                    }
+                    if (listData.isNotEmpty()) homePageLists.add(HomePageList(title, listData, isHorizontalImages = false))
                 }
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-
+        } catch (e: Exception) { }
         return newHomePageResponse(homePageLists, hasNext = false)
     }
 
@@ -301,11 +260,10 @@ class IsaidubProvider : MainAPI() {
         } catch (e: Exception) { }
 
         if (omdbJson == null) return emptyList()
-        val parsed = AppUtils.parseJson<OmdbSearchResponse>(omdbJson.text)
+        // BYPASS COMPILER CRASH
+        val parsed = mapper.readValue(omdbJson.text, OmdbSearchResponse::class.java)
         
-        val validOmdbResults = parsed.Search?.filter { item ->
-            !item.Poster.isNullOrBlank() && item.Poster != "N/A"
-        } ?: emptyList()
+        val validOmdbResults = parsed.Search?.filter { !it.Poster.isNullOrBlank() && it.Poster != "N/A" } ?: emptyList()
 
         return coroutineScope {
             validOmdbResults.map { item ->
@@ -313,40 +271,33 @@ class IsaidubProvider : MainAPI() {
                     val title = item.Title ?: ""
                     val year = item.Year?.replace(Regex("[^0-9]"), "") ?: "" 
                     val fullPoster = item.Poster ?: ""
-
                     val isaidubLinks = searchIsaidubMovieLinks(title, year)
                     val combinedLinks = isaidubLinks.joinToString(",")
 
                     if (combinedLinks.isNotBlank()) {
                         val (detailedMeta, _) = fetchOmdbMetadata(title, year)
                         val plotSynopsis = detailedMeta?.Plot?.takeIf { it != "N/A" } ?: "No synopsis available."
-
                         val t = URLEncoder.encode(title, "UTF-8")
                         val y = URLEncoder.encode(year, "UTF-8")
                         val p = URLEncoder.encode(fullPoster, "UTF-8")
                         val s = URLEncoder.encode(plotSynopsis, "UTF-8") 
                         val u = URLEncoder.encode(combinedLinks, "UTF-8")
-                        
                         val targetData = "$mainUrl/synthetic_meta?t=$t&y=$y&p=$p&url=$u&s=$s"
 
                         newMovieSearchResponse(title, targetData) {
                             this.posterUrl = fullPoster
                             this.year = year.toIntOrNull()
                         }
-                    } else {
-                        null
-                    }
+                    } else null
                 }
             }.awaitAll().filterNotNull()
         }
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        // Hero Section & Watch History bypass (Handles old/raw URLs seamlessly)
         if (!url.contains("/synthetic_meta?")) {
             val rawName = url.trimEnd('/').substringAfterLast("/").replace("-", " ").replace(Regex("tamil.*", RegexOption.IGNORE_CASE), "").trim()
             val (omdbMatch, resolvedYear) = fetchOmdbMetadata(rawName)
-            
             return newMovieLoadResponse(omdbMatch?.Title ?: rawName, url, TvType.Movie, url) {
                 this.posterUrl = omdbMatch?.Poster?.takeIf { it != "N/A" }
                 this.year = resolvedYear.toIntOrNull()
@@ -388,24 +339,17 @@ class IsaidubProvider : MainAPI() {
 
     private suspend fun scrapePageAndGetTotal(url: String): Pair<List<ScrapedMovie>, Int> {
         val cached = pageCache[url]
-        if (cached != null && System.currentTimeMillis() - cached.first < CACHE_DURATION) {
-            return cached.second
-        }
+        if (cached != null && System.currentTimeMillis() - cached.first < CACHE_DURATION) return cached.second
 
         val movies = mutableListOf<ScrapedMovie>()
         var maxPage = 1
         try {
             val doc = scrapeSemaphore.withPermit { app.get(url, timeout = 15).document }
-            
-            val movieDivs = doc.select("div.f")
-            for (div in movieDivs) {
-                val aTag = div.selectFirst("a")
-                if (aTag != null) {
+            doc.select("div.f").forEach { div ->
+                div.selectFirst("a")?.let { aTag ->
                     val title = aTag.text().trim()
                     var link = aTag.attr("href")
-                    if (link.startsWith("/")) {
-                        link = "$mainUrl$link"
-                    }
+                    if (link.startsWith("/")) link = "$mainUrl$link"
                     movies.add(ScrapedMovie(title, link))
                 }
             }
@@ -433,12 +377,7 @@ class IsaidubProvider : MainAPI() {
         return result
     }
 
-    override suspend fun loadLinks(
-        data: String,
-        isCasting: Boolean,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
+    override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
         val urls = data.split(",")
         var foundAnyLinks = false
 
@@ -450,12 +389,7 @@ class IsaidubProvider : MainAPI() {
                 if (finalLink != null) {
                     val isM3u8 = finalLink.contains(".m3u8", ignoreCase = true)
                     callback.invoke(
-                        newExtractorLink(
-                            source = this.name,
-                            name = "Isaidub (Auto)",
-                            url = finalLink,
-                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                        ) {
+                        newExtractorLink(source = this.name, name = "Isaidub (Auto)", url = finalLink, type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
                             this.referer = "$mainUrl/"
                             this.quality = Qualities.Unknown.value
                         }
@@ -467,7 +401,6 @@ class IsaidubProvider : MainAPI() {
                     val finalLink = extractFinalLink(res.url, 0, mutableSetOf())
                     if (finalLink != null) {
                         val isM3u8 = finalLink.contains(".m3u8", ignoreCase = true)
-                        
                         val lowerLabel = res.label.lowercase()
                         val qualityName = when {
                             lowerLabel.contains("1080") -> "(1080p)"
@@ -477,22 +410,11 @@ class IsaidubProvider : MainAPI() {
                             else -> "(HD)"
                         }
                         
-                        val linkType = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-
                         callback.invoke(
-                            newExtractorLink(
-                                source = this.name,
-                                name = "Isaidub $qualityName",
-                                url = finalLink,
-                                type = linkType
-                            ) {
+                            newExtractorLink(source = this.name, name = "Isaidub $qualityName", url = finalLink, type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO) {
                                 this.referer = "$mainUrl/"
                                 this.quality = Qualities.Unknown.value
-                                this.headers = mapOf(
-                                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                                    "Accept" to "*/*",
-                                    "Connection" to "keep-alive"
-                                )
+                                this.headers = mapOf("User-Agent" to "Mozilla/5.0", "Accept" to "*/*", "Connection" to "keep-alive")
                             }
                         )
                         foundAnyLinks = true
@@ -505,14 +427,11 @@ class IsaidubProvider : MainAPI() {
 
     private suspend fun getResolutions(pageUrl: String, depth: Int = 0, maxDepth: Int = 3): List<ResolutionNode> {
         if (depth > maxDepth) return emptyList()
-
         val foundResolutions = mutableListOf<ResolutionNode>()
         val folderPages = mutableListOf<String>()
 
         try {
             val doc = scrapeSemaphore.withPermit { app.get(pageUrl, timeout = 15).document }
-            
-            // Reverted back to grabbing standard links, safely filtering out unrelated paths
             for (a in doc.select("a[href]")) {
                 val href = a.attr("href")
                 val text = a.text().trim()
@@ -525,36 +444,23 @@ class IsaidubProvider : MainAPI() {
                 if (fullUrl == pageUrl) continue
 
                 if (href.contains("/movie/")) {
-                    val isResolution = listOf("360", "480", "640", "720", "1080", "hd", "mp4").any { textLower.contains(it) }
-                    
-                    if (isResolution) {
-                        if (foundResolutions.none { it.url == fullUrl }) {
-                            foundResolutions.add(ResolutionNode(text, fullUrl))
-                        }
+                    if (listOf("360", "480", "640", "720", "1080", "hd", "mp4").any { textLower.contains(it) }) {
+                        if (foundResolutions.none { it.url == fullUrl }) foundResolutions.add(ResolutionNode(text, fullUrl))
                     } else {
-                        if (!folderPages.contains(fullUrl)) {
-                            folderPages.add(fullUrl)
-                        }
+                        if (!folderPages.contains(fullUrl)) folderPages.add(fullUrl)
                     }
                 }
             }
 
             if (foundResolutions.isEmpty() && folderPages.isNotEmpty()) {
-                // Smart Filter: Ensure we only crawl subfolders representing THIS movie (avoids Related Movies section)
                 val cleanBase = pageUrl.trimEnd('/').substringAfterLast("/").replace(".html", "")
                 val validFolders = folderPages.filter { it.contains(cleanBase, ignoreCase = true) }
-                
                 for (folderUrl in validFolders) {
                     val nested = getResolutions(folderUrl, depth + 1, maxDepth)
-                    for (nr in nested) {
-                        if (foundResolutions.none { it.url == nr.url }) {
-                            foundResolutions.add(nr)
-                        }
-                    }
+                    for (nr in nested) if (foundResolutions.none { it.url == nr.url }) foundResolutions.add(nr)
                 }
             }
         } catch (e: Exception) { }
-
         return foundResolutions
     }
 
@@ -564,12 +470,9 @@ class IsaidubProvider : MainAPI() {
 
         try {
             val res = scrapeSemaphore.withPermit { app.get(url, timeout = 15) }
-            if (res.headers["content-type"]?.contains("video/") == true) {
-                return res.url
-            }
+            if (res.headers["content-type"]?.contains("video/") == true) return res.url
 
             val text = res.text
-
             val dlPhpMatch = Regex("""https?://[^\s"'<>]*download\.php\?[^\s"'<>]*""", RegexOption.IGNORE_CASE).find(text)
             val m3u8Match = Regex("""https?://[^\s"'<>]*\.m3u8[^\s"'<>]*""", RegexOption.IGNORE_CASE).find(text)
             val mp4Match = Regex("""https?://[^\s"'<>]*\.mp4[^\s"'<>]*""", RegexOption.IGNORE_CASE).find(text)
@@ -584,16 +487,12 @@ class IsaidubProvider : MainAPI() {
             for (a in doc.select("a[href]")) {
                 val href = a.attr("href")
                 val linkText = a.text().lowercase()
-
                 if (linkText.contains("sample") || href.lowercase().contains("sample")) continue
 
                 val fullUrl = when {
                     href.startsWith("http") -> href
                     href.startsWith("//") -> "https:$href"
-                    else -> {
-                        val uri = URI(url)
-                        "https://${uri.host}$href"
-                    }
+                    else -> "https://${URI(url).host}$href"
                 }
 
                 if (validPaths.any { fullUrl.lowercase().contains(it) }) {
@@ -602,7 +501,6 @@ class IsaidubProvider : MainAPI() {
                 }
             }
         } catch (e: Exception) { }
-
         return null
     }
 }
