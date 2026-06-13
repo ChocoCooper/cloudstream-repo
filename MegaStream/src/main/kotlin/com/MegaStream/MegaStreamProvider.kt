@@ -30,11 +30,10 @@ class MegaStreamProvider : MainAPI() {
         return omdbKeys.random()
     }
 
-    // --- PHASE 0: HOMEPAGE (Pure OMDb Generation to bypass ISP blocks) ---
+    // --- PHASE 0: HOMEPAGE (Pure OMDb Generation) ---
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val lists = mutableListOf<HomePageList>()
 
-        // Dynamic categories to populate the Hero section instantly
         val queries = listOf(
             Pair("Trending Action 2024", "Action"),
             Pair("Popular Sci-Fi", "Sci-Fi"),
@@ -50,11 +49,11 @@ class MegaStreamProvider : MainAPI() {
                         val encodedQuery = URLEncoder.encode(query, "UTF-8")
                         val url = "$mainUrl/?apikey=$apiKey&s=$encodedQuery&type=movie&y=2024"
                         
-                        val res = app.get(url, timeout = 5)
-                        // Bypasses the Kotlin Daemon compiler crash by using explicit Jackson mapping
-                        val parsed = AppUtils.mapper.readValue(res.text, OmdbSearchResponse::class.java)
+                        val res = app.get(url, timeout = 5).text
+                        // FIXED: Reverted to native tryParseJson
+                        val parsed = AppUtils.tryParseJson<OmdbSearchResponse>(res)
                         
-                        val items = parsed.Search?.filter { it.Poster != "N/A" }?.mapNotNull { item ->
+                        val items = parsed?.Search?.filter { it.Poster != "N/A" }?.mapNotNull { item ->
                             val imdbId = item.imdbID ?: return@mapNotNull null
                             newMovieSearchResponse(item.Title ?: "Unknown", "omdb://$imdbId", TvType.Movie) {
                                 this.posterUrl = item.Poster
@@ -81,10 +80,11 @@ class MegaStreamProvider : MainAPI() {
         val url = "$mainUrl/?apikey=$apiKey&s=$encodedQuery&type=movie"
         
         return try {
-            val res = app.get(url, timeout = 5)
-            val parsed = AppUtils.mapper.readValue(res.text, OmdbSearchResponse::class.java)
+            val res = app.get(url, timeout = 5).text
+            // FIXED: Reverted to native tryParseJson
+            val parsed = AppUtils.tryParseJson<OmdbSearchResponse>(res)
             
-            parsed.Search?.filter { it.Poster != "N/A" }?.mapNotNull { item ->
+            parsed?.Search?.filter { it.Poster != "N/A" }?.mapNotNull { item ->
                 val title = item.Title ?: return@mapNotNull null
                 val imdbId = item.imdbID ?: return@mapNotNull null
                 
@@ -108,15 +108,12 @@ class MegaStreamProvider : MainAPI() {
         val apiKey = getRandomApiKey()
         val metaUrl = "$mainUrl/?apikey=$apiKey&i=$imdbId&plot=full"
         
-        val metaRes = try {
-            AppUtils.mapper.readValue(app.get(metaUrl).text, OmdbTitleResponse::class.java)
-        } catch (e: Exception) {
-            return null
-        }
+        // FIXED: Reverted to native tryParseJson
+        val metaRes = AppUtils.tryParseJson<OmdbTitleResponse>(app.get(metaUrl).text) ?: return null
         
         val resolvedTitle = metaRes.Title ?: "Unknown"
-        val resolvedPoster = metaRes.Poster.takeIf { it != "N/A" } ?: ""
-        val resolvedPlot = metaRes.Plot.takeIf { it != "N/A" } ?: ""
+        val resolvedPoster = metaRes.Poster?.takeIf { it != "N/A" } ?: ""
+        val resolvedPlot = metaRes.Plot?.takeIf { it != "N/A" } ?: ""
         val resolvedYear = metaRes.Year?.replace(Regex("[^0-9]"), "")?.toIntOrNull()
 
         // Generate links for highly reliable, anti-block hoster aggregators
@@ -138,7 +135,6 @@ class MegaStreamProvider : MainAPI() {
     }
 
     // --- PHASE 3: DELEGATED EXTRACTION ---
-    // Instead of manual decryption, we find the iframes and pass them to Cloudstream's native extractors
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -152,16 +148,14 @@ class MegaStreamProvider : MainAPI() {
             urls.forEach { embedUrl ->
                 launch {
                     try {
-                        // Using a 15-second timeout to handle slow ISP routing
                         val doc = app.get(embedUrl, timeout = 15).document
                         
-                        // Scrape the hoster page for video iframes (Filemoon, Voe, MixDrop, Upstream, etc.)
                         doc.select("iframe").forEach { iframe ->
                             val src = iframe.attr("src")
                             val finalSrc = if (src.startsWith("//")) "https:$src" else src
                             
                             if (finalSrc.isNotBlank() && finalSrc.startsWith("http")) {
-                                // Delegate the complex decryption to Cloudstream's continuously updated core extractors
+                                // Delegate decryption entirely to Cloudstream's native core extractors
                                 val success = loadExtractor(finalSrc, embedUrl, subtitleCallback, callback)
                                 if (success) {
                                     foundAny = true
@@ -169,7 +163,7 @@ class MegaStreamProvider : MainAPI() {
                             }
                         }
                     } catch (e: Exception) {
-                        // Silently ignore SocketTimeoutExceptions from blocked domains and let the others finish
+                        // Silently ignore blocked domains
                     }
                 }
             }
