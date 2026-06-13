@@ -17,11 +17,10 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
-// IMPORT THE WEBVIEW RESOLVER
-import com.lagradost.cloudstream3.network.WebViewResolver
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import java.net.URLEncoder
 import java.util.Locale
 
 class Tamilian : MainAPI() {
@@ -40,9 +39,16 @@ class Tamilian : MainAPI() {
             "8cf43ad9c085135b9479ad5cf6bbcbda",
             "da63548086e399ffc910fbc08526df05"
         )
+    }
+
+    // --- HELPER: The Public Proxy Wrapper ---
+    // This routes the target URL through a public CORS proxy to bypass ISP SNI blocks.
+    private fun proxied(targetUrl: String): String {
+        val encodedUrl = URLEncoder.encode(targetUrl, "UTF-8")
+        return "https://corsproxy.io/?url=$encodedUrl"
         
-        // REUSABLE INTERCEPTOR INSTANCE FOR TAMILIAN DOMAIN
-        private val webViewInterceptor = WebViewResolver(Regex("tamilian\\.io"))
+        // Backup proxies if corsproxy.io fails:
+        // return "https://api.allorigins.win/raw?url=$encodedUrl"
     }
 
     // --- HELPER: Safely handles relative URLs ---
@@ -100,8 +106,9 @@ class Tamilian : MainAPI() {
     private data class ScrapedMovie(val title: String, val url: String, val nativePoster: String?, val year: Int?)
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        // FIXED: Added webViewInterceptor to route request through standard headless WebView execution context
-        val doc = app.get("$mainUrl/home/", interceptor = webViewInterceptor).document
+        // Wrap the target URL in the proxy
+        val target = "$mainUrl/home/"
+        val doc = app.get(proxied(target)).document
         
         val scrapedMovies = doc.select("a[href*='/movie/']").mapNotNull { element ->
             val href = element.attr("href")
@@ -142,8 +149,9 @@ class Tamilian : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        // FIXED: Added webViewInterceptor
-        val doc = app.get("$mainUrl/search/$query", interceptor = webViewInterceptor).document
+        // Wrap the search URL in the proxy
+        val target = "$mainUrl/search/$query"
+        val doc = app.get(proxied(target)).document
         
         val scrapedMovies = doc.select("a[href*='/movie/']").mapNotNull { element ->
             val href = element.attr("href")
@@ -184,8 +192,8 @@ class Tamilian : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        // FIXED: Added webViewInterceptor to intercept detailed payload parsing
-        val doc = app.get(url, interceptor = webViewInterceptor).document
+        // Wrap the movie details URL in the proxy
+        val doc = app.get(proxied(url)).document
         
         val title = doc.selectFirst(".mvic-desc h3")?.text() ?: cleanTitleFromUrl(url)
         val plot = doc.selectFirst(".desc")?.text()
@@ -218,9 +226,8 @@ class Tamilian : MainAPI() {
         val watchUrl = if (data.endsWith("/")) "${data}watching.html" else "$data/watching.html"
         val baseHeaders = mapOf("Referer" to data)
         
-        // --- STEP 1: Get the Internal Movie ID ---
-        // FIXED: Added webViewInterceptor
-        val watchRes = app.get(watchUrl, headers = baseHeaders, interceptor = webViewInterceptor).text
+        // --- STEP 1: Get the Internal Movie ID (Proxied) ---
+        val watchRes = app.get(proxied(watchUrl), headers = baseHeaders).text
         val movieIdMatch = Regex("""movie\s*=\s*\{[^}]*id:\s*"(\d+)"""").find(watchRes)
         val movieId = movieIdMatch?.groupValues?.get(1) ?: return false
 
@@ -229,10 +236,9 @@ class Tamilian : MainAPI() {
             "Referer" to watchUrl
         )
 
-        // --- STEP 2: Fetch the Hidden Server Buttons ---
-        // FIXED: Added webViewInterceptor
+        // --- STEP 2: Fetch the Hidden Server Buttons (Proxied) ---
         val serverApiUrl = "$mainUrl/ajax/movie/episode/servers/${movieId}_1_full"
-        val servRes = app.get(serverApiUrl, headers = ajaxHeaders, interceptor = webViewInterceptor)
+        val servRes = app.get(proxied(serverApiUrl), headers = ajaxHeaders)
         if (!servRes.isSuccessful) return false
 
         val serverBtns = servRes.document.select("a[data-id]")
@@ -251,10 +257,9 @@ class Tamilian : MainAPI() {
             cleanDataId
         }
 
-        // --- STEP 3: Fetch the Embed Link ---
-        // FIXED: Added webViewInterceptor
+        // --- STEP 3: Fetch the Embed Link (Proxied) ---
         val sourcesUrl = "$mainUrl/ajax/movie/episode/server/sources/$fullDataId"
-        val sourceRes = app.get(sourcesUrl, headers = ajaxHeaders, interceptor = webViewInterceptor)
+        val sourceRes = app.get(proxied(sourcesUrl), headers = ajaxHeaders)
         if (!sourceRes.isSuccessful) return false
 
         var finalLink: String? = null
@@ -265,7 +270,7 @@ class Tamilian : MainAPI() {
             finalLink = match?.groupValues?.get(1)?.replace("\\", "")
         }
 
-        // --- STEP 4: Direct API POST (No interceptor needed for embedded server endpoints) ---
+        // --- STEP 4: Direct API POST (Not proxied, as video servers usually aren't ISP blocked) ---
         if (finalLink != null) {
             val token = finalLink.substringAfterLast("/")
             val embedHost = if (finalLink.contains("megacloud")) "https://megacloud.tv" else "https://embedojo.net"
