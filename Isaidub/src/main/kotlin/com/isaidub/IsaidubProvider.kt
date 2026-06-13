@@ -61,12 +61,16 @@ class IsaidubProvider : MainAPI() {
         text = text.replace("judgment", "judgement")
         text = text.replace("_", " ")
 
+        // Remove fluff words like 'part', 'chapter', 'vol' safely
+        text = text.replace(Regex("\\b(part|vol|chapter|volume)\\s+"), "")
+
+        // Map standalone roman numerals to digits (fixes Gladiator II -> Gladiator 2)
         val romanMap = mapOf(
             "ii" to "2", "iii" to "3", "iv" to "4", "v" to "5",
-            "vi" to "6", "vii" to "7", "viii" to "8", "ix" to "9"
+            "vi" to "6", "vii" to "7", "viii" to "8", "ix" to "9", "x" to "10"
         )
         romanMap.forEach { (roman, digit) ->
-            text = text.replace(Regex("\\b(part|vol|chapter|volume)\\s+$roman\\b"), digit)
+            text = text.replace(Regex("\\b$roman\\b"), digit)
         }
         return text
     }
@@ -127,8 +131,8 @@ class IsaidubProvider : MainAPI() {
             if (response.code == 401 || response.text.contains("Limit reached", ignoreCase = true) || response.text.contains("Invalid API key", ignoreCase = true)) {
                 removeDeadKey(apiKey)
             } else if (response.isSuccessful && response.text.contains("\"Response\":\"True\"")) {
-                val parsed = AppUtils.parseJson<OmdbTitleResponse>(response.text)
-                if (parsed.Poster != null && parsed.Poster != "N/A") {
+                val parsed = AppUtils.tryParseJson<OmdbTitleResponse>(response.text)
+                if (parsed != null && parsed.Poster != null && parsed.Poster != "N/A") {
                     return Pair(parsed, extractedYear)
                 }
             }
@@ -301,9 +305,9 @@ class IsaidubProvider : MainAPI() {
         } catch (e: Exception) { }
 
         if (omdbJson == null) return emptyList()
-        val parsed = AppUtils.parseJson<OmdbSearchResponse>(omdbJson.text)
+        val parsed = AppUtils.tryParseJson<OmdbSearchResponse>(omdbJson.text)
         
-        val validOmdbResults = parsed.Search?.filter { item ->
+        val validOmdbResults = parsed?.Search?.filter { item ->
             !item.Poster.isNullOrBlank() && item.Poster != "N/A"
         } ?: emptyList()
 
