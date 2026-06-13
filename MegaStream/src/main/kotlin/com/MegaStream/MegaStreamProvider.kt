@@ -50,12 +50,15 @@ class MegaStreamProvider : MainAPI() {
                         val url = "$mainUrl/?apikey=$apiKey&s=$encodedQuery&type=movie&y=2024"
                         
                         val res = app.get(url, timeout = 5).text
-                        // FIXED: Reverted to native tryParseJson
                         val parsed = AppUtils.tryParseJson<OmdbSearchResponse>(res)
                         
                         val items = parsed?.Search?.filter { it.Poster != "N/A" }?.mapNotNull { item ->
                             val imdbId = item.imdbID ?: return@mapNotNull null
-                            newMovieSearchResponse(item.Title ?: "Unknown", "omdb://$imdbId", TvType.Movie) {
+                            
+                            // FIXED: HTTP-compliant synthetic routing to prevent Cloudstream URL corruption
+                            val payload = "$mainUrl/megastream_omdb?id=$imdbId"
+                            
+                            newMovieSearchResponse(item.Title ?: "Unknown", payload, TvType.Movie) {
                                 this.posterUrl = item.Poster
                                 this.year = item.Year?.replace(Regex("[^0-9]"), "")?.toIntOrNull()
                             }
@@ -81,14 +84,16 @@ class MegaStreamProvider : MainAPI() {
         
         return try {
             val res = app.get(url, timeout = 5).text
-            // FIXED: Reverted to native tryParseJson
             val parsed = AppUtils.tryParseJson<OmdbSearchResponse>(res)
             
             parsed?.Search?.filter { it.Poster != "N/A" }?.mapNotNull { item ->
                 val title = item.Title ?: return@mapNotNull null
                 val imdbId = item.imdbID ?: return@mapNotNull null
                 
-                newMovieSearchResponse(title, "omdb://$imdbId", TvType.Movie) {
+                // FIXED: HTTP-compliant synthetic routing
+                val payload = "$mainUrl/megastream_omdb?id=$imdbId"
+                
+                newMovieSearchResponse(title, payload, TvType.Movie) {
                     this.posterUrl = item.Poster
                     this.year = item.Year?.replace(Regex("[^0-9]"), "")?.toIntOrNull()
                 }
@@ -100,15 +105,21 @@ class MegaStreamProvider : MainAPI() {
 
     // --- PHASE 2: LOAD METADATA AND GENERATE EMBED LINKS ---
     override suspend fun load(url: String): LoadResponse? {
-        if (!url.startsWith("omdb://")) return null
-
-        val uri = URI(url)
-        val imdbId = uri.host ?: return null
+        // Robust fallback to catch the ID even if Cloudstream manipulated the URL slightly
+        val imdbId = if (url.contains("/megastream_omdb")) {
+            val uri = URI(url)
+            val queryParams = uri.query?.split("&")?.associate {
+                val parts = it.split("=")
+                parts[0] to java.net.URLDecoder.decode(parts.getOrElse(1) { "" }, "UTF-8")
+            }
+            queryParams?.get("id") ?: return null
+        } else {
+            Regex("""(tt\d+)""").find(url)?.groupValues?.get(1) ?: return null
+        }
         
         val apiKey = getRandomApiKey()
         val metaUrl = "$mainUrl/?apikey=$apiKey&i=$imdbId&plot=full"
         
-        // FIXED: Reverted to native tryParseJson
         val metaRes = AppUtils.tryParseJson<OmdbTitleResponse>(app.get(metaUrl).text) ?: return null
         
         val resolvedTitle = metaRes.Title ?: "Unknown"
