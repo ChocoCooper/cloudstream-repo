@@ -4,6 +4,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.coroutineScope
+import org.jsoup.Jsoup
 import java.net.URI
 import java.net.URLEncoder
 
@@ -30,7 +31,7 @@ class MegaStreamProvider : MainAPI() {
         return omdbKeys.random()
     }
 
-    // --- PHASE 0: HOMEPAGE (Pure OMDb Generation) ---
+    // --- PHASE 0: HOMEPAGE (Pure OMDb Generation to bypass ISP blocks) ---
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val lists = mutableListOf<HomePageList>()
 
@@ -55,7 +56,6 @@ class MegaStreamProvider : MainAPI() {
                         val items = parsed?.Search?.filter { it.Poster != "N/A" }?.mapNotNull { item ->
                             val imdbId = item.imdbID ?: return@mapNotNull null
                             
-                            // FIXED: HTTP-compliant synthetic routing to prevent Cloudstream URL corruption
                             val payload = "$mainUrl/megastream_omdb?id=$imdbId"
                             
                             newMovieSearchResponse(item.Title ?: "Unknown", payload, TvType.Movie) {
@@ -90,7 +90,6 @@ class MegaStreamProvider : MainAPI() {
                 val title = item.Title ?: return@mapNotNull null
                 val imdbId = item.imdbID ?: return@mapNotNull null
                 
-                // FIXED: HTTP-compliant synthetic routing
                 val payload = "$mainUrl/megastream_omdb?id=$imdbId"
                 
                 newMovieSearchResponse(title, payload, TvType.Movie) {
@@ -105,7 +104,6 @@ class MegaStreamProvider : MainAPI() {
 
     // --- PHASE 2: LOAD METADATA AND GENERATE EMBED LINKS ---
     override suspend fun load(url: String): LoadResponse? {
-        // Robust fallback to catch the ID even if Cloudstream manipulated the URL slightly
         val imdbId = if (url.contains("/megastream_omdb")) {
             val uri = URI(url)
             val queryParams = uri.query?.split("&")?.associate {
@@ -127,13 +125,15 @@ class MegaStreamProvider : MainAPI() {
         val resolvedPlot = metaRes.Plot?.takeIf { it != "N/A" } ?: ""
         val resolvedYear = metaRes.Year?.replace(Regex("[^0-9]"), "")?.toIntOrNull()
 
-        // Generate links for highly reliable, anti-block hoster aggregators
+        // Generate massive list of anti-block hoster aggregators
         val embedUrls = listOf(
             "https://autoembed.co/movie/imdb/$imdbId",
             "https://multiembed.mov/directstream.php?video_id=$imdbId",
             "https://vidsrc.net/embed/movie/$imdbId",
+            "https://vidsrc.me/embed/movie/$imdbId",
             "https://vidsrc.cc/v2/embed/movie/$imdbId",
-            "https://2embed.cc/embed/$imdbId"
+            "https://2embed.cc/embed/$imdbId",
+            "https://moviesapi.club/movie/$imdbId"
         )
 
         val dataPayload = embedUrls.joinToString(",")
@@ -145,7 +145,7 @@ class MegaStreamProvider : MainAPI() {
         }
     }
 
-    // --- PHASE 3: DELEGATED EXTRACTION ---
+    // --- PHASE 3: DEEP EXTRACTION ENGINE ---
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -159,22 +159,63 @@ class MegaStreamProvider : MainAPI() {
             urls.forEach { embedUrl ->
                 launch {
                     try {
-                        val doc = app.get(embedUrl, timeout = 15).document
+                        // 1. If it's ALREADY a direct hoster URL, let Cloudstream process it instantly
+                        if (loadExtractor(embedUrl, embedUrl, subtitleCallback, callback)) {
+                            foundAny = true
+                            return@launch
+                        }
+
+                        // 2. If not, it's an Aggregator. Download the page and rip the iframes.
+                        val html = app.get(embedUrl, timeout = 10).text
+                        val doc = Jsoup.parse(html)
                         
                         doc.select("iframe").forEach { iframe ->
-                            val src = iframe.attr("src")
-                            val finalSrc = if (src.startsWith("//")) "https:$src" else src
+                            val src = iframe.attr("src").let { if (it.startsWith("//")) "https:$it" else it }
                             
-                            if (finalSrc.isNotBlank() && finalSrc.startsWith("http")) {
-                                // Delegate decryption entirely to Cloudstream's native core extractors
-                                val success = loadExtractor(finalSrc, embedUrl, subtitleCallback, callback)
-                                if (success) {
+                            if (src.isNotBlank() && src.startsWith("http")) {
+                                // Feed the hidden iframes (Voe, Filemoon, Dood, etc.) back into the engine
+                                if (loadExtractor(src, embedUrl, subtitleCallback, callback)) {
                                     foundAny = true
                                 }
                             }
                         }
+
+                        // 3. Bruteforce Fallback: Scan the raw HTML for hidden HLS (.m3u8) links
+                        Regex("""(https?://[^"'\s<>]+?\.m3u8[^"'\s<>]*)""").findAll(html).forEach { match ->
+                            val hlsUrl = match.groupValues[1]
+                            callback.invoke(
+                                newExtractorLink(
+                                    source = "MegaStream",
+                                    name = "Auto HLS",
+                                    url = hlsUrl,
+                                    type = ExtractorLinkType.M3U8
+                                ) {
+                                    this.referer = embedUrl
+                                    this.quality = Qualities.Unknown.value
+                                }
+                            )
+                            foundAny = true
+                        }
+
+                        // 4. Bruteforce Fallback: Scan the raw HTML for hidden MP4 links
+                        Regex("""(https?://[^"'\s<>]+?\.mp4[^"'\s<>]*)""").findAll(html).forEach { match ->
+                            val mp4Url = match.groupValues[1]
+                            callback.invoke(
+                                newExtractorLink(
+                                    source = "MegaStream",
+                                    name = "Auto MP4",
+                                    url = mp4Url,
+                                    type = ExtractorLinkType.VIDEO
+                                ) {
+                                    this.referer = embedUrl
+                                    this.quality = Qualities.Unknown.value
+                                }
+                            )
+                            foundAny = true
+                        }
+
                     } catch (e: Exception) {
-                        // Silently ignore blocked domains
+                        // Silently skip if a specific provider like Vidsrc is blocked by the ISP
                     }
                 }
             }
