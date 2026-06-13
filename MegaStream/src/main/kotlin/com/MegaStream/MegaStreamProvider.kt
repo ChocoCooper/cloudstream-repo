@@ -4,13 +4,14 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.coroutineScope
-import java.net.URI
+import org.jsoup.Jsoup
+import org.json.JSONObject
 import java.net.URLEncoder
 
 class MegaStreamProvider : MainAPI() {
     override var mainUrl = "https://www.omdbapi.com"
     override var name = "MegaStream"
-    override val hasMainPage = true 
+    override val hasMainPage = true
     override var supportedTypes = setOf(TvType.Movie)
     override var lang = "en"
 
@@ -21,17 +22,14 @@ class MegaStreamProvider : MainAPI() {
         "73a9858a", "efbd8357"
     )
 
-    data class OmdbSearchResponse(val Search: List<OmdbSearchResult>?, val Response: String?)
-    data class OmdbSearchResult(val Title: String?, val Year: String?, val imdbID: String?, val Type: String?, val Poster: String?)
-    data class OmdbTitleResponse(val Title: String?, val Year: String?, val Plot: String?, val Poster: String?, val imdbID: String?)
-
-    private fun getRandomApiKey(): String {
-        return omdbKeys.random()
+    // Helper to silently bypass ISP blocks / SocketTimeouts without crashing
+    private suspend fun safe(block: suspend () -> Unit) {
+        try { block() } catch (e: Exception) {}
     }
 
+    // --- PHASE 0: HOMEPAGE (OMDb Native Parsing - No Jackson) ---
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val lists = mutableListOf<HomePageList>()
-
         val queries = listOf(
             Pair("Trending Action 2024", "Action"),
             Pair("Sci-Fi Thrills", "Sci-Fi"),
@@ -42,104 +40,213 @@ class MegaStreamProvider : MainAPI() {
         coroutineScope {
             queries.forEach { (title, query) ->
                 launch {
-                    try {
-                        val apiKey = getRandomApiKey()
+                    safe {
+                        val apiKey = omdbKeys.random()
                         val encodedQuery = URLEncoder.encode(query, "UTF-8")
                         val url = "$mainUrl/?apikey=$apiKey&s=$encodedQuery&type=movie&y=2024"
                         
                         val res = app.get(url, timeout = 5).text
-                        val parsed = AppUtils.tryParseJson<OmdbSearchResponse>(res)
+                        val json = JSONObject(res)
+                        val searchArr = json.optJSONArray("Search")
                         
-                        val items = parsed?.Search?.filter { it.Poster != "N/A" }?.mapNotNull { item ->
-                            val imdbId = item.imdbID ?: return@mapNotNull null
-                            val payload = "$mainUrl/megastream_omdb?id=$imdbId"
-                            
-                            newMovieSearchResponse(item.Title ?: "Unknown", payload, TvType.Movie) {
-                                this.posterUrl = item.Poster
-                                this.year = item.Year?.replace(Regex("[^0-9]"), "")?.toIntOrNull()
+                        val items = mutableListOf<SearchResponse>()
+                        if (searchArr != null) {
+                            for (i in 0 until searchArr.length()) {
+                                val item = searchArr.getJSONObject(i)
+                                val poster = item.optString("Poster")
+                                if (poster.isNotBlank() && poster != "N/A") {
+                                    items.add(
+                                        newMovieSearchResponse(
+                                            item.optString("Title", "Unknown"),
+                                            "omdb://${item.optString("imdbID")}",
+                                            TvType.Movie
+                                        ) {
+                                            this.posterUrl = poster
+                                            this.year = item.optString("Year").replace(Regex("[^0-9]"), "").toIntOrNull()
+                                        }
+                                    )
+                                }
                             }
-                        } ?: emptyList()
+                        }
 
                         if (items.isNotEmpty()) {
                             lists.add(HomePageList(title, items, isHorizontalImages = false))
                         }
-                    } catch (e: Exception) { }
+                    }
                 }
             }
         }
         return newHomePageResponse(lists, hasNext = false)
     }
 
+    // --- PHASE 1: SEARCH (OMDb Native Parsing) ---
     override suspend fun search(query: String): List<SearchResponse> {
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
-        val apiKey = getRandomApiKey()
+        val apiKey = omdbKeys.random()
         val url = "$mainUrl/?apikey=$apiKey&s=$encodedQuery&type=movie"
         
-        return try {
+        val items = mutableListOf<SearchResponse>()
+        safe {
             val res = app.get(url, timeout = 5).text
-            val parsed = AppUtils.tryParseJson<OmdbSearchResponse>(res)
+            val json = JSONObject(res)
+            val searchArr = json.optJSONArray("Search")
             
-            parsed?.Search?.filter { it.Poster != "N/A" }?.mapNotNull { item ->
-                val title = item.Title ?: return@mapNotNull null
-                val imdbId = item.imdbID ?: return@mapNotNull null
-                val payload = "$mainUrl/megastream_omdb?id=$imdbId"
-                
-                newMovieSearchResponse(title, payload, TvType.Movie) {
-                    this.posterUrl = item.Poster
-                    this.year = item.Year?.replace(Regex("[^0-9]"), "")?.toIntOrNull()
+            if (searchArr != null) {
+                for (i in 0 until searchArr.length()) {
+                    val item = searchArr.getJSONObject(i)
+                    val poster = item.optString("Poster")
+                    if (poster.isNotBlank() && poster != "N/A") {
+                        items.add(
+                            newMovieSearchResponse(
+                                item.optString("Title", "Unknown"),
+                                "omdb://${item.optString("imdbID")}",
+                                TvType.Movie
+                            ) {
+                                this.posterUrl = poster
+                                this.year = item.optString("Year").replace(Regex("[^0-9]"), "").toIntOrNull()
+                            }
+                        )
+                    }
                 }
-            } ?: emptyList()
-        } catch (e: Exception) {
-            emptyList()
+            }
         }
+        return items
     }
 
+    // --- PHASE 2: LOAD METADATA ---
     override suspend fun load(url: String): LoadResponse? {
-        val imdbId = if (url.contains("/megastream_omdb")) {
-            val uri = URI(url)
-            val queryParams = uri.query?.split("&")?.associate {
-                val parts = it.split("=")
-                parts[0] to java.net.URLDecoder.decode(parts.getOrElse(1) { "" }, "UTF-8")
-            }
-            queryParams?.get("id") ?: return null
-        } else {
-            Regex("""(tt\d+)""").find(url)?.groupValues?.get(1) ?: return null
-        }
-        
-        val apiKey = getRandomApiKey()
+        val imdbId = url.removePrefix("omdb://")
+        val apiKey = omdbKeys.random()
         val metaUrl = "$mainUrl/?apikey=$apiKey&i=$imdbId&plot=full"
         
-        val metaRes = AppUtils.tryParseJson<OmdbTitleResponse>(app.get(metaUrl).text) ?: return null
-        
-        val resolvedTitle = metaRes.Title ?: "Unknown"
-        val resolvedPoster = metaRes.Poster?.takeIf { it != "N/A" } ?: ""
-        val resolvedPlot = metaRes.Plot?.takeIf { it != "N/A" } ?: ""
-        val resolvedYear = metaRes.Year?.replace(Regex("[^0-9]"), "")?.toIntOrNull()
+        var response: LoadResponse? = null
+        safe {
+            val json = JSONObject(app.get(metaUrl, timeout = 5).text)
+            val resolvedTitle = json.optString("Title", "Unknown")
+            val resolvedPoster = json.optString("Poster", "").takeIf { it != "N/A" }
+            val resolvedPlot = json.optString("Plot", "").takeIf { it != "N/A" }
+            val resolvedYear = json.optString("Year", "").replace(Regex("[^0-9]"), "").toIntOrNull()
 
-        // Pack the raw IMDb ID into the payload
-        return newMovieLoadResponse(resolvedTitle, url, TvType.Movie, imdbId) {
-            this.posterUrl = resolvedPoster
-            this.plot = resolvedPlot
-            this.year = resolvedYear
+            response = newMovieLoadResponse(resolvedTitle, url, TvType.Movie, imdbId) {
+                this.posterUrl = resolvedPoster
+                this.plot = resolvedPlot
+                this.year = resolvedYear
+            }
         }
+        return response
     }
 
+    // --- PHASE 3: DISTRIBUTED CUSTOM EXTRACTOR ENGINE ---
+    // Uses your uploaded anti-block proxies natively
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        val imdbId = data
         var foundAny = false
-
-        // Wrapper to track successful link extractions
-        val trackingCallback: (ExtractorLink) -> Unit = { link ->
+        
+        val cb: (ExtractorLink) -> Unit = {
             foundAny = true
-            callback(link)
+            callback(it)
         }
 
-        // Pass the IMDb ID payload (data) directly to your massive proxy engine
-        invokeAllCustomProxies(data, subtitleCallback, trackingCallback)
+        coroutineScope {
+            // 1. Hexa Proxy
+            launch { safe {
+                val url = "https://theemoviedb.hexa.su/movie/$imdbId"
+                val doc = app.get(url, timeout = 8).text
+                Regex("""file\s*:\s*['"](https?://[^'"]+\.m3u8[^'"]*)['"]""").findAll(doc).forEach {
+                    cb(newExtractorLink("MegaStream", "Hexa", it.groupValues[1], ExtractorLinkType.M3U8) {
+                        this.quality = Qualities.Unknown.value
+                        this.headers = mapOf("Referer" to url)
+                    })
+                }
+                Jsoup.parse(doc).select("iframe").forEach {
+                    val src = it.attr("src").let { s -> if(s.startsWith("//")) "https:$s" else s }
+                    if(src.startsWith("http")) loadExtractor(src, url, subtitleCallback, cb)
+                }
+            }}
+            
+            // 2. Dahmer Movies Proxy
+            launch { safe {
+                val url = "https://a.111477.xyz/movie/$imdbId"
+                val doc = app.get(url, timeout = 8).text
+                Regex("""file\s*:\s*['"](https?://[^'"]+\.m3u8[^'"]*)['"]""").findAll(doc).forEach {
+                    cb(newExtractorLink("MegaStream", "Dahmer", it.groupValues[1], ExtractorLinkType.M3U8) {
+                        this.quality = Qualities.Unknown.value
+                        this.headers = mapOf("Referer" to url)
+                    })
+                }
+                Jsoup.parse(doc).select("iframe").forEach {
+                    val src = it.attr("src").let { s -> if(s.startsWith("//")) "https:$s" else s }
+                    if(src.startsWith("http")) loadExtractor(src, url, subtitleCallback, cb)
+                }
+            }}
+            
+            // 3. VidLink Proxy
+            launch { safe {
+                val url = "https://vidlink.pro/movie/$imdbId"
+                val doc = app.get(url, timeout = 8).text
+                Regex("""source\s*:\s*['"](https?://[^'"]+\.m3u8[^'"]*)['"]""").findAll(doc).forEach {
+                    cb(newExtractorLink("MegaStream", "VidLink", it.groupValues[1], ExtractorLinkType.M3U8) {
+                        this.quality = Qualities.Unknown.value
+                        this.headers = mapOf("Referer" to url)
+                    })
+                }
+                Jsoup.parse(doc).select("iframe").forEach {
+                    val src = it.attr("src").let { s -> if(s.startsWith("//")) "https:$s" else s }
+                    if(src.startsWith("http")) loadExtractor(src, url, subtitleCallback, cb)
+                }
+            }}
+            
+            // 4. MultiEmbed Mov
+            launch { safe {
+                val url = "https://multiembed.mov/directstream.php?video_id=$imdbId"
+                val doc = app.get(url, timeout = 8).text
+                Regex("""(https?://[^"'\s<>]+?\.m3u8[^"'\s<>]*)""").findAll(doc).forEach {
+                    cb(newExtractorLink("MegaStream", "MultiEmbed", it.groupValues[1].replace("\\/", "/"), ExtractorLinkType.M3U8) {
+                        this.quality = Qualities.Unknown.value
+                        this.headers = mapOf("Referer" to url)
+                    })
+                }
+                Jsoup.parse(doc).select("iframe").forEach {
+                    val src = it.attr("src").let { s -> if(s.startsWith("//")) "https:$s" else s }
+                    if(src.startsWith("http")) loadExtractor(src, url, subtitleCallback, cb)
+                }
+            }}
+            
+            // 5. PrimeSrc Proxy
+            launch { safe {
+                val url = "https://primesrc.me/embed/movie?imdb=$imdbId"
+                val doc = app.get(url, timeout = 8).document
+                doc.select("iframe").forEach {
+                    val src = it.attr("src").let { s -> if(s.startsWith("//")) "https:$s" else s }
+                    if(src.startsWith("http")) loadExtractor(src, url, subtitleCallback, cb)
+                }
+            }}
+            
+            // 6. Videasy Proxy
+            launch { safe {
+                val url = "https://api.videasy.to/embed/movie/$imdbId"
+                val doc = app.get(url, timeout = 8).document
+                doc.select("iframe").forEach {
+                    val src = it.attr("src").let { s -> if(s.startsWith("//")) "https:$s" else s }
+                    if(src.startsWith("http")) loadExtractor(src, url, subtitleCallback, cb)
+                }
+            }}
+            
+            // 7. 2Embed Proxy
+            launch { safe {
+                val url = "https://2embed.cc/embed/$imdbId"
+                val doc = app.get(url, timeout = 8).document
+                doc.select("iframe").forEach {
+                    val src = it.attr("src").let { s -> if(s.startsWith("//")) "https:$s" else s }
+                    if(src.startsWith("http")) loadExtractor(src, url, subtitleCallback, cb)
+                }
+            }}
+        }
 
         return foundAny
     }
