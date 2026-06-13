@@ -9,10 +9,10 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import org.jsoup.Jsoup
+import org.json.JSONObject
 import java.net.URI
 import java.net.URLEncoder
 import kotlin.random.Random
-import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 
 class IsaidubProvider : MainAPI() {
     override var mainUrl = "https://isaidub.guru"
@@ -33,13 +33,6 @@ class IsaidubProvider : MainAPI() {
         "73a9858a", "efbd8357"
     )
     private var activeOmdbKeys = baseOmdbKeys.toMutableList()
-    
-    // BYPASS COMPILER CRASH: Use Jackson directly instead of inline AppUtils
-    private val mapper = jacksonObjectMapper()
-
-    data class OmdbSearchResponse(val Search: List<OmdbSearchResult>?, val Response: String?)
-    data class OmdbSearchResult(val Title: String?, val Year: String?, val Poster: String?)
-    data class OmdbTitleResponse(val Title: String?, val Year: String?, val Poster: String?, val Plot: String?, val Response: String?)
 
     data class ScrapedMovie(val title: String, val link: String)
     data class ResolutionNode(val label: String, val url: String)
@@ -87,7 +80,7 @@ class IsaidubProvider : MainAPI() {
         return matches.sortedByDescending { it.second }.map { it.first }
     }
 
-    private suspend fun fetchOmdbMetadata(rawTitle: String, fallbackYear: String = ""): Pair<OmdbTitleResponse?, String> {
+    private suspend fun fetchOmdbMetadata(rawTitle: String, fallbackYear: String = ""): Pair<JSONObject?, String> {
         val cleanName = rawTitle.replace("isaiDub.me", "").replace("-", " ").trim()
         val yearRegex = Regex("\\b(19|20)\\d{2}\\b").find(cleanName)
         val extractedYear = yearRegex?.value ?: fallbackYear
@@ -103,9 +96,10 @@ class IsaidubProvider : MainAPI() {
             if (response.code == 401 || response.text.contains("Limit reached", ignoreCase = true) || response.text.contains("Invalid API key", ignoreCase = true)) {
                 removeDeadKey(apiKey)
             } else if (response.isSuccessful && response.text.contains("\"Response\":\"True\"")) {
-                // BYPASS COMPILER CRASH
-                val parsed = mapper.readValue(response.text, OmdbTitleResponse::class.java)
-                if (parsed.Poster != null && parsed.Poster != "N/A") {
+                // BYPASS COMPILER CRASH: Use JSONObject
+                val parsed = JSONObject(response.text)
+                val poster = parsed.optString("Poster")
+                if (poster.isNotBlank() && poster != "N/A") {
                     return Pair(parsed, extractedYear)
                 }
             }
@@ -170,8 +164,8 @@ class IsaidubProvider : MainAPI() {
                         async {
                             val cleanTitle = title.replace("isaiDub.me", "").replace("-", " ").trim()
                             val (omdbMatch, resolvedYear) = fetchOmdbMetadata(cleanTitle, sectionYear)
-                            val omdbPoster = omdbMatch?.Poster?.takeIf { it != "N/A" }
-                            val plotSynopsis = omdbMatch?.Plot?.takeIf { it != "N/A" } ?: "No synopsis available."
+                            val omdbPoster = omdbMatch?.optString("Poster")?.takeIf { it != "N/A" && it.isNotBlank() }
+                            val plotSynopsis = omdbMatch?.optString("Plot")?.takeIf { it != "N/A" } ?: "No synopsis available."
                             
                             if (omdbPoster == null) null else {
                                 val t = URLEncoder.encode(cleanTitle, "UTF-8")
@@ -244,7 +238,7 @@ class IsaidubProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        var omdbJson: NiceResponse? = null
+        var omdbJson: JSONObject? = null
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
 
         try {
@@ -255,28 +249,32 @@ class IsaidubProvider : MainAPI() {
             if (response.code == 401 || response.text.contains("Limit reached", ignoreCase = true) || response.text.contains("Invalid API key", ignoreCase = true)) {
                 removeDeadKey(apiKey)
             } else if (response.isSuccessful && response.text.contains("\"Response\":\"True\"")) {
-                omdbJson = response
+                omdbJson = JSONObject(response.text)
             }
         } catch (e: Exception) { }
 
         if (omdbJson == null) return emptyList()
-        // BYPASS COMPILER CRASH
-        val parsed = mapper.readValue(omdbJson.text, OmdbSearchResponse::class.java)
         
-        val validOmdbResults = parsed.Search?.filter { !it.Poster.isNullOrBlank() && it.Poster != "N/A" } ?: emptyList()
+        val searchArr = omdbJson.optJSONArray("Search") ?: return emptyList()
+        val validOmdbResults = mutableListOf<JSONObject>()
+        for (i in 0 until searchArr.length()) {
+            val item = searchArr.getJSONObject(i)
+            val poster = item.optString("Poster")
+            if (poster.isNotBlank() && poster != "N/A") validOmdbResults.add(item)
+        }
 
         return coroutineScope {
             validOmdbResults.map { item ->
                 async {
-                    val title = item.Title ?: ""
-                    val year = item.Year?.replace(Regex("[^0-9]"), "") ?: "" 
-                    val fullPoster = item.Poster ?: ""
+                    val title = item.optString("Title", "")
+                    val year = item.optString("Year", "").replace(Regex("[^0-9]"), "")
+                    val fullPoster = item.optString("Poster", "")
                     val isaidubLinks = searchIsaidubMovieLinks(title, year)
                     val combinedLinks = isaidubLinks.joinToString(",")
 
                     if (combinedLinks.isNotBlank()) {
                         val (detailedMeta, _) = fetchOmdbMetadata(title, year)
-                        val plotSynopsis = detailedMeta?.Plot?.takeIf { it != "N/A" } ?: "No synopsis available."
+                        val plotSynopsis = detailedMeta?.optString("Plot")?.takeIf { it != "N/A" } ?: "No synopsis available."
                         val t = URLEncoder.encode(title, "UTF-8")
                         val y = URLEncoder.encode(year, "UTF-8")
                         val p = URLEncoder.encode(fullPoster, "UTF-8")
@@ -298,10 +296,10 @@ class IsaidubProvider : MainAPI() {
         if (!url.contains("/synthetic_meta?")) {
             val rawName = url.trimEnd('/').substringAfterLast("/").replace("-", " ").replace(Regex("tamil.*", RegexOption.IGNORE_CASE), "").trim()
             val (omdbMatch, resolvedYear) = fetchOmdbMetadata(rawName)
-            return newMovieLoadResponse(omdbMatch?.Title ?: rawName, url, TvType.Movie, url) {
-                this.posterUrl = omdbMatch?.Poster?.takeIf { it != "N/A" }
+            return newMovieLoadResponse(omdbMatch?.optString("Title") ?: rawName, url, TvType.Movie, url) {
+                this.posterUrl = omdbMatch?.optString("Poster")?.takeIf { it != "N/A" && it.isNotBlank() }
                 this.year = resolvedYear.toIntOrNull()
-                this.plot = omdbMatch?.Plot?.takeIf { it != "N/A" } ?: "No synopsis available."
+                this.plot = omdbMatch?.optString("Plot")?.takeIf { it != "N/A" } ?: "No synopsis available."
             }
         }
 
