@@ -31,11 +31,10 @@ class IsaidubProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse? {
         Log.d(tag, "load called with url: $url")
         if (!url.contains("/synthetic_meta?")) {
-            // Direct movie page URL
             val rawName = url.trimEnd('/').substringAfterLast("/").replace("-", " ").replace(Regex("tamil.*", RegexOption.IGNORE_CASE), "").trim()
             val (omdbMatch, resolvedYear) = fetchOmdbMetadata(rawName)
 
-            val qualityUrls = getQualityLinks(url)
+            val qualityUrls = getQualityLinksImproved(url)
             Log.d(tag, "Quality links found: $qualityUrls")
             if (qualityUrls.isNotEmpty()) {
                 val qualityList = qualityUrls.joinToString(",")
@@ -88,11 +87,13 @@ class IsaidubProvider : MainAPI() {
         }
     }
 
-    private suspend fun getQualityLinks(moviePageUrl: String): List<String> {
-        Log.d(tag, "getQualityLinks for $moviePageUrl")
+    private suspend fun getQualityLinksImproved(moviePageUrl: String): List<String> {
+        Log.d(tag, "getQualityLinksImproved for $moviePageUrl")
         try {
             val doc = scrapeSemaphore.withPermit { app.get(moviePageUrl, timeout = 15).document }
             val qualityLinks = mutableListOf<String>()
+
+            // 1. Look in div.f (standard)
             for (div in doc.select("div.f")) {
                 val a = div.selectFirst("a")
                 if (a != null) {
@@ -100,11 +101,41 @@ class IsaidubProvider : MainAPI() {
                     if (text.contains("sample", ignoreCase = true)) continue
                     val href = a.attr("href")
                     val fullUrl = fixUrl(href, moviePageUrl)
-                    qualityLinks.add(fullUrl)
-                    Log.d(tag, "Found quality: $text -> $fullUrl")
+                    if (text.contains(Regex("720p|480p|360p|HD|1080p|4K", RegexOption.IGNORE_CASE)) ||
+                        fullUrl.matches(Regex(".*/movie/\\d+/.*"))) {
+                        qualityLinks.add(fullUrl)
+                        Log.d(tag, "Found quality (div.f): $text -> $fullUrl")
+                    }
                 }
             }
-            return qualityLinks
+
+            // 2. If none found, look for any anchor containing resolution keywords
+            if (qualityLinks.isEmpty()) {
+                for (a in doc.select("a[href]")) {
+                    val text = a.text()
+                    val href = a.attr("href")
+                    if (text.contains("sample", ignoreCase = true)) continue
+                    if (text.contains(Regex("720p|480p|360p|HD|1080p|4K", RegexOption.IGNORE_CASE))) {
+                        val fullUrl = fixUrl(href, moviePageUrl)
+                        qualityLinks.add(fullUrl)
+                        Log.d(tag, "Found quality (any anchor): $text -> $fullUrl")
+                    }
+                }
+            }
+
+            // 3. If still empty, look for any link that points to /movie/ with a numeric ID (likely a folder)
+            if (qualityLinks.isEmpty()) {
+                for (a in doc.select("a[href]")) {
+                    val href = a.attr("href")
+                    if (href.matches(Regex(".*/movie/\\d+/.*"))) {
+                        val fullUrl = fixUrl(href, moviePageUrl)
+                        qualityLinks.add(fullUrl)
+                        Log.d(tag, "Found folder link: $fullUrl")
+                    }
+                }
+            }
+
+            return qualityLinks.distinct()
         } catch (e: Exception) {
             Log.e(tag, "Error getting quality links", e)
             return emptyList()
@@ -193,9 +224,9 @@ class IsaidubProvider : MainAPI() {
         try {
             val doc = scrapeSemaphore.withPermit { app.get(url, timeout = 15).document }
 
-            // 1. Look for "Download Server" links
-            val downloadServers = doc.select("a").filter { 
-                it.text().contains("download server", ignoreCase = true) 
+            // Look for "Download Server" links (priority)
+            val downloadServers = doc.select("a").filter {
+                it.text().contains("download server", ignoreCase = true)
             }
             if (downloadServers.isNotEmpty()) {
                 Log.d(tag, "Found ${downloadServers.size} download server links")
@@ -214,23 +245,20 @@ class IsaidubProvider : MainAPI() {
                 if (found) return true
             }
 
-            // 2. Extract folder/quality links
-            val folderLinks = doc.select("div.f a, div.bf a")
+            // Extract all folder/quality links (div.f a, div.bf a, and any link with quality keywords)
+            val folderLinks = doc.select("div.f a, div.bf a, a[href*='/movie/']").filter {
+                val text = it.text().lowercase()
+                !text.contains("sample") && !it.attr("href").contains("?get-page=") &&
+                !it.attr("href").endsWith("-tamil-dubbed-movie") && // skip related movies
+                !it.attr("href").endsWith("-tamil-dubbed")
+            }
+
             val validNextSteps = mutableListOf<Pair<String, String>>()
 
             for (link in folderLinks) {
                 val href = link.attr("href")
                 val text = link.text().lowercase()
-
-                if (text.contains("sample") || href.lowercase().contains("sample")) continue
-                if (href == "/" || href.contains("?get-page=") || href.contains("/category/") || href.contains("/page/")) continue
-
-                val childSlug = href.trimEnd('/').substringAfterLast("/")
-                val isRelatedMovie = childSlug.endsWith("-tamil-dubbed-movie") || childSlug.endsWith("-tamil-dubbed")
-                if (isRelatedMovie) {
-                    Log.d(tag, "Skipping related movie link: $href")
-                    continue
-                }
+                if (href == "/") continue
 
                 var newQuality = quality
                 when {
@@ -261,7 +289,6 @@ class IsaidubProvider : MainAPI() {
             }
 
             Log.d(tag, "No further links found on $url")
-            // Debug: print first 500 chars of page to see what's there
             Log.d(tag, "Page preview: ${doc.text().take(500)}")
         } catch (e: Exception) {
             Log.e(tag, "Error crawling $url", e)
