@@ -2,6 +2,9 @@ package com.dubstamil
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.withPermit
 import org.jsoup.Jsoup
 import java.net.URI
@@ -15,17 +18,14 @@ class IsaidubProvider : MainAPI() {
     override var lang = "ta"
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
-        // Calls the generic extension function from DubsTamilHomePage.kt
         return getSharedHomePageData(page, request)
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        // Calls the generic extension function from DubsTamilSearch.kt
         return getSharedSearchData(query)
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        // Handle raw links / bypass (When someone clicks a direct link instead of searching)
         if (!url.contains("/synthetic_meta?")) {
             val rawName = url.trimEnd('/').substringAfterLast("/").replace("-", " ").replace(Regex("tamil.*", RegexOption.IGNORE_CASE), "").trim()
             val (omdbMatch, resolvedYear) = fetchOmdbMetadata(rawName)
@@ -37,7 +37,6 @@ class IsaidubProvider : MainAPI() {
             }
         }
 
-        // Handle Synthetic URLs coming from HomePage or Fast-Search
         val uri = URI(url)
         val queryParams = uri.query?.split("&")?.associate {
             val parts = it.split("=")
@@ -51,17 +50,14 @@ class IsaidubProvider : MainAPI() {
         var plotSynopsis = queryParams["s"] ?: "" 
         val yearInt = year.toIntOrNull()
 
-        // If it's a fast-search result, failSafeUrl is empty, so we MUST search Isaidub now.
         val targetUrls = if (!failSafeUrl.isNullOrBlank()) {
             failSafeUrl
         } else {
-            // Because this logic is inside IsaidubProvider, it accurately uses searchDubbedMovieLinks for Isaidub
             val dubbedLinks = searchDubbedMovieLinks(title, year)
-            if (dubbedLinks.isEmpty()) return null // Return null if the site doesn't actually have this OMDB movie
+            if (dubbedLinks.isEmpty()) return null
             dubbedLinks.joinToString(",")
         }
 
-        // Fetch detailed plot on-the-fly if it was missing from the fast-search data
         if (plotSynopsis.isBlank() || plotSynopsis == "No synopsis available.") {
             val (detailedMeta, _) = fetchOmdbMetadata(title, year)
             plotSynopsis = detailedMeta?.Plot?.takeIf { it != "N/A" } ?: "No synopsis available."
@@ -83,65 +79,69 @@ class IsaidubProvider : MainAPI() {
         val urls = data.split(",")
         var foundAnyLinks = false
 
-        urls.forEach { targetUrl ->
-            val resolutions = getResolutions(targetUrl.trim())
+        coroutineScope {
+            urls.map { targetUrl ->
+                async {
+                    val resolutions = getResolutions(targetUrl.trim())
 
-            // If no explicit resolutions found, try finding a direct file right away
-            if (resolutions.isEmpty()) {
-                val finalLink = extractFinalLink(targetUrl.trim(), 0, mutableSetOf())
-                if (finalLink != null) {
-                    val isM3u8 = finalLink.contains(".m3u8", ignoreCase = true)
-                    callback.invoke(
-                        newExtractorLink(
-                            source = this.name,
-                            name = "${this.name} (Auto)",
-                            url = finalLink,
-                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                        ) {
-                            this.referer = "$mainUrl/"
-                            this.quality = Qualities.Unknown.value
+                    if (resolutions.isEmpty()) {
+                        val finalLink = extractFinalLink(targetUrl.trim(), 0, mutableSetOf())
+                        if (finalLink != null) {
+                            val isM3u8 = finalLink.contains(".m3u8", ignoreCase = true)
+                            callback.invoke(
+                                newExtractorLink(
+                                    source = this@IsaidubProvider.name,
+                                    name = "${this@IsaidubProvider.name} (Auto)",
+                                    url = finalLink,
+                                    type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                ) {
+                                    this.referer = "$mainUrl/"
+                                    this.quality = Qualities.Unknown.value
+                                }
+                            )
+                            foundAnyLinks = true
                         }
-                    )
-                    foundAnyLinks = true
-                }
-            } else {
-                // Map out standard definitions based on Isaidub's folder naming scheme
-                resolutions.forEach { res ->
-                    val finalLink = extractFinalLink(res.url, 0, mutableSetOf())
-                    if (finalLink != null) {
-                        val isM3u8 = finalLink.contains(".m3u8", ignoreCase = true)
-                        
-                        val lowerLabel = res.label.lowercase()
-                        val qualityName = when {
-                            lowerLabel.contains("1080") -> "(1080p)"
-                            lowerLabel.contains("720") -> "(720p)"
-                            lowerLabel.contains("640") || lowerLabel.contains("360") -> "(640x360)"
-                            lowerLabel.contains("480") || lowerLabel.contains("320") -> "(480x320)"
-                            else -> "(HD)"
-                        }
-                        
-                        val linkType = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                    } else {
+                        resolutions.map { res ->
+                            async {
+                                val finalLink = extractFinalLink(res.url, 0, mutableSetOf())
+                                if (finalLink != null) {
+                                    val isM3u8 = finalLink.contains(".m3u8", ignoreCase = true)
+                                    
+                                    val lowerLabel = res.label.lowercase()
+                                    val qualityName = when {
+                                        lowerLabel.contains("1080") -> "(1080p)"
+                                        lowerLabel.contains("720") -> "(720p)"
+                                        lowerLabel.contains("640") || lowerLabel.contains("360") -> "(640x360)"
+                                        lowerLabel.contains("480") || lowerLabel.contains("320") -> "(480x320)"
+                                        else -> "(HD)"
+                                    }
+                                    
+                                    val linkType = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
 
-                        callback.invoke(
-                            newExtractorLink(
-                                source = this.name,
-                                name = "${this.name} $qualityName",
-                                url = finalLink,
-                                type = linkType
-                            ) {
-                                this.referer = "$mainUrl/"
-                                this.quality = Qualities.Unknown.value
-                                this.headers = mapOf(
-                                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                                    "Accept" to "*/*",
-                                    "Connection" to "keep-alive"
-                                )
+                                    callback.invoke(
+                                        newExtractorLink(
+                                            source = this@IsaidubProvider.name,
+                                            name = "${this@IsaidubProvider.name} $qualityName",
+                                            url = finalLink,
+                                            type = linkType
+                                        ) {
+                                            this.referer = "$mainUrl/"
+                                            this.quality = Qualities.Unknown.value
+                                            this.headers = mapOf(
+                                                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                                                "Accept" to "*/*",
+                                                "Connection" to "keep-alive"
+                                            )
+                                        }
+                                    )
+                                    foundAnyLinks = true
+                                }
                             }
-                        )
-                        foundAnyLinks = true
+                        }.awaitAll() // Parallell processing ensures we don't hit coroutine timeouts
                     }
                 }
-            }
+            }.awaitAll()
         }
         return foundAnyLinks
     }
@@ -181,17 +181,25 @@ class IsaidubProvider : MainAPI() {
                 }
             }
 
-            // Smart Folder Filtering
+            // Smart Filter: Safely maps folder variations (e.g., gladiator-(2000)-hd vs gladiator-2000-hd)
             if (foundResolutions.isEmpty() && folderPages.isNotEmpty()) {
-                val cleanBase = pageUrl.trimEnd('/').substringAfterLast("/").replace(".html", "")
-                val validFolders = folderPages.filter { it.contains(cleanBase, ignoreCase = true) }
+                val cleanBase = pageUrl.trimEnd('/').substringAfterLast("/").replace(Regex("[^a-zA-Z0-9]"), "")
                 
-                for (folderUrl in validFolders) {
-                    val nested = getResolutions(folderUrl, depth + 1, maxDepth)
-                    for (nr in nested) {
-                        if (foundResolutions.none { it.url == nr.url }) {
-                            foundResolutions.add(nr)
-                        }
+                val validFolders = folderPages.filter { folderUrl ->
+                    val folderName = folderUrl.trimEnd('/').substringAfterLast("/").replace(Regex("[^a-zA-Z0-9]"), "")
+                    folderName.contains(cleanBase, ignoreCase = true) || cleanBase.contains(folderName, ignoreCase = true) ||
+                    (cleanBase.length > 5 && folderName.take(10) == cleanBase.take(10))
+                }
+                
+                val nestedResults = coroutineScope {
+                    validFolders.map { folderUrl ->
+                        async { getResolutions(folderUrl, depth + 1, maxDepth) }
+                    }.awaitAll()
+                }
+                
+                nestedResults.flatten().forEach { nr ->
+                    if (foundResolutions.none { it.url == nr.url }) {
+                        foundResolutions.add(nr)
                     }
                 }
             }
@@ -212,6 +220,7 @@ class IsaidubProvider : MainAPI() {
 
             val text = res.text
 
+            // Fast Regex Matcher
             val dlPhpMatch = Regex("""https?://[^\s"'<>]*download\.php\?[^\s"'<>]*""", RegexOption.IGNORE_CASE).find(text)
             val m3u8Match = Regex("""https?://[^\s"'<>]*\.m3u8[^\s"'<>]*""", RegexOption.IGNORE_CASE).find(text)
             val mp4Match = Regex("""https?://[^\s"'<>]*\.mp4[^\s"'<>]*""", RegexOption.IGNORE_CASE).find(text)
@@ -223,6 +232,7 @@ class IsaidubProvider : MainAPI() {
             val doc = Jsoup.parse(text)
             val validPaths = listOf("/download/", "/view/", "/file/", "download.php", "dl.php")
 
+            // Jsoup deeper crawl
             for (a in doc.select("a[href]")) {
                 val href = a.attr("href")
                 val linkText = a.text().lowercase()
@@ -232,13 +242,16 @@ class IsaidubProvider : MainAPI() {
                 val fullUrl = when {
                     href.startsWith("http") -> href
                     href.startsWith("//") -> "https:$href"
-                    else -> {
-                        val uri = URI(url)
-                        "https://${uri.host}$href"
-                    }
+                    else -> "https://${URI(url).host}$href"
                 }
 
-                if (validPaths.any { fullUrl.lowercase().contains(it) }) {
+                // Follow explicit download paths OR standard intermediate Isaidub folder names
+                val isNextStep = validPaths.any { fullUrl.lowercase().contains(it) } || 
+                                 linkText.contains("single part") || 
+                                 linkText.contains("mp4") || 
+                                 (fullUrl.contains("/movie/") && (linkText.contains("1080") || linkText.contains("720") || linkText.contains("hd")))
+                                 
+                if (isNextStep) {
                     val finalUrl = extractFinalLink(fullUrl, depth + 1, seen)
                     if (finalUrl != null) return finalUrl
                 }
