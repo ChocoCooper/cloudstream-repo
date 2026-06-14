@@ -15,7 +15,7 @@ import kotlin.random.Random
 
 class IsaidubProvider : MainAPI() {
     override var mainUrl = "https://isaidub.guru"
-    override var name = "Isaidub"
+    override var name = "DubsTamil"
     override val hasMainPage = true 
     override var supportedTypes = setOf(TvType.Movie)
     override var lang = "ta"
@@ -24,7 +24,6 @@ class IsaidubProvider : MainAPI() {
     private val omdbSemaphore = Semaphore(5)
     private val scrapeSemaphore = Semaphore(5)
     private val pageCache = mutableMapOf<String, Pair<Long, Pair<List<ScrapedMovie>, Int>>>()
-    private val CACHE_DURATION = 5 * 60 * 1000L
 
     private val baseOmdbKeys = listOf("eb0c0475", "4b447405", "7776cbde", "ff28f90b", "6c3a2d45")
     private var activeOmdbKeys = baseOmdbKeys.toMutableList()
@@ -37,24 +36,17 @@ class IsaidubProvider : MainAPI() {
         return activeOmdbKeys[Random.nextInt(activeOmdbKeys.size)]
     }
 
-    private fun removeDeadKey(key: String) {
-        activeOmdbKeys.remove(key)
-    }
-
-    // --- SMART TOKENIZATION & MAXIMUM MATCH LOGIC ---
+    // --- PURE TOKENIZATION & MAXIMUM MATCH LOGIC ---
     private fun normalizeTitle(title: String): String {
-        var text = title.lowercase().trim()
-        text = text.replace("&", "and")
-        text = text.replace("judgment", "judgement") // Fix known Isaidub typo
-        text = text.replace(Regex("[^a-z0-9\\s]"), " ")
-        text = text.replace(Regex("\\s+"), " ")
-        return text.trim()
+        // Purely extracts alphanumeric words, stripping out all punctuation and fluff
+        return title.lowercase()
+            .replace(Regex("[^a-z0-9\\s]"), " ")
+            .replace(Regex("\\s+"), " ")
+            .trim()
     }
 
     private fun findBestMatch(movies: List<ScrapedMovie>, queryTitle: String, queryYear: String): String? {
-        val normQuery = normalizeTitle(queryTitle)
-        val stopwords = setOf("the", "a", "an", "and", "of", "to", "in", "for", "on", "with", "by")
-        val queryTokens = normQuery.split(" ").filter { it.isNotBlank() }.toSet() - stopwords
+        val queryTokens = normalizeTitle(queryTitle).split(" ").filter { it.isNotBlank() }.toSet()
 
         var bestMovieUrl: String? = null
         var maxMatchCount = 0
@@ -65,10 +57,9 @@ class IsaidubProvider : MainAPI() {
                 continue
             }
 
-            val normSite = normalizeTitle(movie.title)
-            val siteTokens = normSite.split(" ").filter { it.isNotBlank() }.toSet() - stopwords
-
-            // Find how many words intersect
+            val siteTokens = normalizeTitle(movie.title).split(" ").filter { it.isNotBlank() }.toSet()
+            
+            // Find how many words intersect identically
             val matchCount = queryTokens.intersect(siteTokens).size
 
             // Absolute maximum possible token match wins
@@ -99,10 +90,10 @@ class IsaidubProvider : MainAPI() {
             val response = omdbSemaphore.withPermit { app.get(url, timeout = 5) }
 
             if (response.code == 401 || response.text.contains("Limit reached", true) || response.text.contains("Invalid API key", true)) {
-                removeDeadKey(apiKey)
+                activeOmdbKeys.remove(apiKey)
             } else if (response.isSuccessful && response.text.contains("\"Response\":\"True\"")) {
                 val parsed = AppUtils.tryParseJson<OmdbTitleResponse>(response.text)
-                if (parsed != null && parsed.Poster != null && parsed.Poster != "N/A") {
+                if (parsed?.Poster != null && parsed.Poster != "N/A") {
                     return Pair(parsed, extractedYear)
                 }
             }
@@ -112,7 +103,7 @@ class IsaidubProvider : MainAPI() {
 
     private suspend fun scrapePageAndGetTotal(url: String): Pair<List<ScrapedMovie>, Int> {
         val cached = pageCache[url]
-        if (cached != null && System.currentTimeMillis() - cached.first < CACHE_DURATION) {
+        if (cached != null && System.currentTimeMillis() - cached.first < (5 * 60 * 1000L)) {
             return cached.second
         }
 
@@ -128,18 +119,15 @@ class IsaidubProvider : MainAPI() {
             
             val doc = response.document
             
-            // Extract Movies
             for (div in doc.select("div.f")) {
                 val aTag = div.selectFirst("a")
                 if (aTag != null) {
-                    val title = aTag.text().trim()
                     var link = aTag.attr("href")
                     if (link.startsWith("/")) link = "$mainUrl$link"
-                    movies.add(ScrapedMovie(title, link))
+                    movies.add(ScrapedMovie(aTag.text().trim(), link))
                 }
             }
 
-            // Extract Total Pages
             val hiddenDiv = doc.selectFirst("div[style*=\"display: none;\"] div.pagecontent span#totalPages")
             val visibleTotal = doc.selectFirst("span#totalPages")
             
@@ -173,7 +161,6 @@ class IsaidubProvider : MainAPI() {
             val allMovies = mutableListOf<ScrapedMovie>()
             allMovies.addAll(p1Movies)
             
-            // Extract remaining pages concurrently to collect all possible candidates
             if (maxPages > 1) {
                 coroutineScope {
                     (2..maxPages).map { p -> 
@@ -182,7 +169,6 @@ class IsaidubProvider : MainAPI() {
                 }
             }
 
-            // Let the Best Match logic pick the absolute highest token match
             val bestMatch = findBestMatch(allMovies, title, year)
             if (bestMatch != null) return bestMatch
         }
@@ -250,7 +236,6 @@ class IsaidubProvider : MainAPI() {
         
         var foundAnyLinks = false
         coroutineScope {
-            // Kick off the extraction path
             async {
                 if (crawlNode(data.trim(), "Auto", 0, mutableSetOf(), callback)) {
                     foundAnyLinks = true
@@ -278,7 +263,7 @@ class IsaidubProvider : MainAPI() {
                 quality = Qualities.Unknown.value,
                 type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
                 headers = mapOf(
-                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                     "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
                 )
             )
@@ -292,10 +277,8 @@ class IsaidubProvider : MainAPI() {
         seen: MutableSet<String>, 
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // Safety abort for endless loops
         if (depth > 15 || !seen.add(url)) return false
 
-        // Check if URL is instantly recognizable as a video file
         if (isFinalDownloadUrl(url)) {
             invokeCallback(url, quality, callback)
             return true
@@ -304,12 +287,11 @@ class IsaidubProvider : MainAPI() {
         var found = false
         try {
             val headers = mapOf(
-                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
                 "Referer" to mainUrl
             )
             
-            // Protected scrape
             val response = scrapeSemaphore.withPermit { app.get(url, headers = headers, timeout = 15, allowRedirects = true) }
             if (response.code == 404) return false
             
@@ -320,7 +302,6 @@ class IsaidubProvider : MainAPI() {
 
             val html = response.text
             
-            // Fast regex check
             val directMatch = Regex("""https?://[^\s"'<>]*download\.php\?[^\s"'<>]*""", RegexOption.IGNORE_CASE).find(html)?.value
                 ?: Regex("""https?://[^\s"'<>]*dl\.php\?[^\s"'<>]*""", RegexOption.IGNORE_CASE).find(html)?.value
                 ?: Regex("""https?://[^\s"'<>]*\.mp4[^"'\s]*""", RegexOption.IGNORE_CASE).find(html)?.value
@@ -332,20 +313,18 @@ class IsaidubProvider : MainAPI() {
 
             val doc = response.document
 
-            // PATH 1: Are there Download Servers?
+            // PATH 1: Download Servers
             val downloadServers = doc.select("a[href]").filter { it.text().contains("download server", ignoreCase = true) }
             if (downloadServers.isNotEmpty()) {
-                // If a download server exists, prioritize clicking it
                 val srvUrl = fixUrl(downloadServers.first().attr("href"), url)
                 if (crawlNode(srvUrl, quality, depth + 1, seen, callback)) found = true
                 return found
             }
 
-            // PATH 2: Are there Quality/Part Folders?
+            // PATH 2: Quality/Part Folders
             val folders = doc.select("div.f a[href]").filter { !it.text().contains("sample", ignoreCase = true) }
             if (folders.isNotEmpty()) {
                 coroutineScope {
-                    // Extract ALL available non-sample folders concurrently!
                     folders.map { folder ->
                         async {
                             val fText = folder.text().lowercase()
@@ -364,7 +343,7 @@ class IsaidubProvider : MainAPI() {
                 return found
             }
 
-            // PATH 3: Fallback (any other applicable links on page)
+            // PATH 3: Fallback links
             val fallbackLinks = doc.select("a[href]").filter {
                 val hrefLower = it.attr("href").lowercase()
                 listOf(".mp4", ".mkv", ".avi", "download.php?dl=", "dubpage.xyz", "dubmv.xyz", "dub.uptodub.ch").any { ext -> hrefLower.contains(ext) }
