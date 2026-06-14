@@ -88,7 +88,7 @@ class IsaidubProvider : MainAPI() {
                             }
                         }
                     } catch (e: Exception) {
-                        // Prevents Cloudstream's JobCancellationException crash
+                        // Suppress individual starting point errors
                     }
                 }
             }.awaitAll()
@@ -111,7 +111,7 @@ class IsaidubProvider : MainAPI() {
             // Short timeout so dead ends don't stall the whole search
             val doc = app.get(url, timeout = 10).document
 
-            // --- STEP 1: Look for Download Servers (Following your exact HTML path) ---
+            // --- STEP 1: Look for Download Servers ---
             val downloadServers = doc.select("div.dlink a")
             if (downloadServers.isNotEmpty()) {
                 coroutineScope {
@@ -128,10 +128,11 @@ class IsaidubProvider : MainAPI() {
                                             source = this@IsaidubProvider.name,
                                             name = "${this@IsaidubProvider.name} $quality",
                                             url = resolvedUrl,
-                                            referer = "$mainUrl/",
-                                            quality = Qualities.Unknown.value,
                                             type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                         ) {
+                                            // CORRECT SYNTAX: Properties go inside the trailing lambda block!
+                                            this.referer = "$mainUrl/"
+                                            this.quality = Qualities.Unknown.value
                                             this.headers = mapOf(
                                                 "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                                                 "Accept" to "*/*"
