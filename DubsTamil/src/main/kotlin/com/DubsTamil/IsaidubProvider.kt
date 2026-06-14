@@ -8,6 +8,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.withPermit
+import java.io.File
 import java.net.URI
 import java.net.URLDecoder
 
@@ -34,7 +35,7 @@ class IsaidubProvider : MainAPI() {
             val rawName = url.trimEnd('/').substringAfterLast("/").replace("-", " ").replace(Regex("tamil.*", RegexOption.IGNORE_CASE), "").trim()
             val (omdbMatch, resolvedYear) = fetchOmdbMetadata(rawName)
 
-            val qualityUrls = getQualityLinksImproved(url)
+            val qualityUrls = getQualityLinksWithDebug(url)
             Log.d(tag, "Quality links found: $qualityUrls")
             if (qualityUrls.isNotEmpty()) {
                 val qualityList = qualityUrls.joinToString(",")
@@ -87,13 +88,31 @@ class IsaidubProvider : MainAPI() {
         }
     }
 
-    private suspend fun getQualityLinksImproved(moviePageUrl: String): List<String> {
-        Log.d(tag, "getQualityLinksImproved for $moviePageUrl")
+    private suspend fun getQualityLinksWithDebug(moviePageUrl: String): List<String> {
+        Log.d(tag, "getQualityLinksWithDebug for $moviePageUrl")
         try {
-            val doc = scrapeSemaphore.withPermit { app.get(moviePageUrl, timeout = 15).document }
+            val response = scrapeSemaphore.withPermit { app.get(moviePageUrl, timeout = 15) }
+            Log.d(tag, "HTTP status: ${response.code}")
+            val html = response.text
+
+            // Save HTML to file for inspection
+            try {
+                val cacheDir = appContext.cacheDir
+                val file = File(cacheDir, "debug_isaidub_${System.currentTimeMillis()}.html")
+                file.writeText(html)
+                Log.d(tag, "Saved HTML to ${file.absolutePath}")
+            } catch (e: Exception) {
+                Log.e(tag, "Failed to save HTML", e)
+            }
+
+            val doc = response.document
             val qualityLinks = mutableListOf<String>()
 
-            // 1. Look in div.f (standard)
+            // Log all anchor tags to see what's available
+            val allAnchors = doc.select("a").map { "${it.text()} -> ${it.attr("href")}" }
+            Log.d(tag, "All anchors found: ${allAnchors.take(20)}") // first 20
+
+            // 1. Look in div.f
             for (div in doc.select("div.f")) {
                 val a = div.selectFirst("a")
                 if (a != null) {
@@ -109,7 +128,7 @@ class IsaidubProvider : MainAPI() {
                 }
             }
 
-            // 2. If none found, look for any anchor containing resolution keywords
+            // 2. If none, look for any anchor containing resolution keywords
             if (qualityLinks.isEmpty()) {
                 for (a in doc.select("a[href]")) {
                     val text = a.text()
@@ -123,7 +142,7 @@ class IsaidubProvider : MainAPI() {
                 }
             }
 
-            // 3. If still empty, look for any link that points to /movie/ with a numeric ID (likely a folder)
+            // 3. If still empty, look for any link that points to /movie/ with a numeric ID
             if (qualityLinks.isEmpty()) {
                 for (a in doc.select("a[href]")) {
                     val href = a.attr("href")
@@ -222,9 +241,28 @@ class IsaidubProvider : MainAPI() {
         }
 
         try {
-            val doc = scrapeSemaphore.withPermit { app.get(url, timeout = 15).document }
+            val response = scrapeSemaphore.withPermit { app.get(url, timeout = 15) }
+            Log.d(tag, "HTTP status: ${response.code} for $url")
+            if (response.code != 200) {
+                Log.e(tag, "Non-200 response for $url")
+                return false
+            }
+            val html = response.text
 
-            // Look for "Download Server" links (priority)
+            // Check for Cloudflare
+            if (html.contains("cf-browser-verification", ignoreCase = true) ||
+                html.contains("Just a moment", ignoreCase = true)) {
+                Log.e(tag, "Cloudflare challenge detected for $url")
+                return false
+            }
+
+            val doc = response.document
+
+            // Log all anchors for debugging (first 15)
+            val anchors = doc.select("a").map { "${it.text().take(30)} -> ${it.attr("href").take(50)}" }
+            Log.d(tag, "Anchors on page: ${anchors.take(15)}")
+
+            // 1. Look for "Download Server" links
             val downloadServers = doc.select("a").filter {
                 it.text().contains("download server", ignoreCase = true)
             }
@@ -245,11 +283,12 @@ class IsaidubProvider : MainAPI() {
                 if (found) return true
             }
 
-            // Extract all folder/quality links (div.f a, div.bf a, and any link with quality keywords)
+            // 2. Extract folder/quality links
             val folderLinks = doc.select("div.f a, div.bf a, a[href*='/movie/']").filter {
                 val text = it.text().lowercase()
-                !text.contains("sample") && !it.attr("href").contains("?get-page=") &&
-                !it.attr("href").endsWith("-tamil-dubbed-movie") && // skip related movies
+                !text.contains("sample") &&
+                !it.attr("href").contains("?get-page=") &&
+                !it.attr("href").endsWith("-tamil-dubbed-movie") &&
                 !it.attr("href").endsWith("-tamil-dubbed")
             }
 
