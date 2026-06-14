@@ -1,5 +1,6 @@
 package com.dubstamil
 
+import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.app
@@ -12,10 +13,12 @@ import java.net.URLDecoder
 
 class IsaidubProvider : MainAPI() {
     override var mainUrl = "https://isaidub.guru"
-    override var name = "Isaidub"
+    override var name = "DubsTamil"
     override val hasMainPage = true
     override var supportedTypes = setOf(TvType.Movie)
     override var lang = "ta"
+
+    private val tag = "Isaidub"
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         return getSharedHomePageData(page, request)
@@ -26,17 +29,30 @@ class IsaidubProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
+        Log.d(tag, "load called with url: $url")
         if (!url.contains("/synthetic_meta?")) {
+            // This is a direct movie page URL
             val rawName = url.trimEnd('/').substringAfterLast("/").replace("-", " ").replace(Regex("tamil.*", RegexOption.IGNORE_CASE), "").trim()
             val (omdbMatch, resolvedYear) = fetchOmdbMetadata(rawName)
 
-            return newMovieLoadResponse(omdbMatch?.Title ?: rawName, url, TvType.Movie, url) {
+            // Scrape quality links from the movie page
+            val qualityUrls = getQualityLinks(url)
+            if (qualityUrls.isEmpty()) {
+                Log.e(tag, "No quality links found on movie page: $url")
+                return null
+            }
+            // Join quality URLs with comma for CloudStream to present quality selection
+            val qualityList = qualityUrls.joinToString(",")
+            Log.d(tag, "Quality URLs: $qualityList")
+
+            return newMovieLoadResponse(omdbMatch?.Title ?: rawName, url, TvType.Movie, qualityList) {
                 this.posterUrl = omdbMatch?.Poster?.takeIf { it != "N/A" }
                 this.year = resolvedYear.toIntOrNull()
                 this.plot = omdbMatch?.Plot?.takeIf { it != "N/A" } ?: "No synopsis available."
             }
         }
 
+        // Synthetic meta URL handling (for search results)
         val uri = URI(url)
         val queryParams = uri.query?.split("&")?.associate {
             val parts = it.split("=")
@@ -70,12 +86,36 @@ class IsaidubProvider : MainAPI() {
         }
     }
 
+    private suspend fun getQualityLinks(moviePageUrl: String): List<String> {
+        Log.d(tag, "getQualityLinks for $moviePageUrl")
+        try {
+            val doc = scrapeSemaphore.withPermit { app.get(moviePageUrl, timeout = 15).document }
+            val qualityLinks = mutableListOf<String>()
+            for (div in doc.select("div.f")) {
+                val a = div.selectFirst("a")
+                if (a != null) {
+                    val text = a.text()
+                    if (text.contains("sample", ignoreCase = true)) continue
+                    val href = a.attr("href")
+                    val fullUrl = fixUrl(href, moviePageUrl)
+                    qualityLinks.add(fullUrl)
+                    Log.d(tag, "Found quality: $text -> $fullUrl")
+                }
+            }
+            return qualityLinks
+        } catch (e: Exception) {
+            Log.e(tag, "Error getting quality links", e)
+            return emptyList()
+        }
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        Log.d(tag, "loadLinks called with data: $data")
         val urls = data.split(",")
         var foundAnyLinks = false
 
@@ -84,24 +124,36 @@ class IsaidubProvider : MainAPI() {
                 async {
                     try {
                         if (targetUrl.isNotBlank()) {
+                            Log.d(tag, "Starting crawl for: $targetUrl")
                             if (crawlAllLinks(targetUrl.trim(), "Auto", mutableSetOf(), callback)) {
                                 foundAnyLinks = true
                             }
                         }
-                    } catch (e: Exception) { }
+                    } catch (e: Exception) {
+                        Log.e(tag, "Error crawling $targetUrl", e)
+                    }
                 }
             }.awaitAll()
         }
 
+        Log.d(tag, "loadLinks finished, foundAnyLinks=$foundAnyLinks")
         return foundAnyLinks
     }
 
-    // Exact check translated from Python: is_final_download_url
     private fun isFinalDownloadUrl(url: String): Boolean {
         val lowerUrl = url.lowercase()
-        if (listOf(".mp4", ".mkv", ".avi", ".mov", ".webm").any { lowerUrl.endsWith(it) }) return true
-        if (lowerUrl.contains("download.php?dl=")) return true
-        if (listOf("dubpage.xyz", "dubmv.xyz", "dub.uptodub.ch").any { lowerUrl.contains(it) }) return true
+        if (listOf(".mp4", ".mkv", ".avi", ".mov", ".webm").any { lowerUrl.endsWith(it) }) {
+            Log.d(tag, "Final URL (video file): $url")
+            return true
+        }
+        if (lowerUrl.contains("download.php?dl=")) {
+            Log.d(tag, "Final URL (download.php): $url")
+            return true
+        }
+        if (listOf("dubpage.xyz", "dubmv.xyz", "dub.uptodub.ch").any { lowerUrl.contains(it) }) {
+            Log.d(tag, "External download page: $url")
+            return false // Not final, these are intermediate
+        }
         return false
     }
 
@@ -111,20 +163,22 @@ class IsaidubProvider : MainAPI() {
         seen: MutableSet<String>,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        if (seen.size > 20 || !seen.add(url)) return false
-        var foundAny = false
+        if (seen.size > 20 || !seen.add(url)) {
+            Log.d(tag, "Crawl stopping: seen size ${seen.size}, already visited $url")
+            return false
+        }
+        Log.d(tag, "Crawling: $url (quality=$quality)")
 
-        // Base case: final download URL
+        // Check if we have a final video URL
         if (isFinalDownloadUrl(url)) {
             val isM3u8 = url.contains(".m3u8", ignoreCase = true)
             callback.invoke(
                 newExtractorLink(
-                    source = this@IsaidubProvider.name,
-                    name = "${this@IsaidubProvider.name} $quality",
+                    source = this.name,
+                    name = "$name $quality",
                     url = url,
                     type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                 ) {
-                    // Use headers to set Referer and User-Agent
                     this.headers = mapOf(
                         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                         "Accept" to "*/*",
@@ -139,23 +193,27 @@ class IsaidubProvider : MainAPI() {
             val doc = scrapeSemaphore.withPermit { app.get(url, timeout = 15).document }
 
             // 1. Look for "Download Server" links (priority)
-            val downloadServers = doc.select("a").filter { it.text().contains("download server", ignoreCase = true) }
-
+            val downloadServers = doc.select("a").filter { 
+                it.text().contains("download server", ignoreCase = true) 
+            }
             if (downloadServers.isNotEmpty()) {
+                Log.d(tag, "Found ${downloadServers.size} download server links")
+                var found = false
                 coroutineScope {
                     downloadServers.map { server ->
                         async {
                             val serverUrl = fixUrl(server.attr("href"), url)
+                            Log.d(tag, "Following download server: ${server.text()} -> $serverUrl")
                             if (crawlAllLinks(serverUrl, quality, seen, callback)) {
-                                foundAny = true
+                                found = true
                             }
                         }
                     }.awaitAll()
                 }
-                return foundAny
+                if (found) return true
             }
 
-            // 2. Otherwise, extract all folder/quality links from <div class="f"> or <div class="bf">
+            // 2. Otherwise, extract all folder/quality links from div.f or div.bf
             val folderLinks = doc.select("div.f a, div.bf a")
             val validNextSteps = mutableListOf<Pair<String, String>>()
 
@@ -166,7 +224,6 @@ class IsaidubProvider : MainAPI() {
                 if (text.contains("sample") || href.lowercase().contains("sample")) continue
                 if (href == "/" || href.contains("?get-page=") || href.contains("/category/") || href.contains("/page/")) continue
 
-                // Skip links that point to other movies (avoid infinite loops)
                 val childSlug = href.trimEnd('/').substringAfterLast("/")
                 val isRelatedMovie = childSlug.endsWith("-tamil-dubbed-movie") || childSlug.endsWith("-tamil-dubbed")
                 if (isRelatedMovie) continue
@@ -180,28 +237,36 @@ class IsaidubProvider : MainAPI() {
                     text.contains("hd") && quality == "Auto" -> newQuality = "HD"
                 }
 
-                validNextSteps.add(Pair(fixUrl(href, url), newQuality))
+                val fullUrl = fixUrl(href, url)
+                validNextSteps.add(Pair(fullUrl, newQuality))
+                Log.d(tag, "Found folder link: ${link.text()} -> $fullUrl (quality=$newQuality)")
             }
 
-            coroutineScope {
-                validNextSteps.distinctBy { it.first }.map { (nextUrl, nextQuality) ->
-                    async {
-                        if (crawlAllLinks(nextUrl, nextQuality, seen, callback)) {
-                            foundAny = true
+            if (validNextSteps.isNotEmpty()) {
+                var found = false
+                coroutineScope {
+                    validNextSteps.distinctBy { it.first }.map { (nextUrl, nextQuality) ->
+                        async {
+                            if (crawlAllLinks(nextUrl, nextQuality, seen, callback)) {
+                                found = true
+                            }
                         }
-                    }
-                }.awaitAll()
+                    }.awaitAll()
+                }
+                return found
             }
 
-        } catch (e: Exception) { }
+            Log.d(tag, "No further links found on $url")
+        } catch (e: Exception) {
+            Log.e(tag, "Error crawling $url", e)
+        }
 
-        return foundAny
+        return false
     }
 
     private fun fixUrl(href: String, baseUrl: String): String {
         if (href.startsWith("http")) return href
         if (href.startsWith("//")) return "https:$href"
-
         return try {
             val hostUrl = "https://${URI(baseUrl).host}"
             if (href.startsWith("/")) "$hostUrl$href" else "$hostUrl/$href"
