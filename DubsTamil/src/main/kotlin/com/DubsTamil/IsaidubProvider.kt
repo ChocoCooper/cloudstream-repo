@@ -2,9 +2,11 @@ package com.dubstamil
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.app
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.withPermit
 import java.net.URI
 import java.net.URLDecoder
 
@@ -121,10 +123,10 @@ class IsaidubProvider : MainAPI() {
                     source = this@IsaidubProvider.name,
                     name = "${this@IsaidubProvider.name} $quality",
                     url = url,
+                    referer = "$mainUrl/",
+                    quality = Qualities.Unknown.value,
                     type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                 ) {
-                    this.referer = "$mainUrl/"
-                    this.quality = Qualities.Unknown.value
                     this.headers = mapOf(
                         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                         "Accept" to "*/*"
@@ -135,6 +137,7 @@ class IsaidubProvider : MainAPI() {
         }
 
         try {
+            // Protected by the semaphore we imported!
             val doc = scrapeSemaphore.withPermit { app.get(url, timeout = 15).document }
 
             // Translated from your Python: extract_download_links (Look for Download Server buttons)
