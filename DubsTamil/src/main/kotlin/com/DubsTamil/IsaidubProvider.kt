@@ -123,10 +123,11 @@ class IsaidubProvider : MainAPI() {
                     source = this@IsaidubProvider.name,
                     name = "${this@IsaidubProvider.name} $quality",
                     url = url,
-                    referer = "$mainUrl/",
-                    quality = Qualities.Unknown.value,
                     type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                 ) {
+                    // FIXED: Referer and quality are correctly placed inside the block!
+                    this.referer = "$mainUrl/"
+                    this.quality = Qualities.Unknown.value
                     this.headers = mapOf(
                         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                         "Accept" to "*/*"
@@ -137,7 +138,7 @@ class IsaidubProvider : MainAPI() {
         }
 
         try {
-            // Protected by the semaphore we imported!
+            // Protected by the semaphore
             val doc = scrapeSemaphore.withPermit { app.get(url, timeout = 15).document }
 
             // Translated from your Python: extract_download_links (Look for Download Server buttons)
