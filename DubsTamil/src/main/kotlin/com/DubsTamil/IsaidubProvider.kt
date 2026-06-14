@@ -82,13 +82,16 @@ class IsaidubProvider : MainAPI() {
                 async {
                     try {
                         if (targetUrl.isNotBlank()) {
-                            // Starts the safe, parallel deep crawl
-                            if (crawlAllLinks(targetUrl.trim(), "Auto", mutableSetOf(), callback)) {
+                            // Extract the core movie name to prevent crawling "Related Movies"
+                            val rootSlug = getSignificantSlug(targetUrl.trim())
+                            
+                            // Starts the safe, targeted deep crawl
+                            if (crawlAllLinks(targetUrl.trim(), "Auto", rootSlug, mutableSetOf(), callback)) {
                                 foundAnyLinks = true
                             }
                         }
                     } catch (e: Exception) {
-                        // Suppress individual starting point errors
+                        // Prevents Cloudstream from crashing if one node fails
                     }
                 }
             }.awaitAll()
@@ -97,21 +100,42 @@ class IsaidubProvider : MainAPI() {
         return foundAnyLinks
     }
 
+    /**
+     * Extracts the root movie name from the URL to strictly filter child folders.
+     * Example: "chinese-zodiac-2012-tamil-dubbed-movie" becomes "chinese-zodiac"
+     */
+    private fun getSignificantSlug(url: String): String {
+        var slug = url.trimEnd('/').substringAfterLast("/")
+        val modifiers = listOf("-tamil", "-dubbed", "-movie", "-part", "-hd", "-rip", "-original", "-bluray", "-bdrip", "-scr", "-single")
+        
+        for (mod in modifiers) {
+            val idx = slug.indexOf(mod, ignoreCase = true)
+            if (idx > 0) {
+                slug = slug.substring(0, idx)
+            }
+        }
+        // Remove the year
+        slug = slug.replace(Regex("-\\d{4}.*"), "").replace(Regex("-\\(\\d{4}\\).*"), "")
+        return slug
+    }
+
     private suspend fun crawlAllLinks(
         url: String, 
         quality: String, 
+        rootSlug: String,
         seen: MutableSet<String>, 
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // Prevent infinite loops across nested directories
-        if (!seen.add(url) || seen.size > 50) return false
+        // Prevent infinite loops across nested directories (Max 20 hops per movie)
+        if (!seen.add(url) || seen.size > 20) return false
         var foundAny = false
 
         try {
-            // Short timeout so dead ends don't stall the whole search
-            val doc = app.get(url, timeout = 10).document
+            // Using a short 5-second timeout. If a folder is broken, we skip it quickly instead of failing the whole tree.
+            val doc = app.get(url, timeout = 5).document
 
             // --- STEP 1: Look for Download Servers ---
+            // Pattern: <div class="dlink"> <a href="...">
             val downloadServers = doc.select("div.dlink a")
             if (downloadServers.isNotEmpty()) {
                 coroutineScope {
@@ -130,7 +154,6 @@ class IsaidubProvider : MainAPI() {
                                             url = resolvedUrl,
                                             type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                         ) {
-                                            // CORRECT SYNTAX: Properties go inside the trailing lambda block!
                                             this.referer = "$mainUrl/"
                                             this.quality = Qualities.Unknown.value
                                             this.headers = mapOf(
@@ -145,56 +168,50 @@ class IsaidubProvider : MainAPI() {
                         }
                     }.awaitAll()
                 }
-                return foundAny // Stop crawling deeper in this branch
+                return foundAny // Stop crawling deeper in this branch once links are found
             }
 
             // --- STEP 2: Drill down into resolution/quality/part folders ---
+            // Pattern: <div class="f"> <a href="...">
             val folderLinks = doc.select("div.f a, div.bf a")
-            
-            // Get the base slug to ensure we don't accidentally crawl "Related Movies"
-            val baseSlug = url.trimEnd('/').substringAfterLast("/")
-                .replace(Regex("-tamil-dubbed-movie.*", RegexOption.IGNORE_CASE), "")
-                .replace(Regex("-\\d{4}.*"), "")
-                .replace(Regex("-\\(\\d{4}\\).*"), "")
-                .replace(Regex("-movie.*", RegexOption.IGNORE_CASE), "")
-                .replace(Regex("-part.*", RegexOption.IGNORE_CASE), "")
-                .replace(Regex("-hd.*", RegexOption.IGNORE_CASE), "")
-
             val validNextSteps = mutableListOf<Pair<String, String>>()
 
             for (link in folderLinks) {
                 val href = link.attr("href")
                 val text = link.text().lowercase()
 
-                // "Please ignore sample always and just go into other one(HD)"
+                // Ignore sample videos
                 if (text.contains("sample") || href.lowercase().contains("sample")) continue
                 
-                // Prevent going backward or sideways into irrelevant directories
+                // Ignore site navigation links
                 if (href == "/" || href.contains("?get-page=") || href.contains("/category/") || href.contains("/page/")) continue
                 if (!href.contains("/movie/") && !href.contains("/download/") && !href.contains("/view/")) continue
 
-                // Check if the link leads to a valid sub-folder type or belongs to the current movie
-                val isQualityFolder = listOf("1080", "720", "640", "480", "360", "320", "hd", "mp4", "original", "part", "bdrip", "bluray", "hdrip", "dvdscr", "scr", "single").any { text.contains(it) }
-                val isRelated = baseSlug.length > 2 && href.contains(baseSlug, ignoreCase = true)
-
-                if (isQualityFolder || isRelated) {
-                    var newQuality = quality
-                    if (text.contains("1080")) newQuality = "1080p"
-                    else if (text.contains("720")) newQuality = "720p"
-                    else if (text.contains("640") || text.contains("480")) newQuality = "480p"
-                    else if (text.contains("360") || text.contains("320")) newQuality = "360p"
-                    else if (text.contains("hd") && quality == "Auto") newQuality = "HD"
-
-                    validNextSteps.add(Pair(fixUrl(href, url), newQuality))
+                val childSlug = href.trimEnd('/').substringAfterLast("/")
+                
+                // CRUCIAL FIX: The folder MUST be related to our movie (or explicitly be a "single part" node).
+                // This completely ignores the "Related Movies" section, stopping the timeout crashes!
+                if (rootSlug.isNotBlank() && !childSlug.contains(rootSlug, ignoreCase = true) && !text.contains("single") && !text.contains("part") && !text.contains("download")) {
+                    continue
                 }
+
+                // Map the quality based on folder text
+                var newQuality = quality
+                if (text.contains("1080")) newQuality = "1080p"
+                else if (text.contains("720")) newQuality = "720p"
+                else if (text.contains("640") || text.contains("480")) newQuality = "480p"
+                else if (text.contains("360") || text.contains("320")) newQuality = "360p"
+                else if (text.contains("hd") && quality == "Auto") newQuality = "HD"
+
+                validNextSteps.add(Pair(fixUrl(href, url), newQuality))
             }
 
-            // Fire off the valid steps in parallel (Protected by try/catch)
+            // Fire off the valid child folders in parallel
             coroutineScope {
                 validNextSteps.distinctBy { it.first }.map { (nextUrl, nextQuality) ->
                     async {
                         try {
-                            if (crawlAllLinks(nextUrl, nextQuality, seen, callback)) {
+                            if (crawlAllLinks(nextUrl, nextQuality, rootSlug, seen, callback)) {
                                 foundAny = true
                             }
                         } catch (e: Exception) {}
@@ -202,13 +219,14 @@ class IsaidubProvider : MainAPI() {
                 }.awaitAll()
             }
 
-        } catch (e: Exception) {} // Suppress timeout errors gracefully so other threads can finish
+        } catch (e: Exception) {} 
 
         return foundAny
     }
 
     private suspend fun resolveServerLink(url: String, depth: Int, seen: MutableSet<String>): String? {
-        if (depth > 5 || !seen.add(url)) return null
+        // Stop deep recursions to protect against infinite server loops
+        if (depth > 3 || !seen.add(url)) return null
 
         // Return instantly if the URL is already the final streaming target
         if (url.contains("download.php", ignoreCase = true) || url.contains("dl.php", ignoreCase = true) || url.endsWith(".mp4", ignoreCase = true) || url.endsWith(".mkv", ignoreCase = true)) {
@@ -216,16 +234,14 @@ class IsaidubProvider : MainAPI() {
         }
 
         try {
-            val response = app.get(url, timeout = 10)
+            val response = app.get(url, timeout = 5)
             
-            // Return instantly if the server directly responds with a video
+            // Return instantly if the server directly responds with a video stream
             if (response.headers["content-type"]?.contains("video/") == true) return response.url
 
-            val doc = response.document
-            val nextServerLinks = doc.select("a:contains(Download), div.dlink a")
-            
-            // Prioritize finding the PHP/MP4 link in raw text (extremely fast)
             val text = response.text
+            
+            // 1. Check raw HTML for the download strings (Extremely fast, bypasses heavy DOM parsing)
             val dlPhpMatch = Regex("""https?://[^\s"'<>]*download\.php\?[^\s"'<>]*""", RegexOption.IGNORE_CASE).find(text)
             if (dlPhpMatch != null) return dlPhpMatch.value
 
@@ -235,7 +251,10 @@ class IsaidubProvider : MainAPI() {
             val mp4Match = Regex("""https?://[^\s"'<>]*\.mp4[^"'\s]*""", RegexOption.IGNORE_CASE).find(text)
             if (mp4Match != null) return mp4Match.value
             
-            // If not found in text, follow the next button recursively
+            // 2. If no direct link was found in the text, find the next button and follow it
+            val doc = response.document
+            val nextServerLinks = doc.select("a:contains(Download), div.dlink a")
+            
             for (next in nextServerLinks) {
                 val nextHref = next.attr("href")
                 val nextUrl = fixUrl(nextHref, url)
