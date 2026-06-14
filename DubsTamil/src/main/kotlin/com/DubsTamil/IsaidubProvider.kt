@@ -8,7 +8,6 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.withPermit
-import java.io.File
 import java.net.URI
 import java.net.URLDecoder
 
@@ -95,21 +94,18 @@ class IsaidubProvider : MainAPI() {
             Log.d(tag, "HTTP status: ${response.code}")
             val html = response.text
 
-            // Save HTML to file for inspection
-            try {
-                val cacheDir = appContext.cacheDir
-                val file = File(cacheDir, "debug_isaidub_${System.currentTimeMillis()}.html")
-                file.writeText(html)
-                Log.d(tag, "Saved HTML to ${file.absolutePath}")
-            } catch (e: Exception) {
-                Log.e(tag, "Failed to save HTML", e)
-            }
+            // Log first 500 chars of HTML for debugging
+            Log.d(tag, "HTML preview: ${html.take(500)}")
 
             val doc = response.document
             val qualityLinks = mutableListOf<String>()
 
             // Log all anchor tags to see what's available
-            val allAnchors = doc.select("a").map { "${it.text()} -> ${it.attr("href")}" }
+            val allAnchors = doc.select("a").mapNotNull { a ->
+                val text = a.text().trim()
+                val href = a.attr("href")
+                if (text.isNotBlank() || href.isNotBlank()) "$text -> $href" else null
+            }
             Log.d(tag, "All anchors found: ${allAnchors.take(20)}") // first 20
 
             // 1. Look in div.f
@@ -259,7 +255,11 @@ class IsaidubProvider : MainAPI() {
             val doc = response.document
 
             // Log all anchors for debugging (first 15)
-            val anchors = doc.select("a").map { "${it.text().take(30)} -> ${it.attr("href").take(50)}" }
+            val anchors = doc.select("a").mapNotNull { a ->
+                val text = a.text().take(30)
+                val href = a.attr("href").take(50)
+                if (text.isNotBlank() || href.isNotBlank()) "$text -> $href" else null
+            }
             Log.d(tag, "Anchors on page: ${anchors.take(15)}")
 
             // 1. Look for "Download Server" links
