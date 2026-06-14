@@ -13,7 +13,7 @@ import java.net.URLDecoder
 
 class IsaidubProvider : MainAPI() {
     override var mainUrl = "https://isaidub.guru"
-    override var name = "DubsTamil"
+    override var name = "Isaidub"
     override val hasMainPage = true
     override var supportedTypes = setOf(TvType.Movie)
     override var lang = "ta"
@@ -31,28 +31,30 @@ class IsaidubProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse? {
         Log.d(tag, "load called with url: $url")
         if (!url.contains("/synthetic_meta?")) {
-            // This is a direct movie page URL
+            // Direct movie page URL
             val rawName = url.trimEnd('/').substringAfterLast("/").replace("-", " ").replace(Regex("tamil.*", RegexOption.IGNORE_CASE), "").trim()
             val (omdbMatch, resolvedYear) = fetchOmdbMetadata(rawName)
 
-            // Scrape quality links from the movie page
             val qualityUrls = getQualityLinks(url)
-            if (qualityUrls.isEmpty()) {
-                Log.e(tag, "No quality links found on movie page: $url")
-                return null
-            }
-            // Join quality URLs with comma for CloudStream to present quality selection
-            val qualityList = qualityUrls.joinToString(",")
-            Log.d(tag, "Quality URLs: $qualityList")
-
-            return newMovieLoadResponse(omdbMatch?.Title ?: rawName, url, TvType.Movie, qualityList) {
-                this.posterUrl = omdbMatch?.Poster?.takeIf { it != "N/A" }
-                this.year = resolvedYear.toIntOrNull()
-                this.plot = omdbMatch?.Plot?.takeIf { it != "N/A" } ?: "No synopsis available."
+            Log.d(tag, "Quality links found: $qualityUrls")
+            if (qualityUrls.isNotEmpty()) {
+                val qualityList = qualityUrls.joinToString(",")
+                return newMovieLoadResponse(omdbMatch?.Title ?: rawName, url, TvType.Movie, qualityList) {
+                    this.posterUrl = omdbMatch?.Poster?.takeIf { it != "N/A" }
+                    this.year = resolvedYear.toIntOrNull()
+                    this.plot = omdbMatch?.Plot?.takeIf { it != "N/A" } ?: "No synopsis available."
+                }
+            } else {
+                Log.d(tag, "No quality links, will try direct download from movie page")
+                return newMovieLoadResponse(omdbMatch?.Title ?: rawName, url, TvType.Movie, url) {
+                    this.posterUrl = omdbMatch?.Poster?.takeIf { it != "N/A" }
+                    this.year = resolvedYear.toIntOrNull()
+                    this.plot = omdbMatch?.Plot?.takeIf { it != "N/A" } ?: "No synopsis available."
+                }
             }
         }
 
-        // Synthetic meta URL handling (for search results)
+        // Synthetic meta URL (from search)
         val uri = URI(url)
         val queryParams = uri.query?.split("&")?.associate {
             val parts = it.split("=")
@@ -152,7 +154,7 @@ class IsaidubProvider : MainAPI() {
         }
         if (listOf("dubpage.xyz", "dubmv.xyz", "dub.uptodub.ch").any { lowerUrl.contains(it) }) {
             Log.d(tag, "External download page: $url")
-            return false // Not final, these are intermediate
+            return false
         }
         return false
     }
@@ -169,7 +171,6 @@ class IsaidubProvider : MainAPI() {
         }
         Log.d(tag, "Crawling: $url (quality=$quality)")
 
-        // Check if we have a final video URL
         if (isFinalDownloadUrl(url)) {
             val isM3u8 = url.contains(".m3u8", ignoreCase = true)
             callback.invoke(
@@ -192,7 +193,7 @@ class IsaidubProvider : MainAPI() {
         try {
             val doc = scrapeSemaphore.withPermit { app.get(url, timeout = 15).document }
 
-            // 1. Look for "Download Server" links (priority)
+            // 1. Look for "Download Server" links
             val downloadServers = doc.select("a").filter { 
                 it.text().contains("download server", ignoreCase = true) 
             }
@@ -213,7 +214,7 @@ class IsaidubProvider : MainAPI() {
                 if (found) return true
             }
 
-            // 2. Otherwise, extract all folder/quality links from div.f or div.bf
+            // 2. Extract folder/quality links
             val folderLinks = doc.select("div.f a, div.bf a")
             val validNextSteps = mutableListOf<Pair<String, String>>()
 
@@ -226,7 +227,10 @@ class IsaidubProvider : MainAPI() {
 
                 val childSlug = href.trimEnd('/').substringAfterLast("/")
                 val isRelatedMovie = childSlug.endsWith("-tamil-dubbed-movie") || childSlug.endsWith("-tamil-dubbed")
-                if (isRelatedMovie) continue
+                if (isRelatedMovie) {
+                    Log.d(tag, "Skipping related movie link: $href")
+                    continue
+                }
 
                 var newQuality = quality
                 when {
@@ -257,6 +261,8 @@ class IsaidubProvider : MainAPI() {
             }
 
             Log.d(tag, "No further links found on $url")
+            // Debug: print first 500 chars of page to see what's there
+            Log.d(tag, "Page preview: ${doc.text().take(500)}")
         } catch (e: Exception) {
             Log.e(tag, "Error crawling $url", e)
         }
