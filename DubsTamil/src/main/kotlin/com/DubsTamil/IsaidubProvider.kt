@@ -121,10 +121,11 @@ class IsaidubProvider : MainAPI() {
                                 source = this.name,
                                 name = "${this.name} $currentQuality",
                                 url = finalUrl,
-                                referer = "$mainUrl/",
-                                quality = Qualities.Unknown.value,
                                 type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                             ) {
+                                // FIXED: These go inside the block, not in the parentheses!
+                                this.referer = "$mainUrl/"
+                                this.quality = Qualities.Unknown.value
                                 this.headers = mapOf(
                                     "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                                     "Accept" to "*/*"
