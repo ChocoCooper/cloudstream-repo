@@ -2,7 +2,6 @@ package com.dubstamil
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import kotlinx.coroutines.sync.withPermit
 import org.jsoup.Jsoup
 import java.net.URI
 import java.net.URLDecoder
@@ -67,8 +66,6 @@ class IsaidubProvider : MainAPI() {
         }
     }
 
-    // --- REVERTED EXACTLY TO THE PROVIDED WORKING CRAWLING LOGIC ---
-
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -78,165 +75,155 @@ class IsaidubProvider : MainAPI() {
         val urls = data.split(",")
         var foundAnyLinks = false
 
-        urls.forEach { targetUrl ->
-            val resolutions = getResolutions(targetUrl.trim())
-
-            if (resolutions.isEmpty()) {
-                val finalLink = extractFinalLink(targetUrl.trim(), 0, mutableSetOf())
-                if (finalLink != null) {
-                    val isM3u8 = finalLink.contains(".m3u8", ignoreCase = true)
-                    callback.invoke(
-                        newExtractorLink(
-                            source = this.name,
-                            name = "Isaidub (Auto)",
-                            url = finalLink,
-                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                        ) {
-                            this.referer = "$mainUrl/"
-                            this.quality = Qualities.Unknown.value
-                        }
-                    )
-                    foundAnyLinks = true
-                }
-            } else {
-                resolutions.forEach { res ->
-                    val finalLink = extractFinalLink(res.url, 0, mutableSetOf())
-                    if (finalLink != null) {
-                        val isM3u8 = finalLink.contains(".m3u8", ignoreCase = true)
-                        
-                        val lowerLabel = res.label.lowercase()
-                        val qualityName = when {
-                            lowerLabel.contains("1080") -> "(1080p)"
-                            lowerLabel.contains("720") -> "(720p)"
-                            lowerLabel.contains("640") || lowerLabel.contains("360") -> "(640x360)"
-                            lowerLabel.contains("480") || lowerLabel.contains("320") -> "(480x320)"
-                            else -> "(HD)"
-                        }
-                        
-                        val linkType = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-
-                        callback.invoke(
-                            newExtractorLink(
-                                source = this.name,
-                                name = "Isaidub $qualityName",
-                                url = finalLink,
-                                type = linkType
-                            ) {
-                                this.referer = "$mainUrl/"
-                                this.quality = Qualities.Unknown.value
-                                this.headers = mapOf(
-                                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                                    "Accept" to "*/*",
-                                    "Connection" to "keep-alive"
-                                )
-                            }
-                        )
-                        foundAnyLinks = true
-                    }
+        // We run sequentially to prevent Cloudstream from timing out with too many parallel connections
+        for (targetUrl in urls) {
+            if (targetUrl.isNotBlank()) {
+                crawlForLinks(targetUrl.trim(), "Auto", mutableSetOf(), callback) { found ->
+                    if (found) foundAnyLinks = true
                 }
             }
         }
+        
         return foundAnyLinks
     }
 
-    private suspend fun getResolutions(pageUrl: String, depth: Int = 0, maxDepth: Int = 3): List<ResolutionNode> {
-        if (depth > maxDepth) return emptyList()
-
-        val foundResolutions = mutableListOf<ResolutionNode>()
-        val folderPages = mutableListOf<String>()
-
+    /**
+     * Crawls through Isaidub's nested HTML exactly as requested:
+     * <div class="f"> <a> -> <div class="f"> <a> -> <div class="bf"> -> <div class="dlink">
+     */
+    private suspend fun crawlForLinks(
+        url: String, 
+        currentQuality: String, 
+        seen: MutableSet<String>, 
+        callback: (ExtractorLink) -> Unit,
+        onFound: (Boolean) -> Unit
+    ) {
+        // Prevent infinite loops and crawling too many irrelevant pages
+        if (seen.size > 30 || !seen.add(url)) return 
+        
         try {
-            val doc = scrapeSemaphore.withPermit { app.get(pageUrl, timeout = 15).document }
+            val doc = app.get(url, timeout = 15).document
             
-            for (a in doc.select("a[href]")) {
-                val href = a.attr("href")
-                val text = a.text().trim()
-                val textLower = text.lowercase()
-
-                if (href.contains("sample", true) || textLower.contains("sample")) continue
-                if (href.contains("/movie/page/") || href.contains("?get-page=")) continue
-
-                val fullUrl = if (href.startsWith("http")) href else "$mainUrl$href"
-                if (fullUrl == pageUrl) continue
-
-                if (href.contains("/movie/")) {
-                    val isResolution = listOf("360", "480", "640", "720", "1080", "hd", "mp4").any { textLower.contains(it) }
+            // --- STEP 1: Check if we are at the Final Download Page ---
+            // HTML Path: <body> -> <div class="container"> -> <div class="bf"> -> <div class="songinfo"> -> <div class="download"> -> <div class="dlink"> -> <a>
+            val dlinks = doc.select("div.bf div.songinfo div.download div.dlink a")
+            
+            if (dlinks.isNotEmpty()) {
+                for (dlink in dlinks) {
+                    val serverUrl = fixUrl(dlink.attr("href"), url)
                     
-                    if (isResolution) {
-                        if (foundResolutions.none { it.url == fullUrl }) {
-                            foundResolutions.add(ResolutionNode(text, fullUrl))
-                        }
-                    } else {
-                        if (!folderPages.contains(fullUrl)) {
-                            folderPages.add(fullUrl)
-                        }
+                    // Resolve "Download Server 1" to get the final download.php or .mp4 link
+                    val finalUrl = resolveServerLink(serverUrl)
+                    if (finalUrl != null) {
+                        val isM3u8 = finalUrl.contains(".m3u8", ignoreCase = true)
+                        callback.invoke(
+                            newExtractorLink(
+                                source = this.name,
+                                name = "${this.name} $currentQuality",
+                                url = finalUrl,
+                                referer = "$mainUrl/",
+                                quality = Qualities.Unknown.value,
+                                type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                            ) {
+                                this.headers = mapOf(
+                                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                                    "Accept" to "*/*"
+                                )
+                            }
+                        )
+                        onFound(true)
                     }
                 }
+                return // We found the download links, stop crawling deeper on this branch
             }
-
-            if (foundResolutions.isEmpty() && folderPages.isNotEmpty()) {
-                val cleanBase = pageUrl.trimEnd('/').substringAfterLast("/").replace(".html", "")
-                val validFolders = folderPages.filter { it.contains(cleanBase, ignoreCase = true) }
+            
+            // --- STEP 2: Navigate deeper into movie sub-folders ---
+            // HTML Path: <body> -> <div class="container"> -> <div class="f"> -> <a href="...">
+            val folders = doc.select("div.f a")
+            
+            for (folder in folders) {
+                val href = folder.attr("href")
+                val name = folder.text().lowercase()
                 
-                for (folderUrl in validFolders) {
-                    val nested = getResolutions(folderUrl, depth + 1, maxDepth)
-                    for (nr in nested) {
-                        if (foundResolutions.none { it.url == nr.url }) {
-                            foundResolutions.add(nr)
-                        }
-                    }
-                }
-            }
-        } catch (e: Exception) { }
+                // IGNORE SAMPLES ALWAYS
+                if (name.contains("sample") || href.lowercase().contains("sample")) continue
+                
+                // Prevent going backward to pagination or home page
+                if (href == "/" || href.contains("?get-page=")) continue
+                
+                // Track quality based on the folder name
+                var newQuality = currentQuality
+                if (name.contains("1080")) newQuality = "1080p"
+                else if (name.contains("720")) newQuality = "720p"
+                else if (name.contains("640") || name.contains("480")) newQuality = "480p"
+                else if (name.contains("360") || name.contains("320")) newQuality = "360p"
+                else if (name.contains("hd") && currentQuality == "Auto") newQuality = "HD"
+                else if (name.contains("bdrip") || name.contains("bluray")) newQuality = "BDRip"
+                else if (name.contains("hdrip")) newQuality = "HDRip"
+                else if (name.contains("original")) newQuality = "Original"
 
-        return foundResolutions
+                val nextUrl = fixUrl(href, url)
+                crawlForLinks(nextUrl, newQuality, seen, callback, onFound)
+            }
+            
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
-    private suspend fun extractFinalLink(url: String, depth: Int, seen: MutableSet<String>): String? {
-        if (seen.contains(url) || depth > 6) return null
-        seen.add(url)
-
+    /**
+     * Follows the "Download Server 1" link until it finds the actual download.php or .mp4 link
+     */
+    private suspend fun resolveServerLink(url: String, depth: Int = 0): String? {
+        if (depth > 3) return null // Prevent endless redirects
+        
+        // If the URL is already the final download format
+        if (url.contains("download.php", ignoreCase = true) || url.contains("dl.php", ignoreCase = true) || url.endsWith(".mp4", ignoreCase = true) || url.endsWith(".mkv", ignoreCase = true)) {
+            return url
+        }
+        
         try {
-            val res = scrapeSemaphore.withPermit { app.get(url, timeout = 15) }
-            if (res.headers["content-type"]?.contains("video/") == true) {
-                return res.url
+            val response = app.get(url, timeout = 15)
+            
+            // If the server directly returned a video file
+            if (response.headers["content-type"]?.contains("video/") == true) return response.url
+            
+            val doc = response.document
+            
+            // Sometimes the server link takes you to ANOTHER page with a "Download" button
+            val nextBtn = doc.selectFirst("div.download div.dlink a, a:contains(Download)")
+            if (nextBtn != null) {
+                val nextUrl = fixUrl(nextBtn.attr("href"), url)
+                if (nextUrl != url) {
+                    return resolveServerLink(nextUrl, depth + 1) // Recursively follow the button
+                }
             }
-
-            val text = res.text
-
+            
+            // Fallback: Check if the raw HTML contains the download.php link
+            val text = response.text
             val dlPhpMatch = Regex("""https?://[^\s"'<>]*download\.php\?[^\s"'<>]*""", RegexOption.IGNORE_CASE).find(text)
-            val m3u8Match = Regex("""https?://[^\s"'<>]*\.m3u8[^\s"'<>]*""", RegexOption.IGNORE_CASE).find(text)
-            val mp4Match = Regex("""https?://[^\s"'<>]*\.mp4[^\s"'<>]*""", RegexOption.IGNORE_CASE).find(text)
-
             if (dlPhpMatch != null) return dlPhpMatch.value
-            if (m3u8Match != null) return m3u8Match.value
+            
+            val mp4Match = Regex("""https?://[^\s"'<>]*\.mp4[^"'\s]*""", RegexOption.IGNORE_CASE).find(text)
             if (mp4Match != null) return mp4Match.value
-
-            val doc = Jsoup.parse(text)
-            val validPaths = listOf("/download/", "/view/", "/file/", "download.php", "dl.php")
-
-            for (a in doc.select("a[href]")) {
-                val href = a.attr("href")
-                val linkText = a.text().lowercase()
-
-                if (linkText.contains("sample") || href.lowercase().contains("sample")) continue
-
-                val fullUrl = when {
-                    href.startsWith("http") -> href
-                    href.startsWith("//") -> "https:$href"
-                    else -> {
-                        val uri = URI(url)
-                        "https://${uri.host}$href"
-                    }
-                }
-
-                if (validPaths.any { fullUrl.lowercase().contains(it) }) {
-                    val finalUrl = extractFinalLink(fullUrl, depth + 1, seen)
-                    if (finalUrl != null) return finalUrl
-                }
-            }
-        } catch (e: Exception) { }
-
+            
+        } catch (e: Exception) {}
+        
         return null
+    }
+
+    /**
+     * Safely constructs absolute URLs whether they are relative paths or missing domains
+     */
+    private fun fixUrl(href: String, baseUrl: String): String {
+        if (href.startsWith("http")) return href
+        if (href.startsWith("//")) return "https:$href"
+        
+        return try {
+            val hostUrl = "https://${URI(baseUrl).host}"
+            if (href.startsWith("/")) "$hostUrl$href" else "$hostUrl/$href"
+        } catch (e: Exception) {
+            mainUrl + (if (href.startsWith("/")) href else "/$href")
+        }
     }
 }
