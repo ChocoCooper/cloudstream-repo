@@ -7,6 +7,6 @@ import android.content.Context
 @CloudstreamPlugin
 class StreamHubPlugin : Plugin() { 
     override fun load(context: Context) {
-        registerMainAPI(StreamHub())
+        registerMainAPI(StreamHubProvider())
     }
 }
