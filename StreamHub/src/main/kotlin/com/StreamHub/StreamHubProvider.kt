@@ -1,15 +1,13 @@
-package com.streamhub
+package com.lagradost.cloudstream3.extractors
 
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.AppUtils.parsedSafe
-import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.Qualities
+// Removed the broken AppUtils.parsedSafe import
 
 class StreamHubProvider : MainAPI() {
     override var mainUrl = "https://api.xyra.stream"
     override var name = "StreamHub"
-    override val hasMainPage = false // Skipping homepage as requested
+    override val hasMainPage = false
     override var lang = "en"
     override val supportedTypes = setOf(TvType.Movie)
 
@@ -21,45 +19,35 @@ class StreamHubProvider : MainAPI() {
     // --- Search Implementation ---
     override suspend fun search(query: String): List<SearchResponse> {
         val searchUrl = "$tmdbBaseUrl/search/movie?api_key=$tmdbApiKey&query=$query&include_adult=false"
-        val response = app.get(searchUrl).parsedSafe<TmdbSearchResponse>()
+        // Using .parsed() to fix the unresolved reference
+        val response = app.get(searchUrl).parsed<TmdbSearchResponse>()
 
-        return response?.results?.mapNotNull { movie ->
+        return response.results?.mapNotNull { movie ->
             val title = movie.title ?: return@mapNotNull null
             val id = movie.id?.toString() ?: return@mapNotNull null
-            val posterPath = movie.posterPath
-            val posterUrl = if (posterPath != null) "https://image.tmdb.org/t/p/w500$posterPath" else null
+            val posterUrl = movie.posterPath?.let { "https://image.tmdb.org/t/p/w500$it" }
 
-            MovieSearchResponse(
-                title = title,
-                url = id, // Passing the TMDB ID as the URL for the load phase
-                apiName = this.name,
-                type = TvType.Movie,
-                posterUrl = posterUrl,
-                year = movie.releaseDate?.substringBefore("-")?.toIntOrNull()
-            )
+            // Using the builder to fix MovieSearchResponse constructor deprecation
+            newMovieSearchResponse(title, url = id, type = TvType.Movie) {
+                this.posterUrl = posterUrl
+                this.year = movie.releaseDate?.substringBefore("-")?.toIntOrNull()
+            }
         } ?: emptyList()
     }
 
     // --- Media Details Implementation ---
     override suspend fun load(url: String): LoadResponse? {
-        // Here 'url' is the TMDB ID we passed in the SearchResponse
-        val tmdbId = url
-        val detailsUrl = "$tmdbBaseUrl/movie/$tmdbId?api_key=$tmdbApiKey"
-        
-        val details = app.get(detailsUrl).parsedSafe<TmdbDetailsResponse>() ?: return null
-
+        val detailsUrl = "$tmdbBaseUrl/movie/$url?api_key=$tmdbApiKey"
+        val details = app.get(detailsUrl).parsed<TmdbDetailsResponse>()
         val title = details.title ?: return null
-        val posterPath = details.posterPath
-        val posterUrl = if (posterPath != null) "https://image.tmdb.org/t/p/w500$posterPath" else null
-        val backgroundPath = details.backdropPath
-        val backgroundUrl = if (backgroundPath != null) "https://image.tmdb.org/t/p/w1280$backgroundPath" else null
 
-        return newMovieLoadResponse(title, tmdbId, TvType.Movie, tmdbId) {
-            this.posterUrl = posterUrl
-            this.backgroundPosterUrl = backgroundUrl
+        return newMovieLoadResponse(title, url, TvType.Movie, url) {
+            this.posterUrl = details.posterPath?.let { "https://image.tmdb.org/t/p/w500$it" }
+            this.backgroundPosterUrl = details.backdropPath?.let { "https://image.tmdb.org/t/p/w1280$it" }
             this.year = details.releaseDate?.substringBefore("-")?.toIntOrNull()
-            this.plot = details.overview
-            this.rating = (details.voteAverage?.times(10))?.toInt() // Converts 8.5 to 850, Cloudstream standardizes it
+            // Fixed 'overview' Unresolved Reference and migrated 'rating' to 'score'
+            this.plot = details.plot 
+            this.score = details.voteAverage
             this.tags = details.genres?.mapNotNull { it.name }
         }
     }
@@ -71,25 +59,17 @@ class StreamHubProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // 'data' is the TMDB ID passed from the LoadResponse
-        val tmdbId = data
-        val streamUrl = "$mainUrl/v1/streamhub/streams?api_key=$xyraApiKey&tmdb_id=$tmdbId"
-
-        val response = app.get(streamUrl).parsedSafe<XyraResponse>() ?: return false
+        val streamUrl = "$mainUrl/v1/streamhub/streams?api_key=$xyraApiKey&tmdb_id=$data"
+        val response = app.get(streamUrl).parsed<XyraResponse>()
 
         response.streams?.forEach { stream ->
             val qualityInfo = stream.title ?: ""
-            
-            // Explicitly ignore massive 2160p sizes
-            if (qualityInfo.contains("2160p", ignoreCase = true)) {
-                return@forEach
-            }
+            if (qualityInfo.contains("2160p", ignoreCase = true)) return@forEach
 
             val link = stream.url ?: return@forEach
             val providerName = stream.name ?: "Unknown"
             val isM3u8 = link.contains(".m3u8", ignoreCase = true)
 
-            // Attempt to map Cloudstream Qualities
             val mappedQuality = when {
                 qualityInfo.contains("1080p") -> Qualities.P1080.value
                 qualityInfo.contains("720p") -> Qualities.P720.value
@@ -97,8 +77,9 @@ class StreamHubProvider : MainAPI() {
                 else -> Qualities.Unknown.value
             }
 
+            // Using newExtractorLink to fix ExtractorLink constructor deprecation
             callback.invoke(
-                ExtractorLink(
+                newExtractorLink(
                     source = this.name,
                     name = "$providerName - $qualityInfo",
                     url = link,
