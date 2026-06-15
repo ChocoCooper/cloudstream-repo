@@ -33,7 +33,7 @@ data class ScrapedMovie(val title: String, val link: String)
 class IsaidubProvider : MainAPI() {
 
     override var mainUrl        = "https://isaidub.guru"
-    override var name           = "IsaiDub"
+    override var name           = "DubsTamil"
     override val supportedTypes = setOf(TvType.Movie)
     override var lang           = "ta"
     override val hasMainPage    = true
@@ -332,13 +332,14 @@ class IsaidubProvider : MainAPI() {
             callback.invoke(
                 newExtractorLink(
                     source = this.name,
-                    name   = this.name,
+                    name   = "${this.name} ($label)", 
                     url    = finalUrl,
                     type   = if (finalUrl.contains(".m3u8")) ExtractorLinkType.M3U8
                              else ExtractorLinkType.VIDEO,
                 ) {
                     this.referer = mainUrl
-                    this.quality = labelToQuality(label)
+                    // By setting quality to Unknown, Cloudstream won't append duplicate badges
+                    this.quality = Qualities.Unknown.value 
                 }
             )
         }
@@ -372,12 +373,10 @@ class IsaidubProvider : MainAPI() {
         val (firstPageMovies, maxPage) = scrapePage(searchUrl)
         processMovies(firstPageMovies)
 
-        // Stop early ONLY if we get a perfect intersection match
         if ((bestMatch?.second ?: 0) >= targetTokenCount) {
             return bestMatch?.first?.link
         }
 
-        // If not a perfect match, keep searching all available pages to find highest possible score
         if (maxPage > 1) {
             coroutineScope {
                 (2..minOf(maxPage, 10)).map { p ->
@@ -386,7 +385,6 @@ class IsaidubProvider : MainAPI() {
             }.forEach { processMovies(it) }
         }
 
-        // Return whatever movie accumulated the highest token match score overall
         return bestMatch?.first?.link
     }
 
@@ -417,7 +415,7 @@ class IsaidubProvider : MainAPI() {
     }
 
     // ============================================================
-    // TOKEN HELPERS (Pure Alphanumeric Extraction)
+    // TOKEN HELPERS
     // ============================================================
 
     private fun tokenize(text: String): Set<String> =
@@ -468,7 +466,7 @@ class IsaidubProvider : MainAPI() {
         val doc  = response.document
 
         val rawFinal = extractFinalFromHtml(html)
-        if (rawFinal != null) return listOf(Pair(labelFromUrl(rawFinal), rawFinal))
+        if (rawFinal != null) return listOf(Pair(extractResolution("", rawFinal), rawFinal))
 
         val links =
             if ("isaidub.guru" in url && "/download/" !in url)
@@ -486,9 +484,9 @@ class IsaidubProvider : MainAPI() {
         val finalLinks = coroutineScope {
             links.map { (label, linkUrl) ->
                 async {
-                    if (isFinalUrl(linkUrl)) listOf(Pair(labelFromText(label, linkUrl), linkUrl))
+                    if (isFinalUrl(linkUrl)) listOf(Pair(extractResolution(label, linkUrl), linkUrl))
                     else resolveAllLinks(linkUrl, depth + 1).map { (lbl, u) ->
-                        Pair(labelFromText(label, u).ifBlank { lbl }, u)
+                        Pair(extractResolution(label, u).ifBlank { lbl }, u)
                     }
                 }
             }.awaitAll()
@@ -498,41 +496,24 @@ class IsaidubProvider : MainAPI() {
     }
 
     // ============================================================
-    // LABEL / QUALITY HELPERS
+    // EXACT RESOLUTION EXTRACTOR
     // ============================================================
 
-    private fun labelFromUrl(url: String): String {
-        val low = url.lowercase()
-        return when {
-            "1080" in low -> "1080p"
-            "720"  in low -> "720p"
-            "480"  in low -> "480p"
-            "360"  in low -> "360p"
-            else          -> "HD"
-        }
-    }
-
-    private fun labelFromText(text: String, url: String): String {
+    private fun extractResolution(text: String, url: String): String {
         val combined = (text + url).lowercase()
-        return when {
-            "1080"    in combined -> "1080p"
-            "720"     in combined -> "720p"
-            "480"     in combined -> "480p"
-            "360"     in combined -> "360p"
-            "1920"    in combined -> "1080p"
-            "1280"    in combined -> "720p"
-            "854"     in combined -> "480p"
-            "640"     in combined -> "360p"
-            else                  -> text.trim().ifBlank { "HD" }
-        }
-    }
+        
+        // 1. Try to find explicit WxH pattern directly
+        val exactMatch = Regex("""\d{3,4}x\d{3,4}""").find(combined)
+        if (exactMatch != null) return exactMatch.value
 
-    private fun labelToQuality(label: String): Int = when {
-        "1080" in label -> Qualities.P1080.value
-        "720"  in label -> Qualities.P720.value
-        "480"  in label -> Qualities.P480.value
-        "360"  in label -> Qualities.P360.value
-        else            -> Qualities.Unknown.value
+        // 2. Fallbacks mapping common strings to their true resolutions
+        return when {
+            "1080" in combined || "1920" in combined -> "1920x1080"
+            "720"  in combined || "1280" in combined -> "1280x720"
+            "640"  in combined || "360"  in combined -> "640x360"
+            "480"  in combined || "320"  in combined -> "480x320"
+            else -> "HD"
+        }
     }
 
     // ============================================================
