@@ -4,6 +4,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.AppUtils
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -144,13 +145,14 @@ class IsaidubProvider : MainAPI() {
 
         callback.invoke(
             newExtractorLink(
-                source  = name,
-                name    = name,
-                url     = finalUrl,
-                referer = mainUrl,
-                quality = Qualities.Unknown.value,
-                isM3u8  = finalUrl.contains(".m3u8")
-            )
+                source = name,
+                name   = name,
+                url    = finalUrl,
+            ) {
+                this.referer  = mainUrl
+                this.quality  = Qualities.Unknown.value
+                this.isM3u8   = finalUrl.contains(".m3u8")
+            }
         )
         return true
     }
