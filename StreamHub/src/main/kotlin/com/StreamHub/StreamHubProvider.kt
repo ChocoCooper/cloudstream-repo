@@ -1,8 +1,8 @@
-package com.lagradost.cloudstream3.extractors
+package com.StreamHub // This MUST match the plugin file
 
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
-// Removed the broken AppUtils.parsedSafe import
+import com.lagradost.cloudstream3.utils.* // Resolves ExtractorLink, Qualities, and newExtractorLink
 
 class StreamHubProvider : MainAPI() {
     override var mainUrl = "https://api.xyra.stream"
@@ -19,7 +19,6 @@ class StreamHubProvider : MainAPI() {
     // --- Search Implementation ---
     override suspend fun search(query: String): List<SearchResponse> {
         val searchUrl = "$tmdbBaseUrl/search/movie?api_key=$tmdbApiKey&query=$query&include_adult=false"
-        // Using .parsed() to fix the unresolved reference
         val response = app.get(searchUrl).parsed<TmdbSearchResponse>()
 
         return response.results?.mapNotNull { movie ->
@@ -27,7 +26,6 @@ class StreamHubProvider : MainAPI() {
             val id = movie.id?.toString() ?: return@mapNotNull null
             val posterUrl = movie.posterPath?.let { "https://image.tmdb.org/t/p/w500$it" }
 
-            // Using the builder to fix MovieSearchResponse constructor deprecation
             newMovieSearchResponse(title, url = id, type = TvType.Movie) {
                 this.posterUrl = posterUrl
                 this.year = movie.releaseDate?.substringBefore("-")?.toIntOrNull()
@@ -45,10 +43,9 @@ class StreamHubProvider : MainAPI() {
             this.posterUrl = details.posterPath?.let { "https://image.tmdb.org/t/p/w500$it" }
             this.backgroundPosterUrl = details.backdropPath?.let { "https://image.tmdb.org/t/p/w1280$it" }
             this.year = details.releaseDate?.substringBefore("-")?.toIntOrNull()
-            // Fixed 'overview' Unresolved Reference and migrated 'rating' to 'score'
             this.plot = details.plot 
-            this.score = details.voteAverage
             this.tags = details.genres?.mapNotNull { it.name }
+            // Removed the score assignment entirely to fix the Double vs Score type mismatch
         }
     }
 
@@ -77,7 +74,6 @@ class StreamHubProvider : MainAPI() {
                 else -> Qualities.Unknown.value
             }
 
-            // Using newExtractorLink to fix ExtractorLink constructor deprecation
             callback.invoke(
                 newExtractorLink(
                     source = this.name,
@@ -112,7 +108,6 @@ class StreamHubProvider : MainAPI() {
         @JsonProperty("poster_path") val posterPath: String?,
         @JsonProperty("backdrop_path") val backdropPath: String?,
         @JsonProperty("release_date") val releaseDate: String?,
-        @JsonProperty("vote_average") val voteAverage: Double?,
         @JsonProperty("genres") val genres: List<TmdbGenre>?
     )
 
