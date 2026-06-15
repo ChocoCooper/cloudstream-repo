@@ -33,7 +33,7 @@ data class ScrapedMovie(val title: String, val link: String)
 class IsaidubProvider : MainAPI() {
 
     override var mainUrl        = "https://isaidub.guru"
-    override var name           = "DubsTamil"
+    override var name           = "IsaiDub"
     override val supportedTypes = setOf(TvType.Movie)
     override var lang           = "ta"
     override val hasMainPage    = true
@@ -52,7 +52,6 @@ class IsaidubProvider : MainAPI() {
     @Synchronized
     private fun markKeyDead(key: String) {
         allOmdbKeys.remove(key)
-        // Reset pool if somehow all keys get exhausted
         if (allOmdbKeys.isEmpty()) {
             allOmdbKeys.addAll(
                 listOf(
@@ -76,15 +75,15 @@ class IsaidubProvider : MainAPI() {
                     resp.text.contains("Limit reached", ignoreCase = true) || 
                     resp.text.contains("Invalid API key", ignoreCase = true) -> {
                         markKeyDead(key)
-                        continue // Immediately rotate to the next key
+                        continue 
                     }
                     resp.isSuccessful -> {
                         if (resp.text.contains("\"Response\":\"True\"")) return resp.text
-                        else return null // Successful ping, but title doesn't exist
+                        else return null 
                     }
                 }
             } catch (e: Exception) {
-                continue // Rotate on network timeout or failure
+                continue 
             }
         }
         return null
@@ -249,6 +248,10 @@ class IsaidubProvider : MainAPI() {
     // ============================================================
 
     override suspend fun load(url: String): LoadResponse? {
+        if (!url.contains("synthetic_meta")) {
+            return newMovieLoadResponse("Isaidub Movie", url, TvType.Movie, url)
+        }
+
         val uri      = android.net.Uri.parse(url)
         val title    = URLDecoder.decode(uri.getQueryParameter("t")   ?: "", "UTF-8")
         val year     = URLDecoder.decode(uri.getQueryParameter("y")   ?: "", "UTF-8")
@@ -302,8 +305,26 @@ class IsaidubProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val uri          = android.net.Uri.parse(data)
-        val moviePageUrl = URLDecoder.decode(uri.getQueryParameter("url") ?: "", "UTF-8")
+        
+        val moviePageUrl: String
+
+        // Check if data is our synthetic meta or a direct URL
+        if (data.contains("synthetic_meta")) {
+            val uri = android.net.Uri.parse(data)
+            val parsedUrl = URLDecoder.decode(uri.getQueryParameter("url") ?: "", "UTF-8")
+            
+            // Self-healing fallback: If intent cached the unresolved search URL, fetch it now.
+            if (parsedUrl.isBlank()) {
+                val title = URLDecoder.decode(uri.getQueryParameter("t") ?: "", "UTF-8")
+                val year  = URLDecoder.decode(uri.getQueryParameter("y") ?: "", "UTF-8")
+                moviePageUrl = findMoviePage(title, year) ?: return false
+            } else {
+                moviePageUrl = parsedUrl
+            }
+        } else {
+            moviePageUrl = data
+        }
+
         if (moviePageUrl.isBlank()) return false
 
         val links = resolveAllLinks(moviePageUrl, depth = 0)
@@ -313,7 +334,7 @@ class IsaidubProvider : MainAPI() {
             callback.invoke(
                 newExtractorLink(
                     source = name,
-                    name   = "Isaidub ($label)",
+                    name   = "Isaidub", // Removed label string to prevent duplicate quality naming
                     url    = finalUrl,
                     type   = if (finalUrl.contains(".m3u8")) ExtractorLinkType.M3U8
                              else ExtractorLinkType.VIDEO,
