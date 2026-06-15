@@ -1,230 +1,64 @@
 package com.dubstamil
 
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.app
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.sync.Semaphore
+import com.lagradost.cloudstream3.utils.AppUtils
+import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.Qualities
 import kotlinx.coroutines.sync.withPermit
-import java.net.URI
 import java.net.URLDecoder
 import java.net.URLEncoder
-import kotlin.random.Random
 
 class IsaidubProvider : MainAPI() {
+
     override var mainUrl = "https://isaidub.guru"
     override var name = "DubsTamil"
-    override val hasMainPage = true 
-    override var supportedTypes = setOf(TvType.Movie)
+    override val supportedTypes = setOf(TvType.Movie)
     override var lang = "ta"
+    override val hasMainPage = false
+    override val hasSearch = true
 
-    // --- CONCURRENCY & CACHE ---
-    private val omdbSemaphore = Semaphore(5)
-    private val scrapeSemaphore = Semaphore(5)
-    private val pageCache = mutableMapOf<String, Pair<Long, Pair<List<ScrapedMovie>, Int>>>()
-
-    private val baseOmdbKeys = listOf("eb0c0475", "4b447405", "7776cbde", "ff28f90b", "6c3a2d45")
-    private var activeOmdbKeys = baseOmdbKeys.toMutableList()
-
-    private data class OmdbTitleResponse(val Title: String?, val Year: String?, val Poster: String?, val Plot: String?, val Response: String?)
-    private data class ScrapedMovie(val title: String, val link: String)
-
-    private fun getRandomApiKey(): String {
-        if (activeOmdbKeys.isEmpty()) activeOmdbKeys.addAll(baseOmdbKeys)
-        return activeOmdbKeys[Random.nextInt(activeOmdbKeys.size)]
-    }
-
-    // --- PURE TOKENIZATION & MAXIMUM MATCH LOGIC ---
-    private fun normalizeTitle(title: String): String {
-        // Purely extracts alphanumeric words, stripping out all punctuation and fluff
-        return title.lowercase()
-            .replace(Regex("[^a-z0-9\\s]"), " ")
-            .replace(Regex("\\s+"), " ")
-            .trim()
-    }
-
-    private fun findBestMatch(movies: List<ScrapedMovie>, queryTitle: String, queryYear: String): String? {
-        val queryTokens = normalizeTitle(queryTitle).split(" ").filter { it.isNotBlank() }.toSet()
-
-        var bestMovieUrl: String? = null
-        var maxMatchCount = 0
-
-        for (movie in movies) {
-            // STRICT YEAR CHECK: The year MUST be present in the site title
-            if (queryYear.isNotBlank() && !movie.title.contains(queryYear)) {
-                continue
-            }
-
-            val siteTokens = normalizeTitle(movie.title).split(" ").filter { it.isNotBlank() }.toSet()
-            
-            // Find how many words intersect identically
-            val matchCount = queryTokens.intersect(siteTokens).size
-
-            // Absolute maximum possible token match wins
-            if (matchCount > maxMatchCount && matchCount > 0) {
-                maxMatchCount = matchCount
-                bestMovieUrl = movie.link
-            }
-        }
-
-        return bestMovieUrl
-    }
-
-    private suspend fun fetchOmdbMetadata(rawTitle: String, fallbackYear: String = ""): Pair<OmdbTitleResponse?, String> {
-        val cleanName = rawTitle.replace("isaiDub.me", "").replace("-", " ").trim()
-        val yearRegex = Regex("\\b(19|20)\\d{2}\\b").find(cleanName)
-        val extractedYear = yearRegex?.value ?: fallbackYear
-        val finalSearchTitle = if (yearRegex != null) cleanName.replace(yearRegex.value, "").trim() else cleanName
-
-        try {
-            val encodedQuery = URLEncoder.encode(finalSearchTitle, "UTF-8")
-            val apiKey = getRandomApiKey()
-            val url = if (extractedYear.isNotBlank()) {
-                "https://www.omdbapi.com/?apikey=$apiKey&t=$encodedQuery&y=$extractedYear"
-            } else {
-                "https://www.omdbapi.com/?apikey=$apiKey&t=$encodedQuery"
-            }
-            
-            val response = omdbSemaphore.withPermit { app.get(url, timeout = 5) }
-
-            if (response.code == 401 || response.text.contains("Limit reached", true) || response.text.contains("Invalid API key", true)) {
-                activeOmdbKeys.remove(apiKey)
-            } else if (response.isSuccessful && response.text.contains("\"Response\":\"True\"")) {
-                val parsed = AppUtils.tryParseJson<OmdbTitleResponse>(response.text)
-                if (parsed?.Poster != null && parsed.Poster != "N/A") {
-                    return Pair(parsed, extractedYear)
-                }
-            }
-        } catch (e: Exception) { }
-        return Pair(null, extractedYear) 
-    }
-
-    private suspend fun scrapePageAndGetTotal(url: String): Pair<List<ScrapedMovie>, Int> {
-        val cached = pageCache[url]
-        if (cached != null && System.currentTimeMillis() - cached.first < (5 * 60 * 1000L)) {
-            return cached.second
-        }
-
-        val movies = mutableListOf<ScrapedMovie>()
-        var maxPage = 1
-        try {
-            val headers = mapOf(
-                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept" to "*/*"
-            )
-            val response = scrapeSemaphore.withPermit { app.get(url, headers = headers, timeout = 10) }
-            if (!response.isSuccessful) return Pair(emptyList(), 1)
-            
-            val doc = response.document
-            
-            for (div in doc.select("div.f")) {
-                val aTag = div.selectFirst("a")
-                if (aTag != null) {
-                    var link = aTag.attr("href")
-                    if (link.startsWith("/")) link = "$mainUrl$link"
-                    movies.add(ScrapedMovie(aTag.text().trim(), link))
-                }
-            }
-
-            val hiddenDiv = doc.selectFirst("div[style*=\"display: none;\"] div.pagecontent span#totalPages")
-            val visibleTotal = doc.selectFirst("span#totalPages")
-            
-            if (hiddenDiv != null && hiddenDiv.text().toIntOrNull() != null) {
-                maxPage = hiddenDiv.text().toInt()
-            } else if (visibleTotal != null && visibleTotal.text().toIntOrNull() != null) {
-                maxPage = visibleTotal.text().toInt()
-            } else {
-                doc.select("div.pagination-container a[href]").forEach { a ->
-                    val pageNum = Regex("""get-page=(\d+)""").find(a.attr("href"))?.groupValues?.get(1)?.toIntOrNull()
-                    if (pageNum != null && pageNum > maxPage) maxPage = pageNum
-                }
-            }
-        } catch (e: Exception) { }
-
-        val result = Pair(movies, maxPage)
-        pageCache[url] = Pair(System.currentTimeMillis(), result)
-        return result
-    }
-
-    private suspend fun searchDubbedMovieLinks(title: String, year: String): String? {
-        val targets = mutableListOf<String>()
-        year.toIntOrNull()?.let { targets.add("$mainUrl/tamil-$it-dubbed-movies/") }
-        title.trim().firstOrNull()?.lowercaseChar()?.let {
-            if (it.isLetter()) targets.add("$mainUrl/tamil-atoz-dubbed-movies/$it/") 
-            else if (it.isDigit()) targets.add("$mainUrl/tamil-atoz-dubbed-movies/0-9/")
-        }
-        
-        for (url in targets.distinct()) {
-            val (p1Movies, maxPages) = scrapePageAndGetTotal(url)
-            val allMovies = mutableListOf<ScrapedMovie>()
-            allMovies.addAll(p1Movies)
-            
-            if (maxPages > 1) {
-                coroutineScope {
-                    (2..maxPages).map { p -> 
-                        async { scrapePageAndGetTotal("$url?get-page=$p").first }
-                    }.awaitAll().forEach { allMovies.addAll(it) }
-                }
-            }
-
-            val bestMatch = findBestMatch(allMovies, title, year)
-            if (bestMatch != null) return bestMatch
-        }
-        return null
-    }
-
-    // --- MAIN API OVERRIDES ---
-
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
-        return getSharedHomePageData(page, request)
-    }
+    // ==========================================
+    // SEARCH
+    // ==========================================
 
     override suspend fun search(query: String): List<SearchResponse> {
         return getSharedSearchData(query)
     }
 
+    // ==========================================
+    // LOAD (Movie metadata page)
+    // ==========================================
+
     override suspend fun load(url: String): LoadResponse? {
-        if (!url.contains("/synthetic_meta?")) {
-            val rawName = url.trimEnd('/').substringAfterLast("/").replace("-", " ").replace(Regex("tamil.*", RegexOption.IGNORE_CASE), "").trim()
-            val (omdbMatch, resolvedYear) = fetchOmdbMetadata(rawName)
-            
-            return newMovieLoadResponse(omdbMatch?.Title ?: rawName, url, TvType.Movie, url) {
-                this.posterUrl = omdbMatch?.Poster?.takeIf { it != "N/A" }
-                this.year = resolvedYear.toIntOrNull()
-                this.plot = omdbMatch?.Plot?.takeIf { it != "N/A" } ?: "No synopsis available."
-            }
-        }
+        // Parse synthetic URL built by getSharedSearchData()
+        // Format: $mainUrl/synthetic_meta?t=...&y=...&p=...&url=...&s=...
+        val uri = android.net.Uri.parse(url)
 
-        val uri = URI(url)
-        val queryParams = uri.query?.split("&")?.associate {
-            val parts = it.split("=")
-            parts[0] to URLDecoder.decode(parts.getOrElse(1) { "" }, "UTF-8")
-        } ?: return null
+        val title    = URLDecoder.decode(uri.getQueryParameter("t") ?: "", "UTF-8")
+        val year     = URLDecoder.decode(uri.getQueryParameter("y") ?: "", "UTF-8")
+        val poster   = URLDecoder.decode(uri.getQueryParameter("p") ?: "", "UTF-8")
 
-        val title = queryParams["t"] ?: return null
-        val year = queryParams["y"] ?: ""
-        val omdbPoster = queryParams["p"] ?: "$mainUrl/uploads/posters/default.jpg"
-        val failSafeUrl = queryParams["url"] 
-        val yearInt = year.toIntOrNull()
+        if (title.isBlank()) return null
 
-        val targetUrl = if (!failSafeUrl.isNullOrBlank()) {
-            failSafeUrl
-        } else {
-            searchDubbedMovieLinks(title, year) ?: return null
-        }
+        // Find the actual isaidub movie page URL
+        val movieLinks = searchDubbedMovieLinks(title, year)
+        val moviePageUrl = movieLinks.firstOrNull() ?: return null
 
-        val (detailedMeta, _) = fetchOmdbMetadata(title, year)
+        // Store the resolved URL back into data so loadLinks() gets it
+        val dataUrl = "$mainUrl/synthetic_meta?t=${URLEncoder.encode(title,"UTF-8")}" +
+                "&y=${URLEncoder.encode(year,"UTF-8")}" +
+                "&p=${URLEncoder.encode(poster,"UTF-8")}" +
+                "&url=${URLEncoder.encode(moviePageUrl,"UTF-8")}"
 
-        return newMovieLoadResponse(title, url, TvType.Movie, targetUrl) {
-            this.posterUrl = omdbPoster
-            this.year = yearInt
-            this.plot = detailedMeta?.Plot?.takeIf { it != "N/A" } ?: "No synopsis available."
+        return newMovieLoadResponse(title, dataUrl, TvType.Movie, dataUrl) {
+            this.posterUrl = poster.ifBlank { null }
+            this.year      = year.toIntOrNull()
         }
     }
 
-    // --- DEEP LINK EXTRACTION ---
+    // ==========================================
+    // LOAD LINKS — mirrors interactive_browser()
+    // ==========================================
 
     override suspend fun loadLinks(
         data: String,
@@ -232,141 +66,156 @@ class IsaidubProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        if (data.isBlank()) return false
-        
-        var foundAnyLinks = false
-        coroutineScope {
-            async {
-                if (crawlNode(data.trim(), "Auto", 0, mutableSetOf(), callback)) {
-                    foundAnyLinks = true
-                }
-            }.await()
-        }
-        return foundAnyLinks
-    }
 
-    private fun isFinalDownloadUrl(url: String): Boolean {
-        val lUrl = url.lowercase()
-        return listOf(".mp4", ".mkv", ".avi", ".mov", ".webm").any { lUrl.endsWith(it) } ||
-               lUrl.contains("download.php?dl=") ||
-               listOf("dubpage.xyz", "dubmv.xyz", "dub.uptodub.ch").any { lUrl.contains(it) }
-    }
+        val uri         = android.net.Uri.parse(data)
+        val moviePageUrl = URLDecoder.decode(uri.getQueryParameter("url") ?: "", "UTF-8")
 
-    private fun invokeCallback(url: String, quality: String, callback: (ExtractorLink) -> Unit) {
-        val isM3u8 = url.contains(".m3u8", ignoreCase = true)
+        if (moviePageUrl.isBlank()) return false
+
+        val finalUrl = resolveFinalLink(moviePageUrl, depth = 0)
+        if (finalUrl.isNullOrBlank()) return false
+
         callback.invoke(
             ExtractorLink(
-                source = this.name,
-                name = "${this.name} $quality",
-                url = url,
-                referer = "$mainUrl/",
+                source  = name,
+                name    = name,
+                url     = finalUrl,
+                referer = mainUrl,
                 quality = Qualities.Unknown.value,
-                type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
-                headers = mapOf(
-                    "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
-                )
+                isM3u8  = finalUrl.contains(".m3u8")
             )
         )
+        return true
     }
 
-    private suspend fun crawlNode(
-        url: String, 
-        quality: String, 
-        depth: Int, 
-        seen: MutableSet<String>, 
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
-        if (depth > 15 || !seen.add(url)) return false
+    // ==========================================
+    // RECURSIVE LINK RESOLVER
+    // Mirrors Python's interactive_browser()
+    // ==========================================
 
-        if (isFinalDownloadUrl(url)) {
-            invokeCallback(url, quality, callback)
-            return true
+    private suspend fun resolveFinalLink(url: String, depth: Int): String? {
+        if (depth > 15) return null
+
+        // ── Is this already a media / direct-download URL? ──
+        if (isFinalDownloadUrl(url)) return url
+
+        val response = try {
+            scrapeSemaphore.withPermit { app.get(url, timeout = 15, referer = mainUrl) }
+        } catch (e: Exception) { return null }
+
+        if (!response.isSuccessful) return null
+
+        val html = response.text
+        val doc  = response.document
+
+        // ── Scan raw HTML for embedded final links (Python does this too) ──
+        val rawFinal = extractFinalFromHtml(html)
+        if (rawFinal != null) return rawFinal
+
+        // ── Choose extractor based on URL (your Python router) ──
+        val links: List<Pair<String, String>> =
+            if ("isaidub.guru" in url && "/download/" !in url) {
+                extractIsaidubLinks(doc, url).ifEmpty { extractDownloadLinks(doc, url) }
+            } else {
+                extractDownloadLinks(doc, url)
+            }
+
+        if (links.isEmpty()) return null
+
+        // ── Auto-pick "Download Server" first (Python priority) ──
+        val dlServer = links.firstOrNull { "download server" in it.first.lowercase() }
+        if (dlServer != null) return resolveFinalLink(dlServer.second, depth + 1)
+
+        // ── Auto-select if only one option ──
+        if (links.size == 1) return resolveFinalLink(links[0].second, depth + 1)
+
+        // ── Quality preference order (best → lowest) ──
+        val preferred = listOf("1080", "720", "480", "360")
+        for (q in preferred) {
+            val match = links.firstOrNull { q in it.first }
+            if (match != null) return resolveFinalLink(match.second, depth + 1)
         }
 
-        var found = false
-        try {
-            val headers = mapOf(
-                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-                "Referer" to mainUrl
-            )
-            
-            val response = scrapeSemaphore.withPermit { app.get(url, headers = headers, timeout = 15, allowRedirects = true) }
-            if (response.code == 404) return false
-            
-            if (isFinalDownloadUrl(response.url)) {
-                invokeCallback(response.url, quality, callback)
-                return true
-            }
-
-            val html = response.text
-            
-            val directMatch = Regex("""https?://[^\s"'<>]*download\.php\?[^\s"'<>]*""", RegexOption.IGNORE_CASE).find(html)?.value
-                ?: Regex("""https?://[^\s"'<>]*dl\.php\?[^\s"'<>]*""", RegexOption.IGNORE_CASE).find(html)?.value
-                ?: Regex("""https?://[^\s"'<>]*\.mp4[^"'\s]*""", RegexOption.IGNORE_CASE).find(html)?.value
-                
-            if (directMatch != null) {
-                invokeCallback(directMatch, quality, callback)
-                return true
-            }
-
-            val doc = response.document
-
-            // PATH 1: Download Servers
-            val downloadServers = doc.select("a[href]").filter { it.text().contains("download server", ignoreCase = true) }
-            if (downloadServers.isNotEmpty()) {
-                val srvUrl = fixUrl(downloadServers.first().attr("href"), url)
-                if (crawlNode(srvUrl, quality, depth + 1, seen, callback)) found = true
-                return found
-            }
-
-            // PATH 2: Quality/Part Folders
-            val folders = doc.select("div.f a[href]").filter { !it.text().contains("sample", ignoreCase = true) }
-            if (folders.isNotEmpty()) {
-                coroutineScope {
-                    folders.map { folder ->
-                        async {
-                            val fText = folder.text().lowercase()
-                            var newQuality = quality
-                            if (fText.contains("1080")) newQuality = "1080p"
-                            else if (fText.contains("720")) newQuality = "720p"
-                            else if (fText.contains("640") || fText.contains("480")) newQuality = "480p"
-                            else if (fText.contains("360") || fText.contains("320")) newQuality = "360p"
-                            else if (fText.contains("hd") && quality == "Auto") newQuality = "HD"
-
-                            val nextUrl = fixUrl(folder.attr("href"), url)
-                            if (crawlNode(nextUrl, newQuality, depth + 1, seen, callback)) found = true
-                        }
-                    }.awaitAll()
-                }
-                return found
-            }
-
-            // PATH 3: Fallback links
-            val fallbackLinks = doc.select("a[href]").filter {
-                val hrefLower = it.attr("href").lowercase()
-                listOf(".mp4", ".mkv", ".avi", "download.php?dl=", "dubpage.xyz", "dubmv.xyz", "dub.uptodub.ch").any { ext -> hrefLower.contains(ext) }
-            }
-            if (fallbackLinks.isNotEmpty()) {
-                val nextUrl = fixUrl(fallbackLinks.first().attr("href"), url)
-                if (crawlNode(nextUrl, quality, depth + 1, seen, callback)) found = true
-            }
-
-        } catch (e: Exception) {}
-        
-        return found
+        // ── Fallback: first available link ──
+        return resolveFinalLink(links[0].second, depth + 1)
     }
 
-    private fun fixUrl(href: String, baseUrl: String): String {
-        if (href.startsWith("http")) return href
-        if (href.startsWith("//")) return "https:$href"
-        
-        return try {
-            val hostUrl = "https://${URI(baseUrl).host}"
-            if (href.startsWith("/")) "$hostUrl$href" else "$hostUrl/$href"
-        } catch (e: Exception) {
-            mainUrl + (if (href.startsWith("/")) href else "/$href")
+    // ==========================================
+    // HELPERS  (mirror Python functions exactly)
+    // ==========================================
+
+    /** Python: is_final_download_url() */
+    private fun isFinalDownloadUrl(url: String): Boolean {
+        val low = url.lowercase()
+        if (low.endsWith(".mp4") || low.endsWith(".mkv") ||
+            low.endsWith(".avi") || low.endsWith(".mov") || low.endsWith(".webm")) return true
+        if ("download.php" in low || "dl.php" in low) return true
+        return false
+    }
+
+    /** Python: raw HTML regex scan inside interactive_browser() */
+    private fun extractFinalFromHtml(html: String): String? {
+        val dlPhp  = Regex("""https?://[^\s"'<>]*download\.php\?[^\s"'<>]*""", RegexOption.IGNORE_CASE).find(html)
+        val dlPhp2 = Regex("""https?://[^\s"'<>]*dl\.php\?[^\s"'<>]*""",       RegexOption.IGNORE_CASE).find(html)
+        val mp4    = Regex("""https?://[^\s"'<>]*\.mp4[^"'\s]*""",              RegexOption.IGNORE_CASE).find(html)
+        return dlPhp?.value ?: dlPhp2?.value ?: mp4?.value
+    }
+
+    /** Python: extract_isaidub_links() — divs with class "f" or "bf" */
+    private fun extractIsaidubLinks(doc: org.jsoup.nodes.Document, baseUrl: String): List<Pair<String, String>> {
+        val links = mutableListOf<Pair<String, String>>()
+        for (div in doc.select("div.f, div.bf")) {
+            val a    = div.selectFirst("a[href]") ?: continue
+            val text = a.text().trim()
+            val href = a.attr("href")
+            if (text.isBlank() || href.isBlank()) continue
+            if ("sample" in text.lowercase()) continue
+
+            val low = href.lowercase().trimEnd('/')
+            if (low.endsWith("-tamil-dubbed-movie") || low.endsWith("-tamil-dubbed")) continue
+            if ("?get-page=" in low || "/category/" in low) continue
+
+            val full = resolveUrl(baseUrl, href)
+            links.add(Pair(text, full))
+        }
+        return links.distinctBy { it.second }
+    }
+
+    /** Python: extract_download_links() */
+    private fun extractDownloadLinks(doc: org.jsoup.nodes.Document, baseUrl: String): List<Pair<String, String>> {
+        val links = mutableListOf<Pair<String, String>>()
+        for (a in doc.select("a[href]")) {
+            val text = a.text().trim()
+            val href = a.attr("href")
+            if (text.isBlank() || href.isBlank()) continue
+
+            val full = resolveUrl(baseUrl, href)
+            val low  = full.lowercase()
+            val lowT = text.lowercase()
+
+            when {
+                "download server" in lowT || "download" in lowT -> links.add(Pair(text, full))
+                low.endsWith(".mp4") || low.endsWith(".mkv") || low.endsWith(".avi") -> links.add(Pair(text, full))
+                "download.php" in low || "dl.php" in low -> links.add(Pair(text, full))
+                listOf("dubpage.xyz", "dubmv.xyz", "dub.uptodub.ch").any { it in low } -> links.add(Pair(text, full))
+            }
+        }
+        return links.distinctBy { it.second }
+    }
+
+    /** Resolve relative URLs against base */
+    private fun resolveUrl(base: String, href: String): String {
+        return when {
+            href.startsWith("http") -> href
+            href.startsWith("//")   -> "https:$href"
+            href.startsWith("/")    -> {
+                val uri = android.net.Uri.parse(base)
+                "${uri.scheme}://${uri.host}$href"
+            }
+            else -> {
+                val stripped = base.trimEnd('/').substringBeforeLast('/')
+                "$stripped/$href"
+            }
         }
     }
 }
