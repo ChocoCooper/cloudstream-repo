@@ -35,7 +35,7 @@ data class ScrapedMovie(val title: String, val link: String)
 class IsaidubProvider : MainAPI() {
 
     override var mainUrl        = "https://isaidub.guru"
-    override var name           = "IsaiDub"
+    override var name           = "DubsTamil"
     override val supportedTypes = setOf(TvType.Movie)
     override var lang           = "ta"
     override val hasMainPage    = true
@@ -257,10 +257,10 @@ class IsaidubProvider : MainAPI() {
             val votes = item.vote_count ?: 0
             val posterPath = item.poster_path
             val rDate = item.release_date ?: ""
-            val isUnreleased = rDate.isBlank() || rDate > "2026-06-15"
+            val isUnreleased = rDate.isBlank()
             
             // Apply strict filters: Valid Poster, Released, >1000 votes
-            if (posterPath.isNullOrBlank() || isUnreleased || votes < 1000) return@mapNotNull null
+            if (posterPath.isNullOrBlank() || isUnreleased || votes < 100) return@mapNotNull null
             
             val title  = item.title ?: return@mapNotNull null
             val year   = rDate.substringBefore("-")
@@ -410,10 +410,10 @@ class IsaidubProvider : MainAPI() {
                 val votes = item.vote_count ?: 0
                 val poster = item.poster_path
                 val rDate = item.release_date ?: ""
-                val isUnreleased = rDate.isBlank() || rDate > "2026-06-15"
+                val isUnreleased = rDate.isBlank()
                 
                 // Apply strict filters: Valid Poster, Released, >1000 votes
-                !poster.isNullOrBlank() && !isUnreleased && votes >= 1000
+                !poster.isNullOrBlank() && !isUnreleased
             }
             if (validResult != null) {
                 return Pair(validResult, usedYear)
