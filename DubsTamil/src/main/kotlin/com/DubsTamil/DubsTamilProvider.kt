@@ -13,7 +13,6 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import java.net.URLDecoder
 import java.net.URLEncoder
-import kotlin.random.Random
 
 // ============================================================
 // DATA CLASSES
@@ -34,36 +33,61 @@ data class ScrapedMovie(val title: String, val link: String)
 class IsaidubProvider : MainAPI() {
 
     override var mainUrl        = "https://isaidub.guru"
-    override var name           = "IsaiDub"
+    override var name           = "DubsTamil"
     override val supportedTypes = setOf(TvType.Movie)
     override var lang           = "ta"
     override val hasMainPage    = true
 
     // ── Semaphores ───────────────────────────────────────────
-    private val omdbSemaphore   = Semaphore(10)   // allow more parallel OMDB calls
+    private val omdbSemaphore   = Semaphore(10)
     private val scrapeSemaphore = Semaphore(5)
 
     // ── OMDB key pool ────────────────────────────────────────
     private val allOmdbKeys = mutableListOf(
-        "eb0c0475", "4b447405", "7776cbde", "ff28f90b", "6c3a2d45"
-    )
-    // Round-robin index for key rotation
-    private var keyIndex = 0
-
-    @Synchronized
-    private fun nextApiKey(): String {
-        if (allOmdbKeys.isEmpty()) return "eb0c0475"
-        val key = allOmdbKeys[keyIndex % allOmdbKeys.size]
-        keyIndex++
-        return key
-    }
+        "4b447405", "eb0c0475", "7776cbde", "ff28f90b", "6c3a2d45",
+        "b07b58c8", "ad04b643", "a95b5205", "777d9323", "2c2c3314",
+        "b5cff164", "89a9f57d", "73a9858a", "efbd8357"
+    ).distinct().toMutableList()
 
     @Synchronized
     private fun markKeyDead(key: String) {
         allOmdbKeys.remove(key)
+        // Reset pool if somehow all keys get exhausted
         if (allOmdbKeys.isEmpty()) {
-            allOmdbKeys.addAll(listOf("eb0c0475", "4b447405", "7776cbde", "ff28f90b", "6c3a2d45"))
+            allOmdbKeys.addAll(
+                listOf(
+                    "4b447405", "eb0c0475", "7776cbde", "ff28f90b", "6c3a2d45",
+                    "b07b58c8", "ad04b643", "a95b5205", "777d9323", "2c2c3314",
+                    "b5cff164", "89a9f57d", "73a9858a", "efbd8357"
+                ).distinct()
+            )
         }
+    }
+
+    // ── Robust OMDB Fetcher ──────────────────────────────────
+    private suspend fun fetchFromOmdb(urlBuilder: (String) -> String): String? {
+        val keysToTry = allOmdbKeys.toList() 
+        for (key in keysToTry) {
+            val url = urlBuilder(key)
+            try {
+                val resp = omdbSemaphore.withPermit { app.get(url, timeout = 5) }
+                when {
+                    resp.code == 401 || 
+                    resp.text.contains("Limit reached", ignoreCase = true) || 
+                    resp.text.contains("Invalid API key", ignoreCase = true) -> {
+                        markKeyDead(key)
+                        continue // Immediately rotate to the next key
+                    }
+                    resp.isSuccessful -> {
+                        if (resp.text.contains("\"Response\":\"True\"")) return resp.text
+                        else return null // Successful ping, but title doesn't exist
+                    }
+                }
+            } catch (e: Exception) {
+                continue // Rotate on network timeout or failure
+            }
+        }
+        return null
     }
 
     // ── Page cache ───────────────────────────────────────────
@@ -88,7 +112,6 @@ class IsaidubProvider : MainAPI() {
         val homePageLists = mutableListOf<HomePageList>()
 
         try {
-            // For yearly section, resolve the latest year URL first
             val targetUrl = if (sectionUrl.contains("yearly")) {
                 val doc = scrapeSemaphore.withPermit { app.get(sectionUrl, timeout = 15).document }
                 var resolved = ""
@@ -117,7 +140,7 @@ class IsaidubProvider : MainAPI() {
     }
 
     // ============================================================
-    // FETCH SECTION ITEMS  — parallel OMDB, movies only
+    // FETCH SECTION ITEMS
     // ============================================================
 
     private suspend fun fetchSectionItems(
@@ -133,14 +156,12 @@ class IsaidubProvider : MainAPI() {
             try {
                 val doc = scrapeSemaphore.withPermit { app.get(pageUrl, timeout = 15).document }
 
-                // Collect candidate links — filter TV shows at scrape level
                 val candidates = doc.select("div.f a").mapNotNull { a ->
                     val title = a.text().trim()
                     var link  = a.attr("href")
                     if (link.startsWith("/")) link = "$mainUrl$link"
                     val low = title.lowercase()
                     val lowL = link.lowercase()
-                    // Skip anything that looks like a series/episode
                     if (low.contains("web series") || lowL.contains("web-series") ||
                         low.contains("season")      || low.contains("episode") ||
                         low.contains("series")      || lowL.contains("series")) return@mapNotNull null
@@ -149,7 +170,6 @@ class IsaidubProvider : MainAPI() {
 
                 if (candidates.isEmpty()) break
 
-                // Parallel OMDB lookup for all candidates at once
                 val results = coroutineScope {
                     candidates.map { (rawTitle, link) ->
                         async {
@@ -159,7 +179,6 @@ class IsaidubProvider : MainAPI() {
                                 .trim()
                             val (omdb, resolvedYear) = fetchOmdbTitle(cleanTitle, sectionYear)
 
-                            // Only movies — skip series results from OMDB too
                             if (omdb == null) return@async null
                             if (omdb.Type?.lowercase() == "series") return@async null
                             val poster = omdb.Poster?.takeIf { it != "N/A" } ?: return@async null
@@ -199,22 +218,12 @@ class IsaidubProvider : MainAPI() {
     // ============================================================
 
     override suspend fun search(query: String): List<SearchResponse> {
-        var omdbJson: String? = null
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
+        
+        val omdbJson = fetchFromOmdb { apiKey ->
+            "https://www.omdbapi.com/?apikey=$apiKey&s=$encodedQuery&type=movie"
+        } ?: return emptyList()
 
-        try {
-            val apiKey = nextApiKey()
-            val url    = "https://www.omdbapi.com/?apikey=$apiKey&s=$encodedQuery&type=movie"
-            val resp   = omdbSemaphore.withPermit { app.get(url, timeout = 10) }
-            when {
-                resp.code == 401
-                || resp.text.contains("Limit reached",   ignoreCase = true)
-                || resp.text.contains("Invalid API key", ignoreCase = true) -> markKeyDead(apiKey)
-                resp.isSuccessful && resp.text.contains("\"Response\":\"True\"") -> omdbJson = resp.text
-            }
-        } catch (e: Exception) { }
-
-        if (omdbJson == null) return emptyList()
         val parsed = AppUtils.tryParseJson<OmdbSearchResponse>(omdbJson)
 
         return (parsed?.Search?.filter { !it.Poster.isNullOrBlank() && it.Poster != "N/A" } ?: emptyList())
@@ -222,11 +231,12 @@ class IsaidubProvider : MainAPI() {
                 val title  = item.Title  ?: return@mapNotNull null
                 val year   = item.Year?.replace(Regex("[^0-9]"), "") ?: ""
                 val poster = item.Poster ?: ""
-                // url and s are EMPTY here — filled during load()
+                
                 val t = URLEncoder.encode(title,  "UTF-8")
                 val y = URLEncoder.encode(year,   "UTF-8")
                 val p = URLEncoder.encode(poster, "UTF-8")
                 val data = "$mainUrl/synthetic_meta?t=$t&y=$y&p=$p&url=&s="
+                
                 newMovieSearchResponse(title, data) {
                     this.posterUrl = poster
                     this.year      = year.toIntOrNull()
@@ -235,7 +245,7 @@ class IsaidubProvider : MainAPI() {
     }
 
     // ============================================================
-    // LOAD — resolve movie page + fill plot
+    // LOAD
     // ============================================================
 
     override suspend fun load(url: String): LoadResponse? {
@@ -248,7 +258,6 @@ class IsaidubProvider : MainAPI() {
 
         if (title.isBlank()) return null
 
-        // Search flow: url is empty → find it + fetch plot simultaneously
         if (moviePageUrl.isBlank()) {
             val (pageUrl, plot) = coroutineScope {
                 val pageDeferred = async { findMoviePage(title, year) }
@@ -264,7 +273,6 @@ class IsaidubProvider : MainAPI() {
             synopsis     = plot
         }
 
-        // If synopsis still blank, fetch it
         if (synopsis.isBlank()) {
             val (omdb, _) = fetchOmdbTitle(title, year)
             synopsis = omdb?.Plot?.takeIf { it != "N/A" } ?: ""
@@ -285,7 +293,7 @@ class IsaidubProvider : MainAPI() {
     }
 
     // ============================================================
-    // LOAD LINKS — all available resolutions
+    // LOAD LINKS
     // ============================================================
 
     override suspend fun loadLinks(
@@ -319,7 +327,7 @@ class IsaidubProvider : MainAPI() {
     }
 
     // ============================================================
-    // FIND MOVIE PAGE — strict token match, must match year
+    // FIND MOVIE PAGE
     // ============================================================
 
     private suspend fun findMoviePage(title: String, year: String): String? {
@@ -331,7 +339,6 @@ class IsaidubProvider : MainAPI() {
         suspend fun processMovies(movies: List<ScrapedMovie>) {
             val targetTokens = tokenize("$title $year")
             for (movie in movies) {
-                // Year MUST be in the title string
                 if (year !in movie.title) continue
                 val siteTokens = tokenize(movie.title)
                 val score = targetTokens.intersect(siteTokens).size
@@ -344,13 +351,11 @@ class IsaidubProvider : MainAPI() {
         val (firstPageMovies, maxPage) = scrapePage(searchUrl)
         processMovies(firstPageMovies)
 
-        // If we already have a strong match (all tokens hit), stop early
         val targetTokenCount = tokenize("$title $year").size
         if ((bestMatch?.second ?: 0) >= targetTokenCount) {
             return bestMatch?.first?.link
         }
 
-        // Otherwise scan remaining pages in parallel
         if (maxPage > 1) {
             coroutineScope {
                 (2..minOf(maxPage, 10)).map { p ->
@@ -392,12 +397,11 @@ class IsaidubProvider : MainAPI() {
     // TOKEN HELPERS
     // ============================================================
 
-    /** Pure alphanumeric tokenizer — mirrors Python get_tokens() exactly */
     private fun tokenize(text: String): Set<String> =
         Regex("[a-z0-9]+").findAll(text.lowercase()).map { it.value }.toSet()
 
     // ============================================================
-    // OMDB — single title lookup with key rotation
+    // OMDB TITLE LOOKUP
     // ============================================================
 
     private suspend fun fetchOmdbTitle(
@@ -408,39 +412,24 @@ class IsaidubProvider : MainAPI() {
         val yearMatch = Regex("\\b(19|20)\\d{2}\\b").find(clean)
         val usedYear  = yearMatch?.value ?: fallbackYear
         val searchTitle = if (yearMatch != null) clean.replace(yearMatch.value, "").trim() else clean
+        val encoded = URLEncoder.encode(searchTitle, "UTF-8")
 
-        return try {
-            val encoded  = URLEncoder.encode(searchTitle, "UTF-8")
-            val apiKey   = nextApiKey()
-            val url      = if (usedYear.isNotBlank())
-                "https://www.omdbapi.com/?apikey=$apiKey&t=$encoded&y=$usedYear"
-            else
-                "https://www.omdbapi.com/?apikey=$apiKey&t=$encoded"
-
-            val resp = omdbSemaphore.withPermit { app.get(url, timeout = 5) }
-            when {
-                resp.code == 401
-                || resp.text.contains("Limit reached",   ignoreCase = true)
-                || resp.text.contains("Invalid API key", ignoreCase = true) -> {
-                    markKeyDead(apiKey)
-                    Pair(null, usedYear)
-                }
-                resp.isSuccessful && resp.text.contains("\"Response\":\"True\"") -> {
-                    val parsed = AppUtils.tryParseJson<OmdbTitleResponse>(resp.text)
-                    if (parsed?.Poster != null && parsed.Poster != "N/A")
-                        Pair(parsed, usedYear)
-                    else
-                        Pair(null, usedYear)
-                }
-                else -> Pair(null, usedYear)
-            }
-        } catch (e: Exception) {
-            Pair(null, usedYear)
+        val omdbJson = fetchFromOmdb { apiKey ->
+            if (usedYear.isNotBlank()) "https://www.omdbapi.com/?apikey=$apiKey&t=$encoded&y=$usedYear"
+            else "https://www.omdbapi.com/?apikey=$apiKey&t=$encoded"
         }
+
+        if (omdbJson != null) {
+            val parsed = AppUtils.tryParseJson<OmdbTitleResponse>(omdbJson)
+            if (parsed?.Poster != null && parsed.Poster != "N/A") {
+                return Pair(parsed, usedYear)
+            }
+        }
+        return Pair(null, usedYear)
     }
 
     // ============================================================
-    // RESOLVE ALL LINKS — collect every quality available
+    // RESOLVE ALL LINKS
     // ============================================================
 
     private suspend fun resolveAllLinks(url: String, depth: Int): List<Pair<String, String>> {
@@ -455,11 +444,9 @@ class IsaidubProvider : MainAPI() {
         val html = response.text
         val doc  = response.document
 
-        // Check raw HTML for a single embedded final link
         val rawFinal = extractFinalFromHtml(html)
         if (rawFinal != null) return listOf(Pair(labelFromUrl(rawFinal), rawFinal))
 
-        // Route: isaidub folder page vs download page
         val links =
             if ("isaidub.guru" in url && "/download/" !in url)
                 extractIsaidubLinks(doc, url).ifEmpty { extractDownloadLinks(doc, url) }
@@ -468,14 +455,11 @@ class IsaidubProvider : MainAPI() {
 
         if (links.isEmpty()) return emptyList()
 
-        // If there's a "Download Server" link, follow it (single path)
         val dlServer = links.firstOrNull { "download server" in it.first.lowercase() }
         if (dlServer != null) return resolveAllLinks(dlServer.second, depth + 1)
 
-        // If only one link, follow it
         if (links.size == 1) return resolveAllLinks(links[0].second, depth + 1)
 
-        // Multiple quality links — resolve all in parallel
         val finalLinks = coroutineScope {
             links.map { (label, linkUrl) ->
                 async {
