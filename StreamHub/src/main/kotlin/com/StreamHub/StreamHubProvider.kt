@@ -3,6 +3,8 @@ package com.streamhub
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.utils.AppUtils.parseJson
+import java.net.URLDecoder
 
 class StreamHubProvider : MainAPI() {
     override var mainUrl = "https://api.xyra.stream"
@@ -26,7 +28,7 @@ class StreamHubProvider : MainAPI() {
             val id = movie.id?.toString() ?: return@mapNotNull null
             val posterUrl = movie.posterPath?.let { "https://image.tmdb.org/t/p/w500$it" }
             
-            // FIX: Pass the absolute TMDB URL so Cloudstream doesn't attach mainUrl to it
+            // Pass the absolute TMDB URL so Cloudstream doesn't attach mainUrl to it
             val fullTmdbUrl = "$tmdbBaseUrl/movie/$id"
 
             newMovieSearchResponse(title, url = fullTmdbUrl, type = TvType.Movie) {
@@ -38,7 +40,7 @@ class StreamHubProvider : MainAPI() {
 
     // --- Media Details Implementation ---
     override suspend fun load(url: String): LoadResponse? {
-        // FIX: 'url' is now a valid web link (e.g., "https://api.tmdb.org/3/movie/24428"). We just append the key.
+        // 'url' is a valid web link (e.g., "https://api.tmdb.org/3/movie/24428"). We just append the key.
         val detailsUrl = "$url?api_key=$tmdbApiKey"
         val details = app.get(detailsUrl).parsed<TmdbDetailsResponse>()
         val title = details.title ?: return null
@@ -75,6 +77,30 @@ class StreamHubProvider : MainAPI() {
             val providerName = stream.name ?: "Unknown"
             val isM3u8 = link.contains(".m3u8", ignoreCase = true)
 
+            // 1. Setup default headers to spoof a real browser
+            var referer = ""
+            val requestHeaders = mutableMapOf(
+                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
+            )
+
+            // 2. Parse Xyra's embedded headers if they exist in the URL
+            if (link.contains("headers=")) {
+                try {
+                    // Isolate the URL-encoded JSON string
+                    val encodedHeaders = link.substringAfter("headers=").substringBefore("&")
+                    val decodedHeaders = URLDecoder.decode(encodedHeaders, "UTF-8")
+                    
+                    // Parse the JSON into a Map and add it to our requestHeaders
+                    val parsedHeaders = parseJson<Map<String, String>>(decodedHeaders)
+                    requestHeaders.putAll(parsedHeaders)
+                    
+                    // Explicitly set the referer if the parsed headers contained one
+                    referer = requestHeaders["referer"] ?: requestHeaders["Referer"] ?: ""
+                } catch (e: Exception) {
+                    // Silently ignore parsing errors and proceed with default headers
+                }
+            }
+
             val mappedQuality = when {
                 qualityInfo.contains("1080p") -> Qualities.P1080.value
                 qualityInfo.contains("720p") -> Qualities.P720.value
@@ -88,9 +114,10 @@ class StreamHubProvider : MainAPI() {
                     source = this.name,
                     name = "$providerName - $qualityInfo",
                     url = link,
-                    referer = "",
+                    referer = referer,
                     quality = mappedQuality,
-                    isM3u8 = isM3u8
+                    isM3u8 = isM3u8,
+                    headers = requestHeaders // Injecting the parsed headers here
                 )
             )
         }
