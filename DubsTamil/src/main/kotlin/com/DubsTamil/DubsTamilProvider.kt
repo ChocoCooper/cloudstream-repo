@@ -248,7 +248,7 @@ class IsaidubProvider : MainAPI() {
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
         
         val jsonResponse = fetchFromTmdb { apiKey ->
-            "https://api.themoviedb.org/3/search/movie?api_key=$apiKey&query=$encodedQuery"
+            "https://api.tmdb.org/3/search/movie?api_key=$apiKey&query=$encodedQuery"
         } ?: return emptyList()
 
         val parsed = AppUtils.tryParseJson<TmdbSearchResponse>(jsonResponse)
@@ -397,7 +397,7 @@ class IsaidubProvider : MainAPI() {
         val encoded = URLEncoder.encode(searchTitle, "UTF-8")
 
         val jsonResponse = fetchFromTmdb { apiKey ->
-            var url = "https://api.themoviedb.org/3/search/movie?api_key=$apiKey&query=$encoded"
+            var url = "https://api.tmdb.org/3/search/movie?api_key=$apiKey&query=$encoded"
             if (usedYear.isNotBlank()) {
                 url += "&primary_release_year=$usedYear"
             }
