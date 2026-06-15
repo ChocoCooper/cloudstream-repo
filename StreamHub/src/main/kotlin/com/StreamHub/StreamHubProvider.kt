@@ -74,8 +74,10 @@ class StreamHubProvider : MainAPI() {
                 else -> Qualities.Unknown.value
             }
 
+            // Tell the compiler to ignore the deprecation flag and just compile it
+            @Suppress("DEPRECATION", "DEPRECATION_ERROR")
             callback.invoke(
-                newExtractorLink(
+                ExtractorLink(
                     source = this.name,
                     name = "$providerName - $qualityInfo",
                     url = link,
