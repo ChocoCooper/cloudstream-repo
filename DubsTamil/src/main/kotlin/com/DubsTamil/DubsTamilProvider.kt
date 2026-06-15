@@ -15,14 +15,16 @@ import java.net.URLDecoder
 import java.net.URLEncoder
 
 // ============================================================
-// DATA CLASSES
+// DATA CLASSES (TMDB)
 // ============================================================
 
-data class OmdbSearchResponse(val Search: List<OmdbSearchResult>?, val Response: String?)
-data class OmdbSearchResult(val Title: String?, val Year: String?, val Poster: String?)
-data class OmdbTitleResponse(
-    val Title: String?, val Year: String?, val Poster: String?,
-    val Plot: String?, val Type: String?, val Response: String?
+data class TmdbSearchResponse(val results: List<TmdbMovie>?)
+data class TmdbMovie(
+    val title: String?,
+    val release_date: String?,
+    val poster_path: String?,
+    val overview: String?,
+    val vote_count: Int?
 )
 data class ScrapedMovie(val title: String, val link: String)
 
@@ -33,53 +35,78 @@ data class ScrapedMovie(val title: String, val link: String)
 class IsaidubProvider : MainAPI() {
 
     override var mainUrl        = "https://isaidub.guru"
-    override var name           = "DubsTamil"
+    override var name           = "IsaiDub"
     override val supportedTypes = setOf(TvType.Movie)
     override var lang           = "ta"
     override val hasMainPage    = true
 
     // ── Semaphores ───────────────────────────────────────────
-    private val omdbSemaphore   = Semaphore(10)
+    private val tmdbSemaphore   = Semaphore(15) // Boosted for simultaneous multi-key throughput
     private val scrapeSemaphore = Semaphore(5)
 
-    // ── OMDB key pool ────────────────────────────────────────
-    private val allOmdbKeys = mutableListOf(
-        "4b447405", "eb0c0475", "7776cbde", "ff28f90b", "6c3a2d45",
-        "b07b58c8", "ad04b643", "a95b5205", "777d9323", "2c2c3314",
-        "b5cff164", "89a9f57d", "73a9858a", "efbd8357"
+    // ── TMDB key pool ────────────────────────────────────────
+    private val allTmdbKeys = mutableListOf(
+        "fb7bb23f03b6994dafc674c074d01761", "e55425032d3d0f371fc776f302e7c09b",
+        "8301a21598f8b45668d5711a814f01f6", "8cf43ad9c085135b9479ad5cf6bbcbda",
+        "da63548086e399ffc910fbc08526df05", "13e53ff644a8bd4ba37b3e1044ad24f3",
+        "269890f657dddf4635473cf4cf456576", "a2f888b27315e62e471b2d587048f32e",
+        "8476a7ab80ad76f0936744df0430e67c", "5622cafbfe8f8cfe358a29c53e19bba0",
+        "ae4bd1b6fce2a5648671bfc171d15ba4", "257654f35e3dff105574f97fb4b97035",
+        "2f4038e83265214a0dcd6ec2eb3276f5", "9e43f45f94705cc8e1d5a0400d19a7b7",
+        "af6887753365e14160254ac7f4345dd2", "06f10fc8741a672af455421c239a1ffc",
+        "09ad8ace66eec34302943272db0e8d2c"
     ).distinct().toMutableList()
+
+    private var keyIndex = 0
+
+    // Shifts the starting key index so simultaneous calls don't all hit the same key
+    @Synchronized
+    private fun getKeysRotated(): List<String> {
+        if (allTmdbKeys.isEmpty()) return emptyList()
+        val list = mutableListOf<String>()
+        for (i in allTmdbKeys.indices) {
+            list.add(allTmdbKeys[(keyIndex + i) % allTmdbKeys.size])
+        }
+        keyIndex = (keyIndex + 1) % allTmdbKeys.size
+        return list
+    }
 
     @Synchronized
     private fun markKeyDead(key: String) {
-        allOmdbKeys.remove(key)
-        if (allOmdbKeys.isEmpty()) {
-            allOmdbKeys.addAll(
+        allTmdbKeys.remove(key)
+        if (allTmdbKeys.isEmpty()) {
+            allTmdbKeys.addAll(
                 listOf(
-                    "4b447405", "eb0c0475", "7776cbde", "ff28f90b", "6c3a2d45",
-                    "b07b58c8", "ad04b643", "a95b5205", "777d9323", "2c2c3314",
-                    "b5cff164", "89a9f57d", "73a9858a", "efbd8357"
+                    "fb7bb23f03b6994dafc674c074d01761", "e55425032d3d0f371fc776f302e7c09b",
+                    "8301a21598f8b45668d5711a814f01f6", "8cf43ad9c085135b9479ad5cf6bbcbda",
+                    "da63548086e399ffc910fbc08526df05", "13e53ff644a8bd4ba37b3e1044ad24f3",
+                    "269890f657dddf4635473cf4cf456576", "a2f888b27315e62e471b2d587048f32e",
+                    "8476a7ab80ad76f0936744df0430e67c", "5622cafbfe8f8cfe358a29c53e19bba0",
+                    "ae4bd1b6fce2a5648671bfc171d15ba4", "257654f35e3dff105574f97fb4b97035",
+                    "2f4038e83265214a0dcd6ec2eb3276f5", "9e43f45f94705cc8e1d5a0400d19a7b7",
+                    "af6887753365e14160254ac7f4345dd2", "06f10fc8741a672af455421c239a1ffc",
+                    "09ad8ace66eec34302943272db0e8d2c"
                 ).distinct()
             )
         }
     }
 
-    // ── Robust OMDB Fetcher ──────────────────────────────────
-    private suspend fun fetchFromOmdb(urlBuilder: (String) -> String): String? {
-        val keysToTry = allOmdbKeys.toList() 
+    // ── Robust TMDB Fetcher ──────────────────────────────────
+    private suspend fun fetchFromTmdb(urlBuilder: (String) -> String): String? {
+        val keysToTry = getKeysRotated() 
         for (key in keysToTry) {
             val url = urlBuilder(key)
             try {
-                val resp = omdbSemaphore.withPermit { app.get(url, timeout = 5) }
+                val resp = tmdbSemaphore.withPermit { app.get(url, timeout = 5) }
                 when {
                     resp.code == 401 || 
-                    resp.text.contains("Limit reached", ignoreCase = true) || 
-                    resp.text.contains("Invalid API key", ignoreCase = true) -> {
+                    resp.text.contains("Invalid API key", ignoreCase = true) ||
+                    resp.text.contains("rate limit", ignoreCase = true) -> {
                         markKeyDead(key)
                         continue 
                     }
                     resp.isSuccessful -> {
-                        if (resp.text.contains("\"Response\":\"True\"")) return resp.text
-                        else return null 
+                        return resp.text
                     }
                 }
             } catch (e: Exception) {
@@ -176,12 +203,13 @@ class IsaidubProvider : MainAPI() {
                                 .replace("isaiDub.me", "")
                                 .replace(Regex("-"), " ")
                                 .trim()
-                            val (omdb, resolvedYear) = fetchOmdbTitle(cleanTitle, sectionYear)
+                            
+                            val (tmdb, resolvedYear) = fetchTmdbTitle(cleanTitle, sectionYear)
 
-                            if (omdb == null) return@async null
-                            if (omdb.Type?.lowercase() == "series") return@async null
-                            val poster = omdb.Poster?.takeIf { it != "N/A" } ?: return@async null
-                            val plot   = omdb.Plot?.takeIf   { it != "N/A" } ?: ""
+                            if (tmdb == null) return@async null
+                            
+                            val poster = tmdb.poster_path?.let { "https://image.tmdb.org/t/p/w500$it" } ?: return@async null
+                            val plot   = tmdb.overview ?: ""
 
                             val t = URLEncoder.encode(cleanTitle,   "UTF-8")
                             val y = URLEncoder.encode(resolvedYear, "UTF-8")
@@ -219,28 +247,37 @@ class IsaidubProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
         
-        val omdbJson = fetchFromOmdb { apiKey ->
-            "https://www.omdbapi.com/?apikey=$apiKey&s=$encodedQuery&type=movie"
+        val jsonResponse = fetchFromTmdb { apiKey ->
+            "https://api.themoviedb.org/3/search/movie?api_key=$apiKey&query=$encodedQuery"
         } ?: return emptyList()
 
-        val parsed = AppUtils.tryParseJson<OmdbSearchResponse>(omdbJson)
+        val parsed = AppUtils.tryParseJson<TmdbSearchResponse>(jsonResponse)
 
-        return (parsed?.Search?.filter { !it.Poster.isNullOrBlank() && it.Poster != "N/A" } ?: emptyList())
-            .mapNotNull { item ->
-                val title  = item.Title  ?: return@mapNotNull null
-                val year   = item.Year?.replace(Regex("[^0-9]"), "") ?: ""
-                val poster = item.Poster ?: ""
-                
-                val t = URLEncoder.encode(title,  "UTF-8")
-                val y = URLEncoder.encode(year,   "UTF-8")
-                val p = URLEncoder.encode(poster, "UTF-8")
-                val data = "$mainUrl/synthetic_meta?t=$t&y=$y&p=$p&url=&s="
-                
-                newMovieSearchResponse(title, data) {
-                    this.posterUrl = poster
-                    this.year      = year.toIntOrNull()
-                }
+        return (parsed?.results ?: emptyList()).mapNotNull { item ->
+            val votes = item.vote_count ?: 0
+            val posterPath = item.poster_path
+            val rDate = item.release_date ?: ""
+            val isUnreleased = rDate.isBlank() || rDate > "2026-06-15"
+            
+            // Apply strict filters: Valid Poster, Released, >1000 votes
+            if (posterPath.isNullOrBlank() || isUnreleased || votes < 1000) return@mapNotNull null
+            
+            val title  = item.title ?: return@mapNotNull null
+            val year   = rDate.substringBefore("-")
+            val poster = "https://image.tmdb.org/t/p/w500$posterPath"
+            val plot   = item.overview ?: ""
+            
+            val t = URLEncoder.encode(title,  "UTF-8")
+            val y = URLEncoder.encode(year,   "UTF-8")
+            val p = URLEncoder.encode(poster, "UTF-8")
+            val s = URLEncoder.encode(plot,   "UTF-8")
+            val data = "$mainUrl/synthetic_meta?t=$t&y=$y&p=$p&url=&s=$s"
+            
+            newMovieSearchResponse(title, data) {
+                this.posterUrl = poster
+                this.year      = year.toIntOrNull()
             }
+        }
     }
 
     // ============================================================
@@ -266,8 +303,8 @@ class IsaidubProvider : MainAPI() {
                 val pageDeferred = async { findMoviePage(title, year) }
                 val plotDeferred = async {
                     if (synopsis.isBlank()) {
-                        val (omdb, _) = fetchOmdbTitle(title, year)
-                        omdb?.Plot?.takeIf { it != "N/A" } ?: ""
+                        val (tmdb, _) = fetchTmdbTitle(title, year)
+                        tmdb?.overview ?: ""
                     } else synopsis
                 }
                 Pair(pageDeferred.await(), plotDeferred.await())
@@ -277,8 +314,8 @@ class IsaidubProvider : MainAPI() {
         }
 
         if (synopsis.isBlank()) {
-            val (omdb, _) = fetchOmdbTitle(title, year)
-            synopsis = omdb?.Plot?.takeIf { it != "N/A" } ?: ""
+            val (tmdb, _) = fetchTmdbTitle(title, year)
+            synopsis = tmdb?.overview ?: ""
         }
 
         val dataUrl = "$mainUrl/synthetic_meta" +
@@ -332,13 +369,12 @@ class IsaidubProvider : MainAPI() {
             callback.invoke(
                 newExtractorLink(
                     source = this.name,
-                    name   = "${this.name} ($label)", 
+                    name   = "${this.name} ($label)",
                     url    = finalUrl,
                     type   = if (finalUrl.contains(".m3u8")) ExtractorLinkType.M3U8
                              else ExtractorLinkType.VIDEO,
                 ) {
                     this.referer = mainUrl
-                    // By setting quality to Unknown, Cloudstream won't append duplicate badges
                     this.quality = Qualities.Unknown.value 
                 }
             )
@@ -347,7 +383,47 @@ class IsaidubProvider : MainAPI() {
     }
 
     // ============================================================
-    // FIND MOVIE PAGE
+    // TMDB TITLE LOOKUP
+    // ============================================================
+
+    private suspend fun fetchTmdbTitle(
+        rawTitle: String,
+        fallbackYear: String = ""
+    ): Pair<TmdbMovie?, String> {
+        val clean     = rawTitle.replace("isaiDub.me", "").replace(Regex("-"), " ").trim()
+        val yearMatch = Regex("\\b(19|20)\\d{2}\\b").find(clean)
+        val usedYear  = yearMatch?.value ?: fallbackYear
+        val searchTitle = if (yearMatch != null) clean.replace(yearMatch.value, "").trim() else clean
+        val encoded = URLEncoder.encode(searchTitle, "UTF-8")
+
+        val jsonResponse = fetchFromTmdb { apiKey ->
+            var url = "https://api.themoviedb.org/3/search/movie?api_key=$apiKey&query=$encoded"
+            if (usedYear.isNotBlank()) {
+                url += "&primary_release_year=$usedYear"
+            }
+            url
+        }
+
+        if (jsonResponse != null) {
+            val parsed = AppUtils.tryParseJson<TmdbSearchResponse>(jsonResponse)
+            val validResult = parsed?.results?.firstOrNull { item ->
+                val votes = item.vote_count ?: 0
+                val poster = item.poster_path
+                val rDate = item.release_date ?: ""
+                val isUnreleased = rDate.isBlank() || rDate > "2026-06-15"
+                
+                // Apply strict filters: Valid Poster, Released, >1000 votes
+                !poster.isNullOrBlank() && !isUnreleased && votes >= 1000
+            }
+            if (validResult != null) {
+                return Pair(validResult, usedYear)
+            }
+        }
+        return Pair(null, usedYear)
+    }
+
+    // ============================================================
+    // FIND MOVIE PAGE (Fuzzy Token Match)
     // ============================================================
 
     private suspend fun findMoviePage(title: String, year: String): String? {
@@ -422,34 +498,6 @@ class IsaidubProvider : MainAPI() {
         Regex("[a-z0-9]+").findAll(text.lowercase()).map { it.value }.toSet()
 
     // ============================================================
-    // OMDB TITLE LOOKUP
-    // ============================================================
-
-    private suspend fun fetchOmdbTitle(
-        rawTitle: String,
-        fallbackYear: String = ""
-    ): Pair<OmdbTitleResponse?, String> {
-        val clean     = rawTitle.replace("isaiDub.me", "").replace(Regex("-"), " ").trim()
-        val yearMatch = Regex("\\b(19|20)\\d{2}\\b").find(clean)
-        val usedYear  = yearMatch?.value ?: fallbackYear
-        val searchTitle = if (yearMatch != null) clean.replace(yearMatch.value, "").trim() else clean
-        val encoded = URLEncoder.encode(searchTitle, "UTF-8")
-
-        val omdbJson = fetchFromOmdb { apiKey ->
-            if (usedYear.isNotBlank()) "https://www.omdbapi.com/?apikey=$apiKey&t=$encoded&y=$usedYear"
-            else "https://www.omdbapi.com/?apikey=$apiKey&t=$encoded"
-        }
-
-        if (omdbJson != null) {
-            val parsed = AppUtils.tryParseJson<OmdbTitleResponse>(omdbJson)
-            if (parsed?.Poster != null && parsed.Poster != "N/A") {
-                return Pair(parsed, usedYear)
-            }
-        }
-        return Pair(null, usedYear)
-    }
-
-    // ============================================================
     // RESOLVE ALL LINKS
     // ============================================================
 
@@ -502,11 +550,9 @@ class IsaidubProvider : MainAPI() {
     private fun extractResolution(text: String, url: String): String {
         val combined = (text + url).lowercase()
         
-        // 1. Try to find explicit WxH pattern directly
         val exactMatch = Regex("""\d{3,4}x\d{3,4}""").find(combined)
         if (exactMatch != null) return exactMatch.value
 
-        // 2. Fallbacks mapping common strings to their true resolutions
         return when {
             "1080" in combined || "1920" in combined -> "1920x1080"
             "720"  in combined || "1280" in combined -> "1280x720"
