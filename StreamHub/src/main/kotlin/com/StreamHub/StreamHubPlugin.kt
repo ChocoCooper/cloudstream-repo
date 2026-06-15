@@ -5,7 +5,7 @@ import com.lagradost.cloudstream3.plugins.Plugin
 import android.content.Context
 
 @CloudstreamPlugin
-class StreamHubPlugin : Plugin() { 
+class StreamHubPlugin: Plugin() { 
     override fun load(context: Context) {
         registerMainAPI(StreamHubProvider())
     }
