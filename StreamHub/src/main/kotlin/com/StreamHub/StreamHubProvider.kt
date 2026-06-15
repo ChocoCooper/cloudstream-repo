@@ -1,8 +1,8 @@
-package com.streamhub // This MUST match the plugin file
+package com.streamhub
 
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.* // Resolves ExtractorLink, Qualities, and newExtractorLink
+import com.lagradost.cloudstream3.utils.*
 
 class StreamHubProvider : MainAPI() {
     override var mainUrl = "https://api.xyra.stream"
@@ -25,8 +25,11 @@ class StreamHubProvider : MainAPI() {
             val title = movie.title ?: return@mapNotNull null
             val id = movie.id?.toString() ?: return@mapNotNull null
             val posterUrl = movie.posterPath?.let { "https://image.tmdb.org/t/p/w500$it" }
+            
+            // FIX: Pass the absolute TMDB URL so Cloudstream doesn't attach mainUrl to it
+            val fullTmdbUrl = "$tmdbBaseUrl/movie/$id"
 
-            newMovieSearchResponse(title, url = id, type = TvType.Movie) {
+            newMovieSearchResponse(title, url = fullTmdbUrl, type = TvType.Movie) {
                 this.posterUrl = posterUrl
                 this.year = movie.releaseDate?.substringBefore("-")?.toIntOrNull()
             }
@@ -35,17 +38,21 @@ class StreamHubProvider : MainAPI() {
 
     // --- Media Details Implementation ---
     override suspend fun load(url: String): LoadResponse? {
-        val detailsUrl = "$tmdbBaseUrl/movie/$url?api_key=$tmdbApiKey"
+        // FIX: 'url' is now a valid web link (e.g., "https://api.tmdb.org/3/movie/24428"). We just append the key.
+        val detailsUrl = "$url?api_key=$tmdbApiKey"
         val details = app.get(detailsUrl).parsed<TmdbDetailsResponse>()
         val title = details.title ?: return null
 
-        return newMovieLoadResponse(title, url, TvType.Movie, url) {
+        // We still need just the ID for Xyra, so we isolate the number at the end of the URL string
+        val tmdbId = url.substringAfterLast("/")
+
+        // Pass the isolated tmdbId as the 4th parameter so loadLinks receives only the number
+        return newMovieLoadResponse(title, url, TvType.Movie, tmdbId) {
             this.posterUrl = details.posterPath?.let { "https://image.tmdb.org/t/p/w500$it" }
             this.backgroundPosterUrl = details.backdropPath?.let { "https://image.tmdb.org/t/p/w1280$it" }
             this.year = details.releaseDate?.substringBefore("-")?.toIntOrNull()
             this.plot = details.plot 
             this.tags = details.genres?.mapNotNull { it.name }
-            // Removed the score assignment entirely to fix the Double vs Score type mismatch
         }
     }
 
@@ -56,6 +63,7 @@ class StreamHubProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        // 'data' is the clean TMDB ID we passed from load()
         val streamUrl = "$mainUrl/v1/streamhub/streams?api_key=$xyraApiKey&tmdb_id=$data"
         val response = app.get(streamUrl).parsed<XyraResponse>()
 
@@ -74,7 +82,6 @@ class StreamHubProvider : MainAPI() {
                 else -> Qualities.Unknown.value
             }
 
-            // Tell the compiler to ignore the deprecation flag and just compile it
             @Suppress("DEPRECATION", "DEPRECATION_ERROR")
             callback.invoke(
                 ExtractorLink(
