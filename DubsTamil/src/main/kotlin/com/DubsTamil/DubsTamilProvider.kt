@@ -148,10 +148,10 @@ class IsaidubProvider : MainAPI() {
                 source = name,
                 name   = name,
                 url    = finalUrl,
+                type   = if (finalUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
             ) {
                 this.referer  = mainUrl
                 this.quality  = Qualities.Unknown.value
-                this.isM3u8   = finalUrl.contains(".m3u8")
             }
         )
         return true
