@@ -308,12 +308,10 @@ class IsaidubProvider : MainAPI() {
         
         val moviePageUrl: String
 
-        // Check if data is our synthetic meta or a direct URL
         if (data.contains("synthetic_meta")) {
             val uri = android.net.Uri.parse(data)
             val parsedUrl = URLDecoder.decode(uri.getQueryParameter("url") ?: "", "UTF-8")
             
-            // Self-healing fallback: If intent cached the unresolved search URL, fetch it now.
             if (parsedUrl.isBlank()) {
                 val title = URLDecoder.decode(uri.getQueryParameter("t") ?: "", "UTF-8")
                 val year  = URLDecoder.decode(uri.getQueryParameter("y") ?: "", "UTF-8")
@@ -333,8 +331,8 @@ class IsaidubProvider : MainAPI() {
         links.forEach { (label, finalUrl) ->
             callback.invoke(
                 newExtractorLink(
-                    source = name,
-                    name   = "Isaidub", // Removed label string to prevent duplicate quality naming
+                    source = this.name,
+                    name   = this.name,
                     url    = finalUrl,
                     type   = if (finalUrl.contains(".m3u8")) ExtractorLinkType.M3U8
                              else ExtractorLinkType.VIDEO,
@@ -356,9 +354,11 @@ class IsaidubProvider : MainAPI() {
 
         val searchUrl = "$mainUrl/tamil-$year-dubbed-movies/"
         var bestMatch: Pair<ScrapedMovie, Int>? = null
+        
+        val targetTokens = tokenize("$title $year")
+        val targetTokenCount = targetTokens.size
 
         suspend fun processMovies(movies: List<ScrapedMovie>) {
-            val targetTokens = tokenize("$title $year")
             for (movie in movies) {
                 if (year !in movie.title) continue
                 val siteTokens = tokenize(movie.title)
@@ -372,11 +372,12 @@ class IsaidubProvider : MainAPI() {
         val (firstPageMovies, maxPage) = scrapePage(searchUrl)
         processMovies(firstPageMovies)
 
-        val targetTokenCount = tokenize("$title $year").size
+        // Stop early ONLY if we get a perfect intersection match
         if ((bestMatch?.second ?: 0) >= targetTokenCount) {
             return bestMatch?.first?.link
         }
 
+        // If not a perfect match, keep searching all available pages to find highest possible score
         if (maxPage > 1) {
             coroutineScope {
                 (2..minOf(maxPage, 10)).map { p ->
@@ -385,6 +386,7 @@ class IsaidubProvider : MainAPI() {
             }.forEach { processMovies(it) }
         }
 
+        // Return whatever movie accumulated the highest token match score overall
         return bestMatch?.first?.link
     }
 
@@ -415,7 +417,7 @@ class IsaidubProvider : MainAPI() {
     }
 
     // ============================================================
-    // TOKEN HELPERS
+    // TOKEN HELPERS (Pure Alphanumeric Extraction)
     // ============================================================
 
     private fun tokenize(text: String): Set<String> =
@@ -559,10 +561,14 @@ class IsaidubProvider : MainAPI() {
             val href = a.attr("href")
             if (text.isBlank() || href.isBlank()) return@mapNotNull null
             if ("sample" in text.lowercase()) return@mapNotNull null
-            val low = href.lowercase().trimEnd('/')
-            if (low.endsWith("-tamil-dubbed-movie") || low.endsWith("-tamil-dubbed")) return@mapNotNull null
+            
+            val fullUrl = resolveUrl(baseUrl, href)
+            val low = fullUrl.lowercase().trimEnd('/')
+            
             if ("?get-page=" in low || "/category/" in low) return@mapNotNull null
-            Pair(text, resolveUrl(baseUrl, href))
+            if (low == baseUrl.lowercase().trimEnd('/')) return@mapNotNull null
+            
+            Pair(text, fullUrl)
         }.distinctBy { it.second }
 
     private fun extractDownloadLinks(
