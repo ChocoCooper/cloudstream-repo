@@ -1,4 +1,4 @@
-package com.StreamHub // This MUST match the plugin file
+package com.streamhub // This MUST match the plugin file
 
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
