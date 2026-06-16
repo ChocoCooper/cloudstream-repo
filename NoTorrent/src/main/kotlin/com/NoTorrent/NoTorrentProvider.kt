@@ -1,4 +1,4 @@
-package com.notorrent
+package com.NoTorrent
 
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
@@ -6,7 +6,7 @@ import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import java.net.URLDecoder
 
-class StreamHubProvider : MainAPI() {
+class NoTorrentProvider : MainAPI() { // <-- Fixed the class name here!
     override var mainUrl = "https://api.xyra.stream"
     override var name = "NoTorrent"
     override val hasMainPage = false
