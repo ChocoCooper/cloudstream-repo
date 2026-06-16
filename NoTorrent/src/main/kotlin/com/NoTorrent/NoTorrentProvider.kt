@@ -6,7 +6,7 @@ import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import java.net.URLDecoder
 
-class NoTorrentProvider : MainAPI() { // <-- Fixed the class name here!
+class NoTorrentProvider : MainAPI() {
     override var mainUrl = "https://api.xyra.stream"
     override var name = "NoTorrent"
     override val hasMainPage = false
@@ -54,14 +54,36 @@ class NoTorrentProvider : MainAPI() { // <-- Fixed the class name here!
         }
     }
 
-    // --- Streaming Links Implementation ---
+    // --- Streaming Links & Subtitles Implementation ---
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // Updated endpoint to explicitly hit 'notorrent'
+        
+        // 1. Fetch Subtitles from WyzieSubs
+        try {
+            // Wyzie endpoint that accepts the TMDB ID directly
+            val wyzieUrl = "https://sub.wyzie.io/search?id=$data"
+            val wyzieResponse = app.get(wyzieUrl).parsed<WyzieSubtitleResponse>()
+            
+            wyzieResponse.subtitles?.forEach { sub ->
+                val subUrl = sub.url ?: return@forEach
+                val subLang = sub.lang ?: "Unknown"
+                
+                subtitleCallback.invoke(
+                    SubtitleFile(
+                        lang = subLang,
+                        url = subUrl
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            // Silently skip if Wyzie requires a specific auth key, rate limits us, or goes offline
+        }
+
+        // 2. Fetch Video Streams from Xyra (NoTorrent)
         val streamUrl = "$mainUrl/v1/streamhub/notorrent?api_key=$xyraApiKey&tmdb_id=$data"
         val response = app.get(streamUrl).parsed<XyraResponse>()
 
@@ -90,12 +112,22 @@ class NoTorrentProvider : MainAPI() { // <-- Fixed the class name here!
                     .trim()
                 
                 if (parsedLang.isNotEmpty()) {
-                    languageTag = "[$parsedLang] "
+                    languageTag = "[$parsedLang]"
                 }
             }
 
-            // Create a clean link name for the Cloudstream UI
-            val cleanLinkName = "NoTorrent $languageTag- $qualityInfo"
+            val mappedQuality = when {
+                qualityInfo.contains("1080p") -> Qualities.P1080.value
+                qualityInfo.contains("720p") -> Qualities.P720.value
+                qualityInfo.contains("480p") -> Qualities.P480.value
+                else -> Qualities.Unknown.value
+            }
+
+            val cleanLinkName = if (mappedQuality == Qualities.Unknown.value && qualityInfo.isNotBlank()) {
+                "NoTorrent $languageTag - $qualityInfo".trim()
+            } else {
+                "NoTorrent $languageTag".trim()
+            }
 
             // Headers & Referer Parser (Bypasses 2004 Errors)
             var referer = ""
@@ -113,18 +145,11 @@ class NoTorrentProvider : MainAPI() { // <-- Fixed the class name here!
                 } catch (e: Exception) {}
             }
 
-            val mappedQuality = when {
-                qualityInfo.contains("1080p") -> Qualities.P1080.value
-                qualityInfo.contains("720p") -> Qualities.P720.value
-                qualityInfo.contains("480p") -> Qualities.P480.value
-                else -> Qualities.Unknown.value
-            }
-
             @Suppress("DEPRECATION", "DEPRECATION_ERROR")
             callback.invoke(
                 ExtractorLink(
                     source = this.name,
-                    name = cleanLinkName, // Injects our nicely parsed language name
+                    name = cleanLinkName,
                     url = link,
                     referer = referer,
                     quality = mappedQuality,
@@ -172,5 +197,15 @@ class NoTorrentProvider : MainAPI() { // <-- Fixed the class name here!
         @JsonProperty("name") val name: String?,
         @JsonProperty("title") val title: String?,
         @JsonProperty("url") val url: String?
+    )
+
+    // Data classes to parse the Wyzie API response
+    data class WyzieSubtitleResponse(
+        @JsonProperty("subtitles") val subtitles: List<WyzieSubtitle>?
+    )
+
+    data class WyzieSubtitle(
+        @JsonProperty("url") val url: String?,
+        @JsonProperty("lang") val lang: String?
     )
 }
