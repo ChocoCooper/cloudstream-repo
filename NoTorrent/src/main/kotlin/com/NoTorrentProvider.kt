@@ -1,4 +1,4 @@
-package com.streamhub
+package com.notorrent
 
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
@@ -8,7 +8,7 @@ import java.net.URLDecoder
 
 class StreamHubProvider : MainAPI() {
     override var mainUrl = "https://api.xyra.stream"
-    override var name = "StreamHub"
+    override var name = "NoTorrent"
     override val hasMainPage = false
     override var lang = "en"
     override val supportedTypes = setOf(TvType.Movie)
@@ -28,7 +28,6 @@ class StreamHubProvider : MainAPI() {
             val id = movie.id?.toString() ?: return@mapNotNull null
             val posterUrl = movie.posterPath?.let { "https://image.tmdb.org/t/p/w500$it" }
             
-            // Pass the absolute TMDB URL so Cloudstream doesn't attach mainUrl to it
             val fullTmdbUrl = "$tmdbBaseUrl/movie/$id"
 
             newMovieSearchResponse(title, url = fullTmdbUrl, type = TvType.Movie) {
@@ -40,15 +39,12 @@ class StreamHubProvider : MainAPI() {
 
     // --- Media Details Implementation ---
     override suspend fun load(url: String): LoadResponse? {
-        // 'url' is a valid web link (e.g., "https://api.tmdb.org/3/movie/24428"). We just append the key.
         val detailsUrl = "$url?api_key=$tmdbApiKey"
         val details = app.get(detailsUrl).parsed<TmdbDetailsResponse>()
         val title = details.title ?: return null
 
-        // We still need just the ID for Xyra, so we isolate the number at the end of the URL string
         val tmdbId = url.substringAfterLast("/")
 
-        // Pass the isolated tmdbId as the 4th parameter so loadLinks receives only the number
         return newMovieLoadResponse(title, url, TvType.Movie, tmdbId) {
             this.posterUrl = details.posterPath?.let { "https://image.tmdb.org/t/p/w500$it" }
             this.backgroundPosterUrl = details.backdropPath?.let { "https://image.tmdb.org/t/p/w1280$it" }
@@ -65,8 +61,8 @@ class StreamHubProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // 'data' is the clean TMDB ID we passed from load()
-        val streamUrl = "$mainUrl/v1/streamhub/streams?api_key=$xyraApiKey&tmdb_id=$data"
+        // Updated endpoint to explicitly hit 'notorrent'
+        val streamUrl = "$mainUrl/v1/streamhub/notorrent?api_key=$xyraApiKey&tmdb_id=$data"
         val response = app.get(streamUrl).parsed<XyraResponse>()
 
         response.streams?.forEach { stream ->
@@ -74,31 +70,47 @@ class StreamHubProvider : MainAPI() {
             if (qualityInfo.contains("2160p", ignoreCase = true)) return@forEach
 
             val link = stream.url ?: return@forEach
-            val providerName = stream.name ?: "Unknown"
+            val rawProviderName = stream.name ?: "Unknown"
             val isM3u8 = link.contains(".m3u8", ignoreCase = true)
 
-            // 1. Setup default headers to spoof a real browser
+            // --- Multi-Audio Language Parser ---
+            var languageTag = ""
+            if (rawProviderName.contains("•")) {
+                val rawLang = rawProviderName.substringAfter("•").trim()
+                val parsedLang = rawLang
+                    .replace("Audio", "", ignoreCase = true)
+                    .replace("Original", "Original", ignoreCase = true)
+                    .replace("हिंदी ऑडियो", "Hindi")
+                    .replace("ಕನ್ನಡ ಆಡಿಯೋ", "Kannada")
+                    .replace("മലയാളം ഓഡിയോ", "Malayalam")
+                    .replace("தமிழ் ஒலி", "Tamil")
+                    .replace("తెలుగు ఆడియో", "Telugu")
+                    .replace("castellano", "Castellano", ignoreCase = true)
+                    .replace("latino", "Latino", ignoreCase = true)
+                    .trim()
+                
+                if (parsedLang.isNotEmpty()) {
+                    languageTag = "[$parsedLang] "
+                }
+            }
+
+            // Create a clean link name for the Cloudstream UI
+            val cleanLinkName = "NoTorrent $languageTag- $qualityInfo"
+
+            // Headers & Referer Parser (Bypasses 2004 Errors)
             var referer = ""
             val requestHeaders = mutableMapOf(
                 "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
             )
 
-            // 2. Parse Xyra's embedded headers if they exist in the URL
             if (link.contains("headers=")) {
                 try {
-                    // Isolate the URL-encoded JSON string
                     val encodedHeaders = link.substringAfter("headers=").substringBefore("&")
                     val decodedHeaders = URLDecoder.decode(encodedHeaders, "UTF-8")
-                    
-                    // Parse the JSON into a Map and add it to our requestHeaders
                     val parsedHeaders = parseJson<Map<String, String>>(decodedHeaders)
                     requestHeaders.putAll(parsedHeaders)
-                    
-                    // Explicitly set the referer if the parsed headers contained one
                     referer = requestHeaders["referer"] ?: requestHeaders["Referer"] ?: ""
-                } catch (e: Exception) {
-                    // Silently ignore parsing errors and proceed with default headers
-                }
+                } catch (e: Exception) {}
             }
 
             val mappedQuality = when {
@@ -112,12 +124,12 @@ class StreamHubProvider : MainAPI() {
             callback.invoke(
                 ExtractorLink(
                     source = this.name,
-                    name = "$providerName - $qualityInfo",
+                    name = cleanLinkName, // Injects our nicely parsed language name
                     url = link,
                     referer = referer,
                     quality = mappedQuality,
                     isM3u8 = isM3u8,
-                    headers = requestHeaders // Injecting the parsed headers here
+                    headers = requestHeaders 
                 )
             )
         }
