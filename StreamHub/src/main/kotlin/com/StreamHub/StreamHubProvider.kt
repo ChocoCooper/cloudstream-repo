@@ -127,18 +127,17 @@ class StreamHubProvider : MainAPI() {
             val response = app.get(data, interceptor = interceptor)
             val interceptedUrl = response.url
 
-            // 4. Verify we caught it and pass it to ExoPlayer using the modern builder lambda
+            // 4. Verify we caught it and pass it to ExoPlayer using pure positional arguments
             if (interceptedUrl.contains("cfw69") || interceptedUrl.contains(".m3u8")) {
                 callback.invoke(
                     newExtractorLink(
-                        source = this.name,
-                        name = "StreamHub (Cloudflare HLS)",
-                        url = interceptedUrl,
-                        referer = mainUrl
-                    ) {
-                        this.quality = Qualities.Unknown.value
-                        this.isM3u8 = true
-                    }
+                        this.name,                      // source
+                        "StreamHub (Cloudflare HLS)",   // name
+                        interceptedUrl,                 // url
+                        mainUrl,                        // referer/referrer
+                        Qualities.Unknown.value,        // quality
+                        true                            // isM3u8
+                    )
                 )
                 return true
             }
