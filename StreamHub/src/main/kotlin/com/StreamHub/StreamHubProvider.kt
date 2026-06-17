@@ -8,7 +8,7 @@ import java.net.URLEncoder
 class StreamHubProvider : MainAPI() {
     override var mainUrl = "https://111movies.net"
     override var name = "StreamHub"
-    // Disabled homepage to isolate search and stream testing
+    // Disabled homepage to isolate search and metadata testing
     override val hasMainPage = false
     override var lang = "en"
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
@@ -115,39 +115,23 @@ class StreamHubProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        var foundStream = false
-
-        try {
-            // Using Cloudstream's utility to invoke a headless WebView execution of the JS
-            // This allows the Next.js React code to perform the handshake and fetch the CF stream
-            AppUtils.loadWebView(data) { request ->
-                val requestUrl = request.url.toString()
-
-                // Catch the underlying worker or the raw playlist URL
-                if (requestUrl.contains("workers.dev") || requestUrl.contains(".m3u8")) {
-                    
-                    callback.invoke(
-                        newExtractorLink(
-                            source = this.name,
-                            name = "StreamHub Native Extract",
-                            url = requestUrl,
-                            referer = mainUrl,
-                            quality = Qualities.Unknown.value,
-                            isM3u8 = true
-                        )
-                    )
-                    foundStream = true
-                    
-                    // Return true to terminate the WebView interceptor early and save resources
-                    true 
-                } else {
-                    false
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-
-        return foundStream
+        // Stream implementation postponed for testing search/load logic.
+        // Once ready, we will implement this using Cloudstream's Extractor API or app.evaluateJs.
+        
+        /* // Example of a safe, compiling ExtractorLink using positional arguments to avoid named parameter errors
+        callback.invoke(
+            ExtractorLink(
+                this.name,
+                "StreamHub",
+                "https://example.com/stream.m3u8",
+                mainUrl,
+                Qualities.Unknown.value,
+                true
+            )
+        )
+        return true
+        */
+        
+        return false
     }
 }
