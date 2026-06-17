@@ -201,12 +201,14 @@ class IsaidubProvider : MainAPI() {
                             val poster = tmdb.poster_path?.let { "https://image.tmdb.org/t/p/w500$it" } ?: return@async null
                             val plot   = tmdb.overview ?: ""
 
-                            val t = URLEncoder.encode(cleanTitle,   "UTF-8")
-                            val y = URLEncoder.encode(resolvedYear, "UTF-8")
-                            val p = URLEncoder.encode(poster,       "UTF-8")
-                            val u = URLEncoder.encode(link,         "UTF-8")
-                            val s = URLEncoder.encode(plot,         "UTF-8")
-                            val data = "$mainUrl/synthetic_meta?t=$t&y=$y&p=$p&url=$u&s=$s"
+                            val t  = URLEncoder.encode(cleanTitle,   "UTF-8")
+                            val y  = URLEncoder.encode(resolvedYear, "UTF-8")
+                            val p  = URLEncoder.encode(poster,       "UTF-8")
+                            val u  = URLEncoder.encode(link,         "UTF-8")
+                            val s  = URLEncoder.encode(plot,         "UTF-8")
+                            // Pass the exact literal scraped string for loadLinks
+                            val st = URLEncoder.encode(rawTitle,     "UTF-8") 
+                            val data = "$mainUrl/synthetic_meta?t=$t&y=$y&p=$p&url=$u&s=$s&st=$st"
 
                             newMovieSearchResponse(cleanTitle, data) {
                                 this.posterUrl = poster
@@ -257,11 +259,13 @@ class IsaidubProvider : MainAPI() {
             val poster = "https://image.tmdb.org/t/p/w500$posterPath"
             val plot   = item.overview ?: ""
             
-            val t = URLEncoder.encode(title,  "UTF-8")
-            val y = URLEncoder.encode(year,   "UTF-8")
-            val p = URLEncoder.encode(poster, "UTF-8")
-            val s = URLEncoder.encode(plot,   "UTF-8")
-            val data = "$mainUrl/synthetic_meta?t=$t&y=$y&p=$p&url=&s=$s"
+            val t  = URLEncoder.encode(title,  "UTF-8")
+            val y  = URLEncoder.encode(year,   "UTF-8")
+            val p  = URLEncoder.encode(poster, "UTF-8")
+            val s  = URLEncoder.encode(plot,   "UTF-8")
+            // Empty st param because we haven't scraped the page yet
+            val st = "" 
+            val data = "$mainUrl/synthetic_meta?t=$t&y=$y&p=$p&url=&s=$s&st=$st"
             
             newMovieSearchResponse(title, data) {
                 this.posterUrl = poster
@@ -285,11 +289,12 @@ class IsaidubProvider : MainAPI() {
         val poster   = URLDecoder.decode(uri.getQueryParameter("p")   ?: "", "UTF-8")
         var synopsis = URLDecoder.decode(uri.getQueryParameter("s")   ?: "", "UTF-8")
         var moviePageUrl = URLDecoder.decode(uri.getQueryParameter("url") ?: "", "UTF-8")
+        var scrapedTitle = URLDecoder.decode(uri.getQueryParameter("st")  ?: "", "UTF-8")
 
         if (title.isBlank()) return null
 
         if (moviePageUrl.isBlank()) {
-            val (pageUrl, plot) = coroutineScope {
+            val (foundMovie, plot) = coroutineScope {
                 val pageDeferred = async { findMoviePage(title, year) }
                 val plotDeferred = async {
                     if (synopsis.isBlank()) {
@@ -299,8 +304,11 @@ class IsaidubProvider : MainAPI() {
                 }
                 Pair(pageDeferred.await(), plotDeferred.await())
             }
-            moviePageUrl = pageUrl ?: return null
+            moviePageUrl = foundMovie?.link ?: return null
             synopsis     = plot
+            
+            // Overwrite scrapedTitle with the fuzzy token match result
+            if (scrapedTitle.isBlank()) scrapedTitle = foundMovie.title
         }
 
         if (synopsis.isBlank()) {
@@ -313,7 +321,8 @@ class IsaidubProvider : MainAPI() {
             "&y=${URLEncoder.encode(year,          "UTF-8")}" +
             "&p=${URLEncoder.encode(poster,        "UTF-8")}" +
             "&url=${URLEncoder.encode(moviePageUrl,"UTF-8")}" +
-            "&s=${URLEncoder.encode(synopsis,      "UTF-8")}"
+            "&s=${URLEncoder.encode(synopsis,      "UTF-8")}" +
+            "&st=${URLEncoder.encode(scrapedTitle, "UTF-8")}"
 
         return newMovieLoadResponse(title, dataUrl, TvType.Movie, dataUrl) {
             this.posterUrl = poster.ifBlank { null }
@@ -334,15 +343,19 @@ class IsaidubProvider : MainAPI() {
     ): Boolean {
         
         val moviePageUrl: String
+        var actualScrapedTitle = ""
 
         if (data.contains("synthetic_meta")) {
             val uri = android.net.Uri.parse(data)
             val parsedUrl = URLDecoder.decode(uri.getQueryParameter("url") ?: "", "UTF-8")
+            actualScrapedTitle = URLDecoder.decode(uri.getQueryParameter("st") ?: "", "UTF-8")
             
             if (parsedUrl.isBlank()) {
                 val title = URLDecoder.decode(uri.getQueryParameter("t") ?: "", "UTF-8")
                 val year  = URLDecoder.decode(uri.getQueryParameter("y") ?: "", "UTF-8")
-                moviePageUrl = findMoviePage(title, year) ?: return false
+                val foundMovie = findMoviePage(title, year) ?: return false
+                moviePageUrl = foundMovie.link
+                actualScrapedTitle = foundMovie.title
             } else {
                 moviePageUrl = parsedUrl
             }
@@ -351,15 +364,24 @@ class IsaidubProvider : MainAPI() {
         }
 
         if (moviePageUrl.isBlank()) return false
+        
+        // Final fallback just in case the scrape token match title somehow evaluates to blank
+        if (actualScrapedTitle.isBlank()) {
+            val uri = android.net.Uri.parse(data)
+            actualScrapedTitle = URLDecoder.decode(uri.getQueryParameter("t") ?: "Movie", "UTF-8")
+        }
 
         val links = resolveAllLinks(moviePageUrl, depth = 0)
         if (links.isEmpty()) return false
 
         links.forEach { (label, finalUrl) ->
+            // Combines exact extracted resolution and the literal site scraped text title
+            val sourceName = "Isaidub ($label) \"$actualScrapedTitle\""
+
             callback.invoke(
                 newExtractorLink(
                     source = this.name,
-                    name   = "${this.name} ($label)",
+                    name   = sourceName,
                     url    = finalUrl,
                     type   = if (finalUrl.contains(".m3u8")) ExtractorLinkType.M3U8
                              else ExtractorLinkType.VIDEO,
@@ -412,10 +434,10 @@ class IsaidubProvider : MainAPI() {
     }
 
     // ============================================================
-    // FIND MOVIE PAGE (Fuzzy Token Match)
+    // FIND MOVIE PAGE (Fuzzy Token Match now returns ScrapedMovie)
     // ============================================================
 
-    private suspend fun findMoviePage(title: String, year: String): String? {
+    private suspend fun findMoviePage(title: String, year: String): ScrapedMovie? {
         if (year.isBlank()) return null
 
         val searchUrl = "$mainUrl/tamil-$year-dubbed-movies/"
@@ -439,7 +461,7 @@ class IsaidubProvider : MainAPI() {
         processMovies(firstPageMovies)
 
         if ((bestMatch?.second ?: 0) >= targetTokenCount) {
-            return bestMatch?.first?.link
+            return bestMatch?.first
         }
 
         if (maxPage > 1) {
@@ -450,7 +472,7 @@ class IsaidubProvider : MainAPI() {
             }.forEach { processMovies(it) }
         }
 
-        return bestMatch?.first?.link
+        return bestMatch?.first
     }
 
     // ============================================================
