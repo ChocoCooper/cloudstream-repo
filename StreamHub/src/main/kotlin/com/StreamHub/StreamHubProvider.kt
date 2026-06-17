@@ -3,12 +3,12 @@ package com.StreamHub
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.network.WebViewResolver
 import java.net.URLEncoder
 
 class StreamHubProvider : MainAPI() {
     override var mainUrl = "https://111movies.net"
     override var name = "StreamHub"
-    // Disabled homepage to isolate search and metadata testing
     override val hasMainPage = false
     override var lang = "en"
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
@@ -115,22 +115,35 @@ class StreamHubProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // Stream implementation postponed for testing search/load logic.
-        // Once ready, we will implement this using Cloudstream's Extractor API or app.evaluateJs.
-        
-        /* // Example of a safe, compiling ExtractorLink using positional arguments to avoid named parameter errors
-        callback.invoke(
-            ExtractorLink(
-                this.name,
-                "StreamHub",
-                "https://example.com/stream.m3u8",
-                mainUrl,
-                Qualities.Unknown.value,
-                true
-            )
-        )
-        return true
-        */
+        try {
+            // 1. Create a regex to catch the specific XHR request the VM makes
+            val targetRegex = Regex("""cfw69\.workers\.dev.*\.m3u8""")
+            
+            // 2. Initialize Cloudstream's native headless WebView interceptor
+            val interceptor = WebViewResolver(targetRegex)
+
+            // 3. Load the page. The interceptor will freeze the request and return the URL 
+            // the exact millisecond the site's JS VM tries to request the m3u8 file.
+            val response = app.get(data, interceptor = interceptor)
+            val interceptedUrl = response.url
+
+            // 4. Verify we caught it and pass it to ExoPlayer using standard ExtractorLink constructor
+            if (interceptedUrl.contains("cfw69") || interceptedUrl.contains(".m3u8")) {
+                callback.invoke(
+                    ExtractorLink(
+                        this.name,
+                        "StreamHub (Cloudflare HLS)",
+                        interceptedUrl,
+                        mainUrl,
+                        Qualities.Unknown.value,
+                        true
+                    )
+                )
+                return true
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
         
         return false
     }
