@@ -127,16 +127,14 @@ class StreamHubProvider : MainAPI() {
             val response = app.get(data, interceptor = interceptor)
             val interceptedUrl = response.url
 
-            // 4. Verify we caught it and pass it to ExoPlayer using standard ExtractorLink constructor
+            // 4. Verify we caught it and pass it to ExoPlayer using the modern builder
             if (interceptedUrl.contains("cfw69") || interceptedUrl.contains(".m3u8")) {
                 callback.invoke(
-                    ExtractorLink(
-                        this.name,
-                        "StreamHub (Cloudflare HLS)",
-                        interceptedUrl,
-                        mainUrl,
-                        Qualities.Unknown.value,
-                        true
+                    newExtractorLink(
+                        name = "StreamHub (Cloudflare HLS)",
+                        url = interceptedUrl,
+                        quality = Qualities.Unknown.value,
+                        isM3u8 = true
                     )
                 )
                 return true
