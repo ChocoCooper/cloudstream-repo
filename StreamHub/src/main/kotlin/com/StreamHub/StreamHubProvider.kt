@@ -11,7 +11,7 @@ class StreamHubProvider : MainAPI() {
     override var name = "StreamHub"
     override val hasMainPage = false
     override var lang = "en"
-    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
+    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime, TvType.AsianDrama)
 
     // TMDB Base Configuration
     private val tmdbApiKey = "ea118e768e75a1fe3b53dc99c9e4de09"
@@ -127,22 +127,18 @@ class StreamHubProvider : MainAPI() {
             val response = app.get(data, interceptor = interceptor)
             val interceptedUrl = response.url
 
-            // 4. Verify we caught it and pass it to ExoPlayer using pure positional arguments
+            // 4. Pass exactly the parameters the modern API compiler demands
             if (interceptedUrl.contains("cfw69") || interceptedUrl.contains(".m3u8")) {
                 callback.invoke(
                     newExtractorLink(
-                        this.name,                      // source
-                        "111movies",                    // name
-                        interceptedUrl,                 // url
-                        mainUrl,                        // referer/referrer
-                        Qualities.Unknown.value,        // quality
-                        true                            // isM3u8 (Tells Cloudstream to parse resolutions)
+                        source = this.name,
+                        name = "111movies",
+                        url = interceptedUrl,
+                        type = ExtractorLinkType.M3U8
                     )
                 )
                 return true
             }
-
-
         } catch (e: Exception) {
             e.printStackTrace()
         }
