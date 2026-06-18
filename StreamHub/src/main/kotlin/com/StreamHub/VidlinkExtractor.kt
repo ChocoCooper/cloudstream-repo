@@ -25,12 +25,9 @@ object VidlinkExtractor {
                         url = interceptedUrl,
                         type = ExtractorLinkType.M3U8
                     ) {
-                        // FIX for 2004 Error: Megacloud proxy REQUIRES both Origin and Referer headers
-                        this.referer = "https://megacloud.live/" 
-                        this.headers = mapOf(
-                            "Origin" to "https://megacloud.live",
-                            "Referer" to "https://megacloud.live/"
-                        )
+                        // FIX: Point the referer to Vidlink, NOT Megacloud. 
+                        // The proxy server handles Megacloud headers internally.
+                        this.referer = "https://vidlink.pro/" 
                     }
                 )
                 return true
