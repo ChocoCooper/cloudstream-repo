@@ -115,19 +115,16 @@ class StreamHubProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        try {
-            // 1. Create a regex to catch the specific XHR request the VM makes
-            val targetRegex = Regex("""cfw69\.workers\.dev.*\.m3u8""")
-            
-            // 2. Initialize Cloudstream's native headless WebView interceptor
-            val interceptor = WebViewResolver(targetRegex)
+        var foundLinks = false
 
-            // 3. Load the page. The interceptor will freeze the request and return the URL 
-            // the exact millisecond the site's JS VM tries to request the m3u8 file.
+        // 1. Fetch 111movies Stream
+        try {
+            val targetRegex = Regex("""cfw69\.workers\.dev.*\.m3u8""")
+            val interceptor = WebViewResolver(targetRegex)
+            
             val response = app.get(data, interceptor = interceptor)
             val interceptedUrl = response.url
 
-            // 4. Pass exactly the parameters the modern API compiler demands
             if (interceptedUrl.contains("cfw69") || interceptedUrl.contains(".m3u8")) {
                 callback.invoke(
                     newExtractorLink(
@@ -137,12 +134,19 @@ class StreamHubProvider : MainAPI() {
                         type = ExtractorLinkType.M3U8
                     )
                 )
-                return true
+                foundLinks = true
             }
         } catch (e: Exception) {
             e.printStackTrace()
         }
+
+        // 2. Fetch Peachify Stream (from our separate file!)
+        // This runs the code from PeachifyExtractor.kt and adds the result to the same video player
+        val peachifyFound = PeachifyExtractor.getStream(data, callback)
+        if (peachifyFound) {
+            foundLinks = true
+        }
         
-        return false
+        return foundLinks
     }
 }
