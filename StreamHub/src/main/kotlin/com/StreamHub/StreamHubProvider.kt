@@ -128,8 +128,8 @@ class StreamHubProvider : MainAPI() {
             if (interceptedUrl.contains("cfw69") || interceptedUrl.contains(".m3u8")) {
                 callback.invoke(
                     newExtractorLink(
-                        source = "111movies",
-                        name = "VIP Server",
+                        source = this.name,
+                        name = "111movies",
                         url = interceptedUrl,
                         type = ExtractorLinkType.M3U8
                     ) {
