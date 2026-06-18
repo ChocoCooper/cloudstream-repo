@@ -25,9 +25,8 @@ object Movies111Extractor {
                         url = interceptedUrl,
                         type = ExtractorLinkType.M3U8
                     ) {
-                        // FIX for 2004 Error: Pass the EXACT page URL as referer, plus Origin headers
-                        this.referer = embedUrl 
-                        this.headers = mapOf("Origin" to "https://111movies.net")
+                        // FIX: Reverted to the simple, working referer. Removed the strict Origin headers.
+                        this.referer = "https://111movies.net/"
                     }
                 )
                 return true
