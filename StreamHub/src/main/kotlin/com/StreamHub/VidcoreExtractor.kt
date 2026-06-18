@@ -23,7 +23,7 @@ object VidcoreExtractor {
             if (interceptedUrl.contains("digitalsun.app") || interceptedUrl.contains(".m3u8")) {
                 callback.invoke(
                     newExtractorLink(
-                        source = this.name,
+                        source = "Vidcore",
                         name = "Vidcore",
                         url = interceptedUrl,
                         type = ExtractorLinkType.M3U8
@@ -35,7 +35,7 @@ object VidcoreExtractor {
                 return true
             }
         } catch (e: Exception) {
-            println("Vidcore Extraction Failed: ${e.message}")
+            // Silently fail and allow the next extractor to run
         }
         return false
     }
