@@ -128,11 +128,13 @@ class StreamHubProvider : MainAPI() {
             if (interceptedUrl.contains("cfw69") || interceptedUrl.contains(".m3u8")) {
                 callback.invoke(
                     newExtractorLink(
-                        source = this.name,
-                        name = "111movies",
+                        source = "111movies",
+                        name = "VIP Server",
                         url = interceptedUrl,
                         type = ExtractorLinkType.M3U8
-                    )
+                    ) {
+                        this.referer = mainUrl
+                    }
                 )
                 foundLinks = true
             }
@@ -140,10 +142,10 @@ class StreamHubProvider : MainAPI() {
             e.printStackTrace()
         }
 
-        // 2. Fetch Peachify Stream (from our separate file!)
-        // This runs the code from PeachifyExtractor.kt and adds the result to the same video player
-        val peachifyFound = PeachifyExtractor.getStream(data, callback)
-        if (peachifyFound) {
+        // 2. Fetch Vidcore Stream
+        // This runs the code from VidcoreExtractor.kt and adds the result to the same video player
+        val vidcoreFound = VidcoreExtractor.getStream(data, callback)
+        if (vidcoreFound) {
             foundLinks = true
         }
         
