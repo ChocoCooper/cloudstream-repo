@@ -9,9 +9,9 @@ import kotlinx.coroutines.awaitAll
 import java.net.URLEncoder
 
 class StreamHubProvider : MainAPI() {
-    override var mainUrl = "https://streamhub.app" // Dummy URL to route to our extractors
+    override var mainUrl = "https://streamhub.app" 
     override var name = "StreamHub"
-    override val hasMainPage = true // Enabled Homepage
+    override val hasMainPage = true 
     override var lang = "en"
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime, TvType.AsianDrama)
 
@@ -49,7 +49,21 @@ class StreamHubProvider : MainAPI() {
         @JsonProperty("overview") val overview: String?,
         @JsonProperty("poster_path") val posterPath: String?,
         @JsonProperty("backdrop_path") val backdropPath: String?,
-        @JsonProperty("seasons") val seasons: List<TmdbSeason>?
+        @JsonProperty("release_date") val releaseDate: String?,
+        @JsonProperty("first_air_date") val firstAirDate: String?,
+        @JsonProperty("runtime") val runtime: Int?,
+        @JsonProperty("genres") val genres: List<TmdbGenre>?,
+        @JsonProperty("seasons") val seasons: List<TmdbSeason>?,
+        @JsonProperty("images") val images: TmdbImages?
+    )
+
+    private data class TmdbGenre(@JsonProperty("name") val name: String?)
+    
+    private data class TmdbImages(@JsonProperty("logos") val logos: List<TmdbImage>?)
+    
+    private data class TmdbImage(
+        @JsonProperty("file_path") val filePath: String?,
+        @JsonProperty("iso_639_1") val lang: String?
     )
 
     private data class TmdbSeason(
@@ -69,11 +83,6 @@ class StreamHubProvider : MainAPI() {
     )
 
     // --- CORE LOGIC ---
-
-    /**
-     * Randomly selects up to 3 API keys and tries them in sequence.
-     * Guarantees lightning-fast loads and prevents rate-limiting crashes.
-     */
     private suspend inline fun <reified T : Any> fetchTmdb(url: String): T? {
         val keysToTry = tmdbApiKeys.shuffled().take(3)
         for (key in keysToTry) {
@@ -82,7 +91,6 @@ class StreamHubProvider : MainAPI() {
                 val response = app.get(finalUrl).parsedSafe<T>()
                 if (response != null) return response
             } catch (e: Exception) {
-                // If this key fails (404/rate limited), loop around and try the next one instantly
                 continue
             }
         }
@@ -99,11 +107,9 @@ class StreamHubProvider : MainAPI() {
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
-        // TMDB pagination
         val url = request.data + "&page=$page"
         val response = fetchTmdb<TmdbSearchResponse>(url) ?: return null
         
-        // Filter out blank posters immediately
         val items = response.results?.filter { it.posterPath != null }?.mapNotNull { result ->
             val isMovie = result.mediaType == "movie" || request.name.contains("Movie")
             val title = result.title ?: result.name ?: return@mapNotNull null
@@ -145,23 +151,37 @@ class StreamHubProvider : MainAPI() {
         val tmdbId = url.substringAfterLast("/")
         
         val endpoint = if (isMovie) "movie" else "tv"
-        val detailsUrl = "$tmdbBase/$endpoint/$tmdbId?api_key={API_KEY}"
+        // Appended images to request to grab the Title Logo
+        val detailsUrl = "$tmdbBase/$endpoint/$tmdbId?api_key={API_KEY}&append_to_response=images"
         
         val details = fetchTmdb<TmdbDetails>(detailsUrl) ?: return null
         
         val title = details.title ?: details.name ?: return null
         val poster = details.posterPath?.let { "$imageBase$it" }
-        // Setting the rich backdrop for the hero section
         val backdrop = details.backdropPath?.let { "$backdropBase$it" }
+
+        // --- NEW HERO SECTION METADATA ---
+        val parsedYear = (details.releaseDate ?: details.firstAirDate)?.split("-")?.firstOrNull()?.toIntOrNull()
+        val parsedTags = details.genres?.mapNotNull { it.name }
+        
+        // Grab the English logo if it exists, otherwise grab the first available logo
+        val logoPath = details.images?.logos?.firstOrNull { it.lang == "en" }?.filePath 
+            ?: details.images?.logos?.firstOrNull()?.filePath
+        val parsedLogo = logoPath?.let { "$backdropBase$it" }
 
         if (isMovie) {
             return newMovieLoadResponse(title, url, TvType.Movie, url) {
                 this.posterUrl = poster
                 this.backgroundPosterUrl = backdrop
                 this.plot = details.overview
+                this.year = parsedYear
+                this.tags = parsedTags
+                this.duration = details.runtime // Renders as "120 min"
+                
+                // If your Cloudstream build throws a "logoUrl" error, simply delete this line:
+                // this.logoUrl = parsedLogo 
             }
         } else {
-            // Concurrent episode fetching: Grabs all seasons simultaneously for maximum speed
             val episodes = coroutineScope {
                 details.seasons?.filter { (it.seasonNumber ?: 0) > 0 }?.map { season ->
                     async {
@@ -176,7 +196,6 @@ class StreamHubProvider : MainAPI() {
                                 this.name = ep.name ?: "Episode $epNum"
                                 this.season = season.seasonNumber
                                 this.episode = epNum
-                                // Grabs the specific thumbnail for this exact episode
                                 this.posterUrl = ep.stillPath?.let { "$imageBase$it" }
                                 this.description = ep.overview
                             }
@@ -189,6 +208,12 @@ class StreamHubProvider : MainAPI() {
                 this.posterUrl = poster
                 this.backgroundPosterUrl = backdrop
                 this.plot = details.overview
+                this.year = parsedYear
+                this.tags = parsedTags
+                // Total seasons tag is generated natively by Cloudstream using the 'episodes' list
+
+                // If your Cloudstream build throws a "logoUrl" error, simply delete this line:
+                // this.logoUrl = parsedLogo
             }
         }
     }
