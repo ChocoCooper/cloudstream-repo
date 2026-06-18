@@ -8,33 +8,35 @@ object PeachifyExtractor {
 
     suspend fun getStream(dataUrl: String, callback: (ExtractorLink) -> Unit): Boolean {
         try {
-            // Convert 111movies URL to Peachify embed URL
+            // Convert the base StreamHub URL to the Peachify embed route
             val peachifyUrl = dataUrl.replace("111movies.net/movie", "peachify.top/embed/movie")
                                      .replace("111movies.net/tv", "peachify.top/embed/tv")
 
-            val targetRegex = Regex(""".*\.m3u8.*""")
+            // Regex designed to catch Peachify's Cloudflare mp4-proxy OR the raw hakunaymatata host
+            val targetRegex = Regex("""(mp4-proxy|hakunaymatata.*\.mp4)""")
             val interceptor = WebViewResolver(targetRegex)
 
-            // Catch the stream using the headless browser
+            // Execute the headless browser
             val response = app.get(peachifyUrl, interceptor = interceptor)
             val interceptedUrl = response.url
 
-            if (interceptedUrl.contains(".m3u8")) {
+            // If we successfully caught the proxy or mp4 link
+            if (interceptedUrl.contains("mp4") || interceptedUrl.contains("proxy")) {
                 callback.invoke(
                     newExtractorLink(
                         source = "Peachify",
-                        name = "VIP Server",
+                        name = "VIP Server (English)",
                         url = interceptedUrl,
-                        type = ExtractorLinkType.M3U8
+                        type = ExtractorLinkType.VIDEO // Set to VIDEO since it's a raw MP4, not an M3U8
                     ) {
-                        // CRITICAL: Optional parameters like referer must go inside these curly braces!
+                        // Crucial: Bypasses Cloudflare's hotlink protection (Fixes the 2004 Error)
                         this.referer = peachifyUrl 
                     }
                 )
                 return true
             }
         } catch (e: Exception) {
-            e.printStackTrace()
+            println("Peachify Extraction Failed: ${e.message}")
         }
         return false
     }
