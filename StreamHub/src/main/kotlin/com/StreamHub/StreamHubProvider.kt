@@ -6,7 +6,8 @@ import com.lagradost.cloudstream3.utils.*
 import java.net.URLEncoder
 
 class StreamHubProvider : MainAPI() {
-    override var mainUrl = "https://111movies.net"
+    // Completely decoupled from 111movies. This acts as our internal Hub router.
+    override var mainUrl = "https://streamhub.app"
     override var name = "StreamHub"
     override val hasMainPage = false
     override var lang = "en"
@@ -130,6 +131,7 @@ class StreamHubProvider : MainAPI() {
         if (VidlinkExtractor.getStream(data, callback)) {
             foundLinks = true
         }
+        
         return foundLinks
     }
 }
