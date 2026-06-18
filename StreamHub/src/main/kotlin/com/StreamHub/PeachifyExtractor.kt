@@ -25,9 +25,11 @@ object PeachifyExtractor {
                         source = "Peachify",
                         name = "VIP Server",
                         url = interceptedUrl,
-                        referer = peachifyUrl, // <-- CRITICAL: Prevents the 2004 HTTP Error
                         type = ExtractorLinkType.M3U8
-                    )
+                    ) {
+                        // CRITICAL: Optional parameters like referer must go inside these curly braces!
+                        this.referer = peachifyUrl 
+                    }
                 )
                 return true
             }
