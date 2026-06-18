@@ -23,8 +23,8 @@ object VidcoreExtractor {
             if (interceptedUrl.contains("digitalsun.app") || interceptedUrl.contains(".m3u8")) {
                 callback.invoke(
                     newExtractorLink(
-                        source = "Vidcore",
-                        name = "DigitalSun Server",
+                        source = this.name,
+                        name = "Vidcore",
                         url = interceptedUrl,
                         type = ExtractorLinkType.M3U8
                     ) {
