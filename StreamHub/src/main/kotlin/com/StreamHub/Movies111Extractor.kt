@@ -8,10 +8,13 @@ object Movies111Extractor {
 
     suspend fun getStream(dataUrl: String, callback: (ExtractorLink) -> Unit): Boolean {
         try {
+            // Replace the generic Hub URL with the 111movies domain
+            val embedUrl = dataUrl.replace("https://streamhub.app", "https://111movies.net")
+            
             val targetRegex = Regex("""cfw69\.workers\.dev.*\.m3u8""")
             val interceptor = WebViewResolver(targetRegex)
             
-            val response = app.get(dataUrl, interceptor = interceptor)
+            val response = app.get(embedUrl, interceptor = interceptor)
             val interceptedUrl = response.url
 
             if (interceptedUrl.contains("cfw69") || interceptedUrl.contains(".m3u8")) {
@@ -22,7 +25,9 @@ object Movies111Extractor {
                         url = interceptedUrl,
                         type = ExtractorLinkType.M3U8
                     ) {
-                        this.referer = "https://111movies.net"
+                        // FIX for 2004 Error: Pass the EXACT page URL as referer, plus Origin headers
+                        this.referer = embedUrl 
+                        this.headers = mapOf("Origin" to "https://111movies.net")
                     }
                 )
                 return true
