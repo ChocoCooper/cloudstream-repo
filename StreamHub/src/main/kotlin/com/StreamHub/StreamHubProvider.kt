@@ -151,8 +151,8 @@ class StreamHubProvider : MainAPI() {
         val tmdbId = url.substringAfterLast("/")
         
         val endpoint = if (isMovie) "movie" else "tv"
-        // Appended images to request to grab the Title Logo
-        val detailsUrl = "$tmdbBase/$endpoint/$tmdbId?api_key={API_KEY}&append_to_response=images"
+        // Injects your JS logic: Appending images and specifically targeting en/null fallbacks
+        val detailsUrl = "$tmdbBase/$endpoint/$tmdbId?api_key={API_KEY}&append_to_response=images&include_image_language=en,null"
         
         val details = fetchTmdb<TmdbDetails>(detailsUrl) ?: return null
         
@@ -160,11 +160,11 @@ class StreamHubProvider : MainAPI() {
         val poster = details.posterPath?.let { "$imageBase$it" }
         val backdrop = details.backdropPath?.let { "$backdropBase$it" }
 
-        // --- NEW HERO SECTION METADATA ---
+        // Formatting Hero Tags
         val parsedYear = (details.releaseDate ?: details.firstAirDate)?.split("-")?.firstOrNull()?.toIntOrNull()
-        val parsedTags = details.genres?.mapNotNull { it.name }
+        val parsedTags = details.genres?.mapNotNull { it.name } ?: emptyList()
         
-        // Grab the English logo if it exists, otherwise grab the first available logo
+        // Translating your JS logic to Kotlin to extract the Logo
         val logoPath = details.images?.logos?.firstOrNull { it.lang == "en" }?.filePath 
             ?: details.images?.logos?.firstOrNull()?.filePath
         val parsedLogo = logoPath?.let { "$backdropBase$it" }
@@ -176,12 +176,18 @@ class StreamHubProvider : MainAPI() {
                 this.plot = details.overview
                 this.year = parsedYear
                 this.tags = parsedTags
-                this.duration = details.runtime // Renders as "120 min"
-                
-                // If your Cloudstream build throws a "logoUrl" error, simply delete this line:
-                // this.logoUrl = parsedLogo 
+                this.duration = details.runtime // Native field: Formats as "X min" next to year
+                this.logoUrl = parsedLogo
             }
         } else {
+            // TV Show Tags Formatting: Prepend "X Seasons" so it appears left of the genres
+            val validSeasons = details.seasons?.filter { (it.seasonNumber ?: 0) > 0 }?.size ?: 0
+            val tvTags = mutableListOf<String>()
+            if (validSeasons > 0) {
+                tvTags.add("$validSeasons Season${if (validSeasons > 1) "s" else ""}")
+            }
+            tvTags.addAll(parsedTags)
+
             val episodes = coroutineScope {
                 details.seasons?.filter { (it.seasonNumber ?: 0) > 0 }?.map { season ->
                     async {
@@ -209,11 +215,8 @@ class StreamHubProvider : MainAPI() {
                 this.backgroundPosterUrl = backdrop
                 this.plot = details.overview
                 this.year = parsedYear
-                this.tags = parsedTags
-                // Total seasons tag is generated natively by Cloudstream using the 'episodes' list
-
-                // If your Cloudstream build throws a "logoUrl" error, simply delete this line:
-                // this.logoUrl = parsedLogo
+                this.tags = tvTags // This pushes "2 Seasons • Drama" right below the logo
+                this.logoUrl = parsedLogo
             }
         }
     }
