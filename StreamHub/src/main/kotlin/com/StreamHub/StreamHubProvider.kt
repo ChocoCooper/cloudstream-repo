@@ -3,7 +3,6 @@ package com.StreamHub
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.network.WebViewResolver
 import java.net.URLEncoder
 
 class StreamHubProvider : MainAPI() {
@@ -118,34 +117,12 @@ class StreamHubProvider : MainAPI() {
         var foundLinks = false
 
         // 1. Fetch 111movies Stream
-        try {
-            val targetRegex = Regex("""cfw69\.workers\.dev.*\.m3u8""")
-            val interceptor = WebViewResolver(targetRegex)
-            
-            val response = app.get(data, interceptor = interceptor)
-            val interceptedUrl = response.url
-
-            if (interceptedUrl.contains("cfw69") || interceptedUrl.contains(".m3u8")) {
-                callback.invoke(
-                    newExtractorLink(
-                        source = this.name,
-                        name = "111movies",
-                        url = interceptedUrl,
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        this.referer = mainUrl
-                    }
-                )
-                foundLinks = true
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
+        if (Movies111Extractor.getStream(data, callback)) {
+            foundLinks = true
         }
 
         // 2. Fetch Vidcore Stream
-        // This runs the code from VidcoreExtractor.kt and adds the result to the same video player
-        val vidcoreFound = VidcoreExtractor.getStream(data, callback)
-        if (vidcoreFound) {
+        if (VidcoreExtractor.getStream(data, callback)) {
             foundLinks = true
         }
         
