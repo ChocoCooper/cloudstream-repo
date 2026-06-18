@@ -8,18 +8,15 @@ object VidlinkExtractor {
 
     suspend fun getStream(dataUrl: String, callback: (ExtractorLink) -> Unit): Boolean {
         try {
-            // Convert the master StreamHub URL to the Vidlink embed URL
-            val vidlinkUrl = dataUrl.replace("111movies.net", "vidlink.pro")
+            // Replace the generic Hub URL with the Vidlink domain
+            val vidlinkUrl = dataUrl.replace("https://streamhub.app", "https://vidlink.pro")
 
-            // Regex targeting the specific proxy domain you caught in catcatch
             val targetRegex = Regex(""".*vodvidl\.site.*\.m3u8.*""")
             val interceptor = WebViewResolver(targetRegex)
 
-            // Execute the headless browser
             val response = app.get(vidlinkUrl, interceptor = interceptor)
             val interceptedUrl = response.url
 
-            // If we successfully caught the proxied megacloud link
             if (interceptedUrl.contains("vodvidl") || interceptedUrl.contains(".m3u8")) {
                 callback.invoke(
                     newExtractorLink(
@@ -28,8 +25,12 @@ object VidlinkExtractor {
                         url = interceptedUrl,
                         type = ExtractorLinkType.M3U8
                     ) {
-                        // Crucial: Your catcatch log showed Megacloud demands this exact referer
+                        // FIX for 2004 Error: Megacloud proxy REQUIRES both Origin and Referer headers
                         this.referer = "https://megacloud.live/" 
+                        this.headers = mapOf(
+                            "Origin" to "https://megacloud.live",
+                            "Referer" to "https://megacloud.live/"
+                        )
                     }
                 )
                 return true
