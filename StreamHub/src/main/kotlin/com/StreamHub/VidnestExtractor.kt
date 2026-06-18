@@ -8,11 +8,14 @@ object VidnestExtractor {
 
     suspend fun getStream(dataUrl: String, callback: (ExtractorLink) -> Unit): Boolean {
         try {
-            // Replace the generic Hub URL with the Vidnest domain
-            val vidnestUrl = dataUrl.replace("https://streamhub.app", "https://vidnest.fun")
+            // Force the URL into the /embed/ path to try and trigger auto-play
+            // Bypasses the main UI "Click to Play" requirement
+            val vidnestUrl = dataUrl
+                .replace("https://streamhub.app/movie/", "https://vidnest.fun/embed/movie/")
+                .replace("https://streamhub.app/tv/", "https://vidnest.fun/embed/tv/")
 
-            // Regex targeting the animanga.fun or 1x2.space CDNs you found in catcatch
-            val targetRegex = Regex(""".*(animanga\.fun|1x2\.space).*\.m3u8.*""")
+            // Broadened Regex targeting the CDNs or just raw m3u8 playlists
+            val targetRegex = Regex(""".*(animanga\.fun|1x2\.space|m3u8).*""")
             val interceptor = WebViewResolver(targetRegex)
 
             val response = app.get(vidnestUrl, interceptor = interceptor)
