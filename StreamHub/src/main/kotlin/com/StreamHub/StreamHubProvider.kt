@@ -131,6 +131,11 @@ class StreamHubProvider : MainAPI() {
         if (VidlinkExtractor.getStream(data, callback)) {
             foundLinks = true
         }
+
+        // 4. Fetch Vidnest Stream
+        if (VidnestExtractor.getStream(data, callback)) {
+            foundLinks = true
+        }
         
         return foundLinks
     }
