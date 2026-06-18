@@ -8,18 +8,15 @@ object VidcoreExtractor {
 
     suspend fun getStream(dataUrl: String, callback: (ExtractorLink) -> Unit): Boolean {
         try {
-            // Convert 111movies master URL to Vidcore embed URL
-            val vidcoreUrl = dataUrl.replace("111movies.net", "vidcore.net")
+            // Replace the generic Hub URL with the Vidcore domain
+            val vidcoreUrl = dataUrl.replace("https://streamhub.app", "https://vidcore.net")
 
-            // Regex targeting the exact domain you found in your Network tab
             val targetRegex = Regex(""".*digitalsun\.app.*\.m3u8.*""")
             val interceptor = WebViewResolver(targetRegex)
 
-            // Execute the headless browser
             val response = app.get(vidcoreUrl, interceptor = interceptor)
             val interceptedUrl = response.url
 
-            // If we successfully caught the m3u8 link
             if (interceptedUrl.contains("digitalsun.app") || interceptedUrl.contains(".m3u8")) {
                 callback.invoke(
                     newExtractorLink(
@@ -28,7 +25,6 @@ object VidcoreExtractor {
                         url = interceptedUrl,
                         type = ExtractorLinkType.M3U8
                     ) {
-                        // Crucial: Found in your Request Headers screenshot
                         this.referer = "https://vidcore.net/" 
                     }
                 )
