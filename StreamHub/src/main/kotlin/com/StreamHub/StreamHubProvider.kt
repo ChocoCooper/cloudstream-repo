@@ -74,9 +74,17 @@ class StreamHubProvider : MainAPI() {
         @JsonProperty("overview") val overview: String?
     )
 
-    // --- WYZIESUBS DATA CLASS ---
-    private data class WyzieSub(
+    // --- SUBSOURCE API DATA CLASSES ---
+    // Resilient wrappers to catch both direct arrays and object-wrapped arrays
+    private data class SubsourceResponse(
+        @JsonProperty("data") val data: List<SubsourceSub>?,
+        @JsonProperty("results") val results: List<SubsourceSub>?
+    )
+
+    private data class SubsourceSub(
         @JsonProperty("url") val url: String?,
+        @JsonProperty("downloadUrl") val downloadUrl: String?,
+        @JsonProperty("download_url") val downloadUrlSnake: String?,
         @JsonProperty("link") val link: String?,
         @JsonProperty("language") val language: String?,
         @JsonProperty("lang") val lang: String?,
@@ -163,7 +171,6 @@ class StreamHubProvider : MainAPI() {
         val parsedYear = (details.releaseDate ?: details.firstAirDate)?.split("-")?.firstOrNull()?.toIntOrNull()
         val parsedTags = details.genres?.mapNotNull { it.name } ?: emptyList()
         
-        // Hunts ONLY for English logos. If none exists, parsedLogo is null, triggering text fallback.
         val logoPath = details.images?.logos?.firstOrNull { it.lang == "en" }?.filePath 
         val parsedLogo = logoPath?.let { "$backdropBase$it" }
 
@@ -216,28 +223,48 @@ class StreamHubProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val isMovie = data.contains("/movie/")
-        val parts = data.split("/")
+        // Strip trailing query parameters from the URL before parsing IDs
+        val cleanData = data.substringBefore("?")
+        val isMovie = cleanData.contains("/movie/")
+        val parts = cleanData.split("/")
+        
         val tmdbId = if (isMovie) parts.last() else parts[parts.size - 3]
         val season = if (!isMovie) parts[parts.size - 2].toIntOrNull() else null
         val episode = if (!isMovie) parts.last().toIntOrNull() else null
 
         return coroutineScope {
-            // 1. Fetch subtitles concurrently
+            // 1. Fetch subtitles concurrently via Subsource API
             val subJob = async {
                 try {
-                    var wyzieUrl = "https://sub.wyzie.io/search?id=$tmdbId"
+                    // Include both id parameters to ensure TMDB mapping works perfectly 
+                    var subsourceUrl = "https://api.subsource.net/api/v1/search?tmdb_id=$tmdbId&id=$tmdbId"
                     if (!isMovie && season != null && episode != null) {
-                        wyzieUrl += "&season=$season&episode=$episode"
+                        subsourceUrl += "&season=$season&episode=$episode"
                     }
-                    val wyzieResponse = app.get(wyzieUrl).parsedSafe<List<WyzieSub>>()
-                    wyzieResponse?.forEach { sub ->
-                        val subUrl = sub.url ?: sub.link ?: return@forEach
+
+                    // Securely pass the API Key inside the request headers
+                    val headers = mapOf(
+                        "X-API-Key" to "sk_8cd2f1924121701f5ba20f81d012c584aade74ebd3f766fb8281258141cd200a",
+                        "Accept" to "application/json"
+                    )
+
+                    val response = app.get(subsourceUrl, headers = headers)
+
+                    // Resilient Parse: Handles both object-wrapped and flat-array JSON formats
+                    val subList = try {
+                        val parsed = response.parsedSafe<SubsourceResponse>()
+                        parsed?.data ?: parsed?.results ?: response.parsedSafe<List<SubsourceSub>>()
+                    } catch (e: Exception) {
+                        response.parsedSafe<List<SubsourceSub>>()
+                    }
+
+                    subList?.forEach { sub ->
+                        val finalUrl = sub.downloadUrl ?: sub.downloadUrlSnake ?: sub.url ?: sub.link ?: return@forEach
                         val lang = sub.language ?: sub.lang ?: sub.langIso ?: "English"
-                        subtitleCallback.invoke(SubtitleFile(lang = lang, url = subUrl))
+                        subtitleCallback.invoke(SubtitleFile(lang = lang, url = finalUrl))
                     }
                 } catch (e: Exception) {
-                    // Silently skip if Wyziesubs fails to load
+                    // Silently skip if Subsource API fails, ensuring the video still plays flawlessly
                 }
             }
 
@@ -251,7 +278,7 @@ class StreamHubProvider : MainAPI() {
             // Wait for all extractors to finish their tasks
             val results = extractors.awaitAll()
             
-            // Wait for subtitles to finish injecting
+            // Ensure subtitle tasks complete before ending the scope
             subJob.await()
 
             // If any extractor successfully returned true, return true overall
