@@ -241,18 +241,11 @@ class StreamHubProvider : MainAPI() {
             // Silently skip if Wyziesubs fails to load
         }
 
-        // --- STATIC EXTRACTORS ---
-        if (Movies111Extractor.getStream(data, callback)) {
-            foundLinks = true
-        }
-
-        if (VidcoreExtractor.getStream(data, callback)) {
-            foundLinks = true
-        }
-
-        if (VidlinkExtractor.getStream(data, callback)) {
-            foundLinks = true
-        }
+        if (Movies111Extractor.getStream(data, callback)) foundLinks = true
+        if (VidcoreExtractor.getStream(data, callback)) foundLinks = true
+        if (VidlinkExtractor.getStream(data, callback)) foundLinks = true
+        if (VidsrcmeExtractor.getStream(data, callback)) foundLinks = true
+        if (VidzeeExtractor.getStream(data, callback)) foundLinks = true
         
         return foundLinks
     }
