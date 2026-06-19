@@ -47,7 +47,6 @@ class StreamHubProvider : MainAPI() {
         @JsonProperty("media_type") val mediaType: String?
     )
     
-    // Added external_ids to fetch the IMDb ID required by Stremio Addons
     private data class TmdbExternalIds(@JsonProperty("imdb_id") val imdbId: String?)
     private data class TmdbDetails(
         @JsonProperty("id") val id: Int?,
@@ -147,8 +146,10 @@ class StreamHubProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        val isMovie = url.contains("/movie/")
-        val tmdbId = url.substringAfterLast("/")
+        // FIX: Strip query parameters BEFORE pulling the ID so TMDB doesn't throw a 404
+        val cleanUrl = url.substringBefore("?")
+        val isMovie = cleanUrl.contains("/movie/")
+        val tmdbId = cleanUrl.substringAfterLast("/")
         
         val endpoint = if (isMovie) "movie" else "tv"
         val detailsUrl = "$tmdbBase/$endpoint/$tmdbId?api_key={API_KEY}&append_to_response=images,external_ids&include_image_language=en,null"
@@ -177,8 +178,6 @@ class StreamHubProvider : MainAPI() {
                 this.logoUrl = parsedLogo 
             }
         } else {
-            // FIX: Generates episodes mathematically using season.episodeCount! 
-            // Eliminates TMDB rate-limiting crashes and loads the series page instantly.
             val episodes = mutableListOf<Episode>()
             details.seasons?.filter { (it.seasonNumber ?: 0) > 0 }?.forEach { season ->
                 val sNum = season.seasonNumber ?: return@forEach
@@ -211,10 +210,10 @@ class StreamHubProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // FIX: Bulletproof Regex ID Parser. Prevents Array out-of-bounds crashes.
         val cleanData = data.substringBefore("?")
         val isMovie = cleanData.contains("/movie/")
         
+        // Bulletproof Regex ID Parsing
         val tmdbId = Regex("""/(?:movie|tv)/(\d+)""").find(cleanData)?.groupValues?.get(1) ?: return false
         val season = Regex("""/tv/\d+/(\d+)""").find(cleanData)?.groupValues?.get(1)?.toIntOrNull()
         val episode = Regex("""/tv/\d+/\d+/(\d+)""").find(cleanData)?.groupValues?.get(1)?.toIntOrNull()
@@ -235,7 +234,7 @@ class StreamHubProvider : MainAPI() {
                     wyzieList?.forEach { sub ->
                         val subUrl = sub.url ?: return@forEach
                         val lang = sub.display ?: sub.language ?: "English"
-                        subtitleCallback.invoke(SubtitleFile(lang, subUrl))
+                        subtitleCallback.invoke(newSubtitleFile(lang, subUrl))
                     }
 
                     // Layer 2: OpenSubtitles Backup (From CineStreamParser)
@@ -251,7 +250,7 @@ class StreamHubProvider : MainAPI() {
                                 val url = sub.optString("url")
                                 val lang = sub.optString("lang")
                                 if (url.isNotBlank() && lang.isNotBlank()) {
-                                    subtitleCallback.invoke(SubtitleFile(lang, url))
+                                    subtitleCallback.invoke(newSubtitleFile(lang, url))
                                 }
                             }
                         }
@@ -262,22 +261,17 @@ class StreamHubProvider : MainAPI() {
             // --- 2. BLAZING FAST DIRECT APIs & PREMIUM EMBEDS ---
             val directExtractors = listOf(
                 async {
-                    // API 1: Madplay CDN (Instant manifest)
+                    // API 1: Madplay CDN 
+                    // FIX: Uses M3u8Helper to properly parse the master manifest for ExoPlayer
                     try {
                         val url = if (season == null) "https://cdn.madplay.site/api/hls/unknown/${tmdbId}/master.m3u8"
                                   else "https://cdn.madplay.site/api/hls/unknown/${tmdbId}/season_${season}/episode_${episode}/master.m3u8"
-                        val res = app.get(url, timeout = 5)
-                        if (res.code == 200) {
-                            callback.invoke(newExtractorLink(
-                                "Madplay CDN", 
-                                "Madplay CDN", 
-                                url, 
-                                ExtractorLinkType.M3U8
-                            ) {
-                                this.quality = Qualities.P1080.value
-                            })
-                            true
-                        } else false
+                        var found = false
+                        M3u8Helper.generateM3u8("Madplay CDN", url, "").forEach { link ->
+                            callback.invoke(link)
+                            found = true
+                        }
+                        found
                     } catch(e: Exception) { false }
                 },
                 async {
@@ -309,7 +303,6 @@ class StreamHubProvider : MainAPI() {
                         var found = false
                         for (i in 0 until linksArray.length()) {
                             val embedUrl = linksArray.getJSONObject(i).getString("url")
-                            // Natively pass premium embeds (like Filemoon, Streamwish) directly to Cloudstream's generic Extractors
                             loadExtractor(embedUrl, "https://www.vidsrc.wtf/", subtitleCallback, callback)
                             found = true
                         }
@@ -417,31 +410,15 @@ class StreamHubProvider : MainAPI() {
                     } catch(e: Exception) { false }
                 },
                 async {
-                    // API 8: Torrentio Addon (Lightning fast P2P Magnet Engine)
+                    // API 8: PlayImdb Server (Added from CineStreamExtractors)
                     try {
                         if (imdbId == null) return@async false
-                        val url = if (isMovie) "https://torrentio.strem.fun/stream/movie/$imdbId.json" else "https://torrentio.strem.fun/stream/series/$imdbId:$season:$episode.json"
-                        val res = app.get(url, timeout = 5).text
-                        val streams = JSONObject(res).optJSONArray("streams") ?: return@async false
-                        var found = false
-                        for(i in 0 until streams.length()) {
-                            val s = streams.getJSONObject(i)
-                            val infoHash = s.optString("infoHash")
-                            val title = s.optString("title", "Torrentio").replace("\n", " ")
-                            if (infoHash.isNotBlank()) {
-                                val magnet = "magnet:?xt=urn:btih:$infoHash&dn=${URLEncoder.encode(title, "UTF-8")}"
-                                callback.invoke(newExtractorLink(
-                                    "Torrentio", 
-                                    "Torrentio 🧲", 
-                                    magnet, 
-                                    ExtractorLinkType.MAGNET
-                                ) {
-                                    this.quality = Qualities.Unknown.value
-                                })
-                                found = true
-                            }
-                        }
-                        found
+                        val url = if (season == null) "https://playimdb.net/embed/$imdbId" else "https://playimdb.net/embed/tv?imdb=$imdbId&season=$season&episode=$episode"
+                        val iframe = app.get(url, timeout = 5).document.selectFirst("#player_iframe")?.attr("src") ?: return@async false
+                        val finalIframe = if (!iframe.startsWith("http")) "https:$iframe" else iframe
+                        
+                        loadExtractor(finalIframe, "https://playimdb.net/", subtitleCallback, callback)
+                        true
                     } catch(e: Exception) { false }
                 }
             )
