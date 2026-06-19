@@ -6,7 +6,6 @@ import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.awaitAll
-import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
 
@@ -146,7 +145,7 @@ class StreamHubProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        // FIX: Strip query parameters BEFORE pulling the ID so TMDB doesn't throw a 404
+        // Safe URL splitting to prevent 404 crashes
         val cleanUrl = url.substringBefore("?")
         val isMovie = cleanUrl.contains("/movie/")
         val tmdbId = cleanUrl.substringAfterLast("/")
@@ -210,10 +209,10 @@ class StreamHubProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        // Bulletproof Regex ID Parsing
         val cleanData = data.substringBefore("?")
         val isMovie = cleanData.contains("/movie/")
         
-        // Bulletproof Regex ID Parsing
         val tmdbId = Regex("""/(?:movie|tv)/(\d+)""").find(cleanData)?.groupValues?.get(1) ?: return false
         val season = Regex("""/tv/\d+/(\d+)""").find(cleanData)?.groupValues?.get(1)?.toIntOrNull()
         val episode = Regex("""/tv/\d+/\d+/(\d+)""").find(cleanData)?.groupValues?.get(1)?.toIntOrNull()
@@ -221,113 +220,71 @@ class StreamHubProvider : MainAPI() {
 
         return coroutineScope {
             
-            // --- 1. DOUBLE LAYER SUBTITLE NETWORK ---
+            // --- 1. TRIPLE LAYER SUBTITLE NETWORK ---
             val subJob = async {
+                // 1. Official Stremio OpenSubtitles v3 (Highly Reliable)
+                if (imdbId != null) {
+                    try {
+                        val os3Url = if(isMovie) "https://opensubtitles-v3.strem.io/subtitles/movie/$imdbId.json" 
+                                     else "https://opensubtitles-v3.strem.io/subtitles/series/$imdbId:$season:$episode.json"
+                        val res = app.get(os3Url, timeout = 5).text
+                        val subs = JSONObject(res).optJSONArray("subtitles")
+                        if (subs != null) {
+                            for (i in 0 until subs.length()) {
+                                val sub = subs.getJSONObject(i)
+                                val url = sub.optString("url")
+                                val lang = sub.optString("lang")
+                                if (url.isNotBlank() && lang.isNotBlank()) subtitleCallback.invoke(SubtitleFile(lang, url))
+                            }
+                        }
+                    } catch (e: Exception) {}
+                }
+
+                // 2. Legacy Stremio OpenSubtitles
+                if (imdbId != null) {
+                    try {
+                        val osLegacyUrl = if(isMovie) "https://opensubtitles.strem.io/stremio/v1/subtitles/movie/$imdbId.json" 
+                                          else "https://opensubtitles.strem.io/stremio/v1/subtitles/series/$imdbId:$season:$episode.json"
+                        val res = app.get(osLegacyUrl, timeout = 5).text
+                        val subs = JSONObject(res).optJSONArray("subtitles")
+                        if (subs != null) {
+                            for (i in 0 until subs.length()) {
+                                val sub = subs.getJSONObject(i)
+                                val url = sub.optString("url")
+                                val lang = sub.optString("lang")
+                                if (url.isNotBlank() && lang.isNotBlank()) subtitleCallback.invoke(SubtitleFile(lang, url))
+                            }
+                        }
+                    } catch (e: Exception) {}
+                }
+
+                // 3. Wyziesubs API
                 try {
-                    // Layer 1: Wyziesubs API
                     var wyzieUrl = "https://sub.wyzie.io/search?id=$tmdbId&source=all&key=$wyzieApiKey"
                     if (!isMovie && season != null && episode != null) wyzieUrl += "&season=$season&episode=$episode"
-                    
                     val wyzieResponse = app.get(wyzieUrl, timeout = 5).text
                     val wyzieList = AppUtils.tryParseJson<List<WyzieSub>>(wyzieResponse)
-                    
                     wyzieList?.forEach { sub ->
                         val subUrl = sub.url ?: return@forEach
                         val lang = sub.display ?: sub.language ?: "English"
-                        subtitleCallback.invoke(newSubtitleFile(lang, subUrl))
+                        subtitleCallback.invoke(SubtitleFile(lang, subUrl))
                     }
-
-                    // Layer 2: OpenSubtitles Backup (From CineStreamParser)
-                    if (imdbId != null) {
-                        val osUrl = if(isMovie) "https://opensubtitles.stremio.homes/en|es|hi|ar|fr/ai-translated=true|from=all/subtitles/movie/$imdbId.json" 
-                                    else "https://opensubtitles.stremio.homes/en|es|hi|ar|fr/ai-translated=true|from=all/subtitles/series/$imdbId:$season:$episode.json"
-                        
-                        val osRes = app.get(osUrl, timeout = 5).text
-                        val osArray = JSONObject(osRes).optJSONArray("subtitles")
-                        if (osArray != null) {
-                            for (i in 0 until osArray.length()) {
-                                val sub = osArray.getJSONObject(i)
-                                val url = sub.optString("url")
-                                val lang = sub.optString("lang")
-                                if (url.isNotBlank() && lang.isNotBlank()) {
-                                    subtitleCallback.invoke(newSubtitleFile(lang, url))
-                                }
-                            }
-                        }
-                    }
-                } catch (e: Exception) { /* Silently fail to protect video playback */ }
+                } catch (e: Exception) {}
             }
 
-            // --- 2. BLAZING FAST DIRECT APIs & PREMIUM EMBEDS ---
-            val directExtractors = listOf(
+            // --- 2. NATIVE IFRAME SCRAPERS (Bypasses EXTM3U Crashes) ---
+            val embedExtractors = listOf(
                 async {
-                    // API 1: Madplay CDN 
-                    // FIX: Uses M3u8Helper to properly parse the master manifest for ExoPlayer
+                    // API 1: AutoEmbed.co Hub
                     try {
-                        val url = if (season == null) "https://cdn.madplay.site/api/hls/unknown/${tmdbId}/master.m3u8"
-                                  else "https://cdn.madplay.site/api/hls/unknown/${tmdbId}/season_${season}/episode_${episode}/master.m3u8"
+                        val url = if (isMovie) "https://autoembed.co/movie/tmdb/$tmdbId" else "https://autoembed.co/tv/tmdb/$tmdbId-$season-$episode"
+                        val html = app.get(url, timeout = 8).text
+                        val iframes = Regex("""<iframe[^>]+src="([^"]+)"""").findAll(html)
                         var found = false
-                        M3u8Helper.generateM3u8("Madplay CDN", url, "").forEach { link ->
-                            callback.invoke(link)
-                            found = true
-                        }
-                        found
-                    } catch(e: Exception) { false }
-                },
-                async {
-                    // API 2: VidSrcWtf Direct Streams
-                    try {
-                        val url = if (isMovie) "https://www.vidsrc.wtf/main/movie/$tmdbId" else "https://www.vidsrc.wtf/main/tv/$tmdbId/$season/$episode"
-                        val res = app.get(url, timeout = 5, headers = mapOf("Origin" to "https://www.vidsrc.wtf", "Referer" to "https://www.vidsrc.wtf/")).text
-                        val streamUrl = JSONObject(res).getJSONObject("stream").getString("url")
-                        if (streamUrl.contains(".m3u8")) {
-                            callback.invoke(newExtractorLink(
-                                "VidSrcWtf", 
-                                "VidSrcWtf", 
-                                streamUrl, 
-                                ExtractorLinkType.M3U8
-                            ) {
-                                this.headers = mapOf("Origin" to "https://www.vidsrc.wtf", "Referer" to "https://www.vidsrc.wtf/")
-                                this.quality = Qualities.P1080.value
-                            })
-                            true
-                        } else false
-                    } catch(e: Exception) { false }
-                },
-                async {
-                    // API 3: VidSrcWtf Premium Embeds (Cloudstream native integration)
-                    try {
-                        val url = if (isMovie) "https://www.vidsrc.wtf/premium_embeds/movie/$tmdbId" else "https://www.vidsrc.wtf/premium_embeds/tv/$tmdbId/$season/$episode"
-                        val res = app.get(url, timeout = 5, headers = mapOf("Origin" to "https://www.vidsrc.wtf", "Referer" to "https://www.vidsrc.wtf/")).text
-                        val linksArray = JSONObject(res).getJSONArray("links")
-                        var found = false
-                        for (i in 0 until linksArray.length()) {
-                            val embedUrl = linksArray.getJSONObject(i).getString("url")
-                            loadExtractor(embedUrl, "https://www.vidsrc.wtf/", subtitleCallback, callback)
-                            found = true
-                        }
-                        found
-                    } catch (e: Exception) { false }
-                },
-                async {
-                    // API 4: Playsrc API
-                    try {
-                        val url = if (season == null) "https://api.madplay.site/api/playsrc?id=$tmdbId&token=direct" else "https://madplay.site/api/movies/holly?id=$tmdbId&season=$season&episode=$episode&token=direct"
-                        val resText = app.get(url, timeout = 5).text
-                        val jsonArray = JSONArray(resText)
-                        var found = false
-                        for (i in 0 until jsonArray.length()) {
-                            val obj = jsonArray.getJSONObject(i)
-                            val file = obj.getString("file")
-                            if (file.isNotBlank()) {
-                                callback.invoke(newExtractorLink(
-                                    "Playsrc", 
-                                    "Playsrc", 
-                                    file, 
-                                    ExtractorLinkType.M3U8
-                                ) {
-                                    this.quality = Qualities.P1080.value
-                                })
+                        iframes.forEach { match ->
+                            val iframeUrl = match.groupValues[1]
+                            if (iframeUrl.startsWith("http")) {
+                                loadExtractor(iframeUrl, url, subtitleCallback, callback)
                                 found = true
                             }
                         }
@@ -335,24 +292,16 @@ class StreamHubProvider : MainAPI() {
                     } catch(e: Exception) { false }
                 },
                 async {
-                    // API 5: Vidflix API
+                    // API 2: MultiEmbed.mov Hub
                     try {
-                        val url = if (season == null) "https://madplay.site/api/movies/holly?id=$tmdbId&token=direct" else "https://madplay.site/api/movies/holly?id=$tmdbId&season=$season&episode=$episode&token=direct"
-                        val resText = app.get(url, timeout = 5).text
-                        val jsonArray = JSONArray(resText)
+                        val url = if (isMovie) "https://multiembed.mov/directstream.php?video_id=$tmdbId&tmdb=1" else "https://multiembed.mov/directstream.php?video_id=$tmdbId&tmdb=1&s=$season&e=$episode"
+                        val html = app.get(url, timeout = 8).text
+                        val iframes = Regex("""<iframe[^>]+src="([^"]+)"""").findAll(html)
                         var found = false
-                        for (i in 0 until jsonArray.length()) {
-                            val obj = jsonArray.getJSONObject(i)
-                            val file = obj.getString("file")
-                            if (file.isNotBlank()) {
-                                callback.invoke(newExtractorLink(
-                                    "Vidflix", 
-                                    "Vidflix", 
-                                    file, 
-                                    ExtractorLinkType.M3U8
-                                ) {
-                                    this.quality = Qualities.P1080.value
-                                })
+                        iframes.forEach { match ->
+                            val iframeUrl = match.groupValues[1]
+                            if (iframeUrl.startsWith("http") && !iframeUrl.contains("youtube")) {
+                                loadExtractor(iframeUrl, url, subtitleCallback, callback)
                                 found = true
                             }
                         }
@@ -360,78 +309,33 @@ class StreamHubProvider : MainAPI() {
                     } catch(e: Exception) { false }
                 },
                 async {
-                    // API 6: Streamvix Stremio Addon
+                    // API 3: 2Embed.cc Hub
                     try {
-                        if (imdbId == null) return@async false
-                        val url = if (isMovie) "https://streamvix.com/stream/movie/$imdbId.json" else "https://streamvix.com/stream/series/$imdbId:$season:$episode.json"
-                        val res = app.get(url, timeout = 5).text
-                        val streams = JSONObject(res).optJSONArray("streams") ?: return@async false
+                        val url = if (isMovie) "https://www.2embed.cc/embed/$tmdbId" else "https://www.2embed.cc/embedtv/$tmdbId&s=$season&e=$episode"
+                        val html = app.get(url, timeout = 8).text
+                        // 2Embed usually stores iframe links in data-src
+                        val iframes = Regex("""data-src="([^"]+)"""").findAll(html)
                         var found = false
-                        for(i in 0 until streams.length()) {
-                            val streamUrl = streams.getJSONObject(i).optString("url")
-                            if (streamUrl.contains(".m3u8")) {
-                                callback.invoke(newExtractorLink(
-                                    "Streamvix", 
-                                    "Streamvix", 
-                                    streamUrl, 
-                                    ExtractorLinkType.M3U8
-                                ) {
-                                    this.quality = Qualities.P1080.value
-                                })
+                        iframes.forEach { match ->
+                            val iframeUrl = match.groupValues[1]
+                            if (iframeUrl.startsWith("http")) {
+                                loadExtractor(iframeUrl, url, subtitleCallback, callback)
                                 found = true
                             }
                         }
                         found
-                    } catch(e: Exception) { false }
-                },
-                async {
-                    // API 7: NoTorrent Stremio Addon
-                    try {
-                        if (imdbId == null) return@async false
-                        val url = if (isMovie) "https://notorrent.strem.fun/stream/movie/$imdbId.json" else "https://notorrent.strem.fun/stream/series/$imdbId:$season:$episode.json"
-                        val res = app.get(url, timeout = 5).text
-                        val streams = JSONObject(res).optJSONArray("streams") ?: return@async false
-                        var found = false
-                        for(i in 0 until streams.length()) {
-                            val streamUrl = streams.getJSONObject(i).optString("url")
-                            if (streamUrl.contains(".m3u8")) {
-                                callback.invoke(newExtractorLink(
-                                    "NoTorrent", 
-                                    "NoTorrent", 
-                                    streamUrl, 
-                                    ExtractorLinkType.M3U8
-                                ) {
-                                    this.quality = Qualities.P1080.value
-                                })
-                                found = true
-                            }
-                        }
-                        found
-                    } catch(e: Exception) { false }
-                },
-                async {
-                    // API 8: PlayImdb Server (Added from CineStreamExtractors)
-                    try {
-                        if (imdbId == null) return@async false
-                        val url = if (season == null) "https://playimdb.net/embed/$imdbId" else "https://playimdb.net/embed/tv?imdb=$imdbId&season=$season&episode=$episode"
-                        val iframe = app.get(url, timeout = 5).document.selectFirst("#player_iframe")?.attr("src") ?: return@async false
-                        val finalIframe = if (!iframe.startsWith("http")) "https:$iframe" else iframe
-                        
-                        loadExtractor(finalIframe, "https://playimdb.net/", subtitleCallback, callback)
-                        true
                     } catch(e: Exception) { false }
                 }
             )
 
             // --- 3. WEBVIEW FALLBACK EXTRACTORS ---
-            // Only runs if the blazing fast APIs fail to resolve first
             val webviewExtractors = listOf(
                 async { Movies111Extractor.getStream(cleanData, callback) },
                 async { VidcoreExtractor.getStream(cleanData, callback) },
                 async { VidlinkExtractor.getStream(cleanData, callback) }
             )
 
-            val allResults = (directExtractors + webviewExtractors).awaitAll()
+            val allResults = (embedExtractors + webviewExtractors).awaitAll()
             
             subJob.await()
 
