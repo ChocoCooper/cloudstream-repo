@@ -51,16 +51,13 @@ class StreamHubProvider : MainAPI() {
         @JsonProperty("backdrop_path") val backdropPath: String?,
         @JsonProperty("release_date") val releaseDate: String?,
         @JsonProperty("first_air_date") val firstAirDate: String?,
-        @JsonProperty("runtime") val runtime: Int?,
         @JsonProperty("genres") val genres: List<TmdbGenre>?,
         @JsonProperty("seasons") val seasons: List<TmdbSeason>?,
         @JsonProperty("images") val images: TmdbImages?
     )
 
     private data class TmdbGenre(@JsonProperty("name") val name: String?)
-    
     private data class TmdbImages(@JsonProperty("logos") val logos: List<TmdbImage>?)
-    
     private data class TmdbImage(
         @JsonProperty("file_path") val filePath: String?,
         @JsonProperty("iso_639_1") val lang: String?
@@ -82,6 +79,16 @@ class StreamHubProvider : MainAPI() {
         @JsonProperty("overview") val overview: String?
     )
 
+    // --- WYZIE SUBS DATA CLASS ---
+    // A resilient data class to catch multiple possible JSON key structures
+    private data class WyzieSub(
+        @JsonProperty("url") val url: String?,
+        @JsonProperty("link") val link: String?,
+        @JsonProperty("language") val language: String?,
+        @JsonProperty("lang") val lang: String?,
+        @JsonProperty("lang_iso") val langIso: String?
+    )
+
     // --- CORE LOGIC ---
     private suspend inline fun <reified T : Any> fetchTmdb(url: String): T? {
         val keysToTry = tmdbApiKeys.shuffled().take(3)
@@ -97,7 +104,6 @@ class StreamHubProvider : MainAPI() {
         return null
     }
 
-    // --- HOMEPAGE CONFIGURATION ---
     override val mainPage = mainPageOf(
         "$tmdbBase/trending/movie/week?api_key={API_KEY}" to "Trending Movies",
         "$tmdbBase/trending/tv/week?api_key={API_KEY}" to "Trending Shows",
@@ -125,7 +131,6 @@ class StreamHubProvider : MainAPI() {
         return newHomePageResponse(request.name, items)
     }
 
-    // --- SEARCH LOGIC ---
     override suspend fun search(query: String): List<SearchResponse> {
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
         val url = "$tmdbBase/search/multi?api_key={API_KEY}&query=$encodedQuery"
@@ -145,7 +150,6 @@ class StreamHubProvider : MainAPI() {
         } ?: emptyList()
     }
 
-    // --- DETAILS & EPISODE LOGIC ---
     override suspend fun load(url: String): LoadResponse? {
         val isMovie = url.contains("/movie/")
         val tmdbId = url.substringAfterLast("/")
@@ -162,7 +166,6 @@ class StreamHubProvider : MainAPI() {
         val parsedYear = (details.releaseDate ?: details.firstAirDate)?.split("-")?.firstOrNull()?.toIntOrNull()
         val parsedTags = details.genres?.mapNotNull { it.name } ?: emptyList()
         
-        // STRICTLY pulls only English logos. If none exists, variable is null, causing Cloudstream to fall back to text.
         val logoPath = details.images?.logos?.firstOrNull { it.lang == "en" }?.filePath 
         val parsedLogo = logoPath?.let { "$backdropBase$it" }
 
@@ -173,7 +176,7 @@ class StreamHubProvider : MainAPI() {
                 this.plot = details.overview
                 this.year = parsedYear
                 this.tags = parsedTags
-                this.logoUrl = parsedLogo
+                this.logoUrl = parsedLogo 
             }
         } else {
             val episodes = coroutineScope {
@@ -209,7 +212,6 @@ class StreamHubProvider : MainAPI() {
         }
     }
 
-    // --- EXTRACTOR ROUTING ---
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -218,6 +220,39 @@ class StreamHubProvider : MainAPI() {
     ): Boolean {
         var foundLinks = false
 
+        // Extract ID data from the dummy url (e.g., https://streamhub.app/tv/12345/1/2)
+        val isMovie = data.contains("/movie/")
+        val parts = data.split("/")
+        val tmdbId = if (isMovie) parts.last() else parts[parts.size - 3]
+        val season = if (!isMovie) parts[parts.size - 2].toIntOrNull() else null
+        val episode = if (!isMovie) parts.last().toIntOrNull() else null
+
+        // --- NATIVE WYZIE SUBS API FETCH ---
+        try {
+            var wyzieUrl = "https://sub.wyzie.io/search?id=$tmdbId"
+            if (!isMovie && season != null && episode != null) {
+                wyzieUrl += "&season=$season&episode=$episode"
+            }
+            
+            // Note: If Wyzie enforces auth later, generate a free key at sub.wyzie.io/redeem and append &key=YOUR_KEY
+            val wyzieResponse = app.get(wyzieUrl).parsedSafe<List<WyzieSub>>()
+            
+            wyzieResponse?.forEach { sub ->
+                val subUrl = sub.url ?: sub.link ?: return@forEach
+                val lang = sub.language ?: sub.lang ?: sub.langIso ?: "English"
+                
+                subtitleCallback.invoke(
+                    SubtitleFile(
+                        lang = lang,
+                        url = subUrl
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            // Silently fail, allowing the video extractors to continue running
+        }
+
+        // --- VIDEO EXTRACTORS ---
         if (Movies111Extractor.getStream(data, callback)) {
             foundLinks = true
         }
