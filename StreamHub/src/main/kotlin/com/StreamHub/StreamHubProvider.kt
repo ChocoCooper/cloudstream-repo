@@ -62,16 +62,11 @@ class StreamHubProvider : MainAPI() {
         @JsonProperty("file_path") val filePath: String?,
         @JsonProperty("iso_639_1") val lang: String?
     )
-
     private data class TmdbSeason(
         @JsonProperty("season_number") val seasonNumber: Int?,
         @JsonProperty("episode_count") val episodeCount: Int?
     )
-
-    private data class TmdbSeasonDetails(
-        @JsonProperty("episodes") val episodes: List<TmdbEpisode>?
-    )
-
+    private data class TmdbSeasonDetails(@JsonProperty("episodes") val episodes: List<TmdbEpisode>?)
     private data class TmdbEpisode(
         @JsonProperty("episode_number") val episodeNumber: Int?,
         @JsonProperty("name") val name: String?,
@@ -79,8 +74,7 @@ class StreamHubProvider : MainAPI() {
         @JsonProperty("overview") val overview: String?
     )
 
-    // --- WYZIE SUBS DATA CLASS ---
-    // A resilient data class to catch multiple possible JSON key structures
+    // --- WYZIESUBS DATA CLASS ---
     private data class WyzieSub(
         @JsonProperty("url") val url: String?,
         @JsonProperty("link") val link: String?,
@@ -166,6 +160,7 @@ class StreamHubProvider : MainAPI() {
         val parsedYear = (details.releaseDate ?: details.firstAirDate)?.split("-")?.firstOrNull()?.toIntOrNull()
         val parsedTags = details.genres?.mapNotNull { it.name } ?: emptyList()
         
+        // Hunts ONLY for English logos. If none exists, parsedLogo is null, triggering text fallback.
         val logoPath = details.images?.logos?.firstOrNull { it.lang == "en" }?.filePath 
         val parsedLogo = logoPath?.let { "$backdropBase$it" }
 
@@ -220,39 +215,30 @@ class StreamHubProvider : MainAPI() {
     ): Boolean {
         var foundLinks = false
 
-        // Extract ID data from the dummy url (e.g., https://streamhub.app/tv/12345/1/2)
+        // Parse IDs from dummy URL to hit the Wyziesubs API
         val isMovie = data.contains("/movie/")
         val parts = data.split("/")
         val tmdbId = if (isMovie) parts.last() else parts[parts.size - 3]
         val season = if (!isMovie) parts[parts.size - 2].toIntOrNull() else null
         val episode = if (!isMovie) parts.last().toIntOrNull() else null
 
-        // --- NATIVE WYZIE SUBS API FETCH ---
+        // --- WYZIESUBS FETCH ---
         try {
             var wyzieUrl = "https://sub.wyzie.io/search?id=$tmdbId"
             if (!isMovie && season != null && episode != null) {
                 wyzieUrl += "&season=$season&episode=$episode"
             }
-            
-            // Note: If Wyzie enforces auth later, generate a free key at sub.wyzie.io/redeem and append &key=YOUR_KEY
             val wyzieResponse = app.get(wyzieUrl).parsedSafe<List<WyzieSub>>()
-            
             wyzieResponse?.forEach { sub ->
                 val subUrl = sub.url ?: sub.link ?: return@forEach
                 val lang = sub.language ?: sub.lang ?: sub.langIso ?: "English"
-                
-                subtitleCallback.invoke(
-                    SubtitleFile(
-                        lang = lang,
-                        url = subUrl
-                    )
-                )
+                subtitleCallback.invoke(SubtitleFile(lang = lang, url = subUrl))
             }
         } catch (e: Exception) {
-            // Silently fail, allowing the video extractors to continue running
+            // Silently skip if Wyziesubs fails to load
         }
 
-        // --- VIDEO EXTRACTORS ---
+        // --- STATIC EXTRACTORS ---
         if (Movies111Extractor.getStream(data, callback)) {
             foundLinks = true
         }
