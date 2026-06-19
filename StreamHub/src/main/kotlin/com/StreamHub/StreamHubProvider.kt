@@ -44,7 +44,6 @@ class StreamHubProvider : MainAPI() {
         @JsonProperty("title") val title: String?,
         @JsonProperty("name") val name: String?,
         @JsonProperty("poster_path") val posterPath: String?,
-        @JsonProperty("backdrop_path") val backdropPath: String?, // Fixes Hero Section Background
         @JsonProperty("media_type") val mediaType: String?
     )
     
@@ -113,12 +112,11 @@ class StreamHubProvider : MainAPI() {
             val title = result.title ?: result.name ?: return@mapNotNull null
             val id = result.id ?: return@mapNotNull null
             val poster = "$imageBase${result.posterPath}"
-            val backdrop = result.backdropPath?.let { "$backdropBase$it" } // Fetches the backdrop for the Hero Section
             val urlPath = if (isMovie) "movie/$id" else "tv/$id"
             
+            // FIX: Removed backgroundPosterUrl from SearchResponse to fix the Action compiler error
             newMovieSearchResponse(title, "$mainUrl/$urlPath", if (isMovie) TvType.Movie else TvType.TvSeries) {
                 this.posterUrl = poster
-                this.backgroundPosterUrl = backdrop // Fixes empty Hero section
             }
         } ?: emptyList()
         
@@ -144,9 +142,9 @@ class StreamHubProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        // FIX: Bulletproof Regex to prevent 404 crashes on the media page
-        val isMovie = url.contains("/movie/")
-        val tmdbId = Regex("""/(?:movie|tv)/(\d+)""").find(url)?.groupValues?.get(1) ?: return null
+        val cleanUrl = url.substringBefore("?")
+        val isMovie = cleanUrl.contains("/movie/")
+        val tmdbId = cleanUrl.substringAfterLast("/")
         
         val endpoint = if (isMovie) "movie" else "tv"
         val detailsUrl = "$tmdbBase/$endpoint/$tmdbId?api_key={API_KEY}&append_to_response=images,external_ids&include_image_language=en,null"
@@ -155,7 +153,7 @@ class StreamHubProvider : MainAPI() {
         
         val title = details.title ?: details.name ?: return null
         val poster = details.posterPath?.let { "$imageBase$it" }
-        val backdrop = details.backdropPath?.let { "$backdropBase$it" }
+        val backdrop = details.backdropPath?.let { "$backdropBase$it" } // Perfectly valid in LoadResponse for the Hero Page
         val imdbId = details.externalIds?.imdbId ?: "null"
 
         val parsedYear = (details.releaseDate ?: details.firstAirDate)?.split("-")?.firstOrNull()?.toIntOrNull()
@@ -206,7 +204,6 @@ class StreamHubProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // FIX: Bulletproof Regex prevents array out-of-bounds crashes
         val cleanData = data.substringBefore("?")
         val isMovie = cleanData.contains("/movie/")
         
@@ -217,9 +214,9 @@ class StreamHubProvider : MainAPI() {
 
         return coroutineScope {
             
-            // --- 1. DOUBLE LAYER SUBTITLE NETWORK ---
+            // --- 1. TRIPLE LAYER SUBTITLE NETWORK ---
             val subJob = async {
-                // Layer 1: Official Stremio OpenSubtitles v3 (Highly Reliable)
+                // Layer 1: Official Stremio OpenSubtitles v3
                 if (imdbId != null) {
                     try {
                         val os3Url = if(isMovie) "https://opensubtitles-v3.strem.io/subtitles/movie/$imdbId.json" 
@@ -231,19 +228,36 @@ class StreamHubProvider : MainAPI() {
                                 val sub = subs.getJSONObject(i)
                                 val url = sub.optString("url")
                                 val lang = sub.optString("lang")
-                                if (url.isNotBlank() && lang.isNotBlank()) subtitleCallback.invoke(newSubtitleFile(lang, url))
+                                if (url.isNotBlank() && lang.isNotBlank()) subtitleCallback.invoke(SubtitleFile(lang, url))
                             }
                         }
                     } catch (e: Exception) {}
                 }
 
-                // Layer 2: Wyziesubs API (Fixed Parser for formatting changes)
+                // Layer 2: Legacy Stremio OpenSubtitles
+                if (imdbId != null) {
+                    try {
+                        val osLegacyUrl = if(isMovie) "https://opensubtitles.strem.io/stremio/v1/subtitles/movie/$imdbId.json" 
+                                          else "https://opensubtitles.strem.io/stremio/v1/subtitles/series/$imdbId:$season:$episode.json"
+                        val res = app.get(osLegacyUrl, timeout = 5).text
+                        val subs = JSONObject(res).optJSONArray("subtitles")
+                        if (subs != null) {
+                            for (i in 0 until subs.length()) {
+                                val sub = subs.getJSONObject(i)
+                                val url = sub.optString("url")
+                                val lang = sub.optString("lang")
+                                if (url.isNotBlank() && lang.isNotBlank()) subtitleCallback.invoke(SubtitleFile(lang, url))
+                            }
+                        }
+                    } catch (e: Exception) {}
+                }
+
+                // Layer 3: Wyziesubs API
                 try {
                     var wyzieUrl = "https://sub.wyzie.io/search?id=$tmdbId&source=all&key=$wyzieApiKey"
                     if (!isMovie && season != null && episode != null) wyzieUrl += "&season=$season&episode=$episode"
                     val wyzieResponse = app.get(wyzieUrl, timeout = 5).text
                     
-                    // Safely catches both JSON formats that Wyzie randomly switches between
                     val wyzieList = AppUtils.tryParseJson<List<WyzieSub>>(wyzieResponse) 
                         ?: JSONObject(wyzieResponse).optJSONArray("subtitles")?.let { array ->
                             (0 until array.length()).mapNotNull { i -> AppUtils.tryParseJson<WyzieSub>(array.getJSONObject(i).toString()) }
@@ -252,7 +266,7 @@ class StreamHubProvider : MainAPI() {
                     wyzieList?.forEach { sub ->
                         val subUrl = sub.url ?: return@forEach
                         val lang = sub.display ?: sub.language ?: "English"
-                        subtitleCallback.invoke(newSubtitleFile(lang, subUrl))
+                        subtitleCallback.invoke(SubtitleFile(lang, subUrl))
                     }
                 } catch (e: Exception) {}
             }
@@ -261,14 +275,14 @@ class StreamHubProvider : MainAPI() {
             val directExtractors = listOf(
                 async {
                     // API 1: Madplay CDN 
-                    // FIX: Uses M3u8Helper to properly decrypt the playlist for ExoPlayer to prevent the #EXTM3U crash
+                    // FIX: Replaced 'url =' with 'streamUrl =' to fix the Github Actions compilation mismatch
                     try {
                         val url = if (season == null) "https://cdn.madplay.site/api/hls/unknown/${tmdbId}/master.m3u8"
                                   else "https://cdn.madplay.site/api/hls/unknown/${tmdbId}/season_${season}/episode_${episode}/master.m3u8"
                         var found = false
                         M3u8Helper.generateM3u8(
                             source = "Madplay CDN", 
-                            url = url, 
+                            streamUrl = url, 
                             referer = "https://madplay.site/",
                             headers = mapOf("Origin" to "https://madplay.site")
                         ).forEach { link ->
@@ -285,7 +299,12 @@ class StreamHubProvider : MainAPI() {
                         val res = app.get(url, timeout = 5, headers = mapOf("Origin" to "https://www.vidsrc.wtf", "Referer" to "https://www.vidsrc.wtf/")).text
                         val streamUrl = JSONObject(res).getJSONObject("stream").getString("url")
                         if (streamUrl.contains(".m3u8")) {
-                            callback.invoke(newExtractorLink("VidSrcWtf", "VidSrcWtf", streamUrl, ExtractorLinkType.M3U8) {
+                            callback.invoke(newExtractorLink(
+                                "VidSrcWtf", 
+                                "VidSrcWtf", 
+                                streamUrl, 
+                                ExtractorLinkType.M3U8
+                            ) {
                                 this.headers = mapOf("Origin" to "https://www.vidsrc.wtf", "Referer" to "https://www.vidsrc.wtf/")
                                 this.quality = Qualities.P1080.value
                             })
@@ -304,7 +323,12 @@ class StreamHubProvider : MainAPI() {
                             val obj = jsonArray.getJSONObject(i)
                             val file = obj.getString("file")
                             if (file.isNotBlank()) {
-                                callback.invoke(newExtractorLink("Playsrc", "Playsrc", file, ExtractorLinkType.M3U8) {
+                                callback.invoke(newExtractorLink(
+                                    "Playsrc", 
+                                    "Playsrc", 
+                                    file, 
+                                    ExtractorLinkType.M3U8
+                                ) {
                                     this.headers = mapOf("Origin" to "https://madplay.site")
                                     this.quality = Qualities.P1080.value
                                 })
@@ -325,7 +349,12 @@ class StreamHubProvider : MainAPI() {
                         for(i in 0 until streams.length()) {
                             val streamUrl = streams.getJSONObject(i).optString("url")
                             if (streamUrl.contains(".m3u8")) {
-                                callback.invoke(newExtractorLink("Streamvix", "Streamvix", streamUrl, ExtractorLinkType.M3U8) {
+                                callback.invoke(newExtractorLink(
+                                    "Streamvix", 
+                                    "Streamvix", 
+                                    streamUrl, 
+                                    ExtractorLinkType.M3U8
+                                ) {
                                     this.quality = Qualities.P1080.value
                                 })
                                 found = true
@@ -345,7 +374,12 @@ class StreamHubProvider : MainAPI() {
                         for(i in 0 until streams.length()) {
                             val streamUrl = streams.getJSONObject(i).optString("url")
                             if (streamUrl.contains(".m3u8")) {
-                                callback.invoke(newExtractorLink("NoTorrent", "NoTorrent", streamUrl, ExtractorLinkType.M3U8) {
+                                callback.invoke(newExtractorLink(
+                                    "NoTorrent", 
+                                    "NoTorrent", 
+                                    streamUrl, 
+                                    ExtractorLinkType.M3U8
+                                ) {
                                     this.quality = Qualities.P1080.value
                                 })
                                 found = true
@@ -356,57 +390,80 @@ class StreamHubProvider : MainAPI() {
                 }
             )
 
-            // --- 3. WEBVIEW FALLBACK EXTRACTORS ---
-            // Highly robust scrapers built natively inside the provider file
-            val webviewExtractors = listOf(
+            // --- 3. NATIVE IFRAME SCRAPERS (Hubs & Embeds) ---
+            val embedExtractors = listOf(
                 async {
+                    // API 6: AutoEmbed.co Hub
                     try {
-                        val embedUrl = cleanData.replace("https://streamhub.app", "https://111movies.net")
-                        val interceptor = WebViewResolver(Regex("""cfw69\.workers\.dev.*\.m3u8"""))
-                        val response = app.get(embedUrl, interceptor = interceptor)
-                        if (response.url.contains(".m3u8")) {
-                            callback.invoke(newExtractorLink("111movies", "111movies", response.url, ExtractorLinkType.M3U8) {
-                                this.referer = "https://111movies.net/"
-                            })
-                            true
-                        } else false
-                    } catch(e: Exception) { false }
-                },
-                async {
-                    try {
-                        val domains = listOf("https://vidcore.net", "https://vidup.to")
-                        val interceptor = WebViewResolver(Regex(""".*digitalsun\.app.*\.m3u8.*"""))
-                        var success = false
-                        for (domain in domains) {
-                            val targetUrl = cleanData.replace("https://streamhub.app", domain)
-                            val response = app.get(targetUrl, interceptor = interceptor)
-                            if (response.url.contains(".m3u8")) {
-                                val sourceName = if (domain.contains("vidcore")) "Vidcore" else "Vidup"
-                                callback.invoke(newExtractorLink(sourceName, sourceName, response.url, ExtractorLinkType.M3U8) {
-                                    this.referer = "$domain/"
-                                })
-                                success = true
-                                break
+                        val url = if (isMovie) "https://autoembed.co/movie/tmdb/$tmdbId" else "https://autoembed.co/tv/tmdb/$tmdbId-$season-$episode"
+                        val html = app.get(url, timeout = 8).text
+                        val iframes = Regex("""<iframe[^>]+src="([^"]+)"""").findAll(html)
+                        var found = false
+                        iframes.forEach { match ->
+                            val iframeUrl = match.groupValues[1]
+                            if (iframeUrl.startsWith("http")) {
+                                loadExtractor(iframeUrl, url, subtitleCallback, callback)
+                                found = true
                             }
                         }
-                        success
+                        found
                     } catch(e: Exception) { false }
                 },
                 async {
+                    // API 7: MultiEmbed.mov Hub
                     try {
-                        val vidlinkUrl = cleanData.replace("https://streamhub.app", "https://vidlink.pro")
-                        val interceptor = WebViewResolver(Regex(""".*vodvidl\.site.*\.m3u8.*"""))
-                        val response = app.get(vidlinkUrl, interceptor = interceptor)
-                        if (response.url.contains(".m3u8")) {
-                            callback.invoke(newExtractorLink("Vidlink", "Vidlink", response.url, ExtractorLinkType.M3U8) {
-                                this.referer = "https://vidlink.pro/"
-                            })
-                            true
-                        } else false
+                        val url = if (isMovie) "https://multiembed.mov/directstream.php?video_id=$tmdbId&tmdb=1" else "https://multiembed.mov/directstream.php?video_id=$tmdbId&tmdb=1&s=$season&e=$episode"
+                        val html = app.get(url, timeout = 8).text
+                        val iframes = Regex("""<iframe[^>]+src="([^"]+)"""").findAll(html)
+                        var found = false
+                        iframes.forEach { match ->
+                            val iframeUrl = match.groupValues[1]
+                            if (iframeUrl.startsWith("http") && !iframeUrl.contains("youtube")) {
+                                loadExtractor(iframeUrl, url, subtitleCallback, callback)
+                                found = true
+                            }
+                        }
+                        found
                     } catch(e: Exception) { false }
                 },
                 async {
-                    // Added Vidsrc.in (Extremely reliable generic provider)
+                    // API 8: 2Embed.cc Hub
+                    try {
+                        val url = if (isMovie) "https://www.2embed.cc/embed/$tmdbId" else "https://www.2embed.cc/embedtv/$tmdbId&s=$season&e=$episode"
+                        val html = app.get(url, timeout = 8).text
+                        val iframes = Regex("""data-src="([^"]+)"""").findAll(html)
+                        var found = false
+                        iframes.forEach { match ->
+                            val iframeUrl = match.groupValues[1]
+                            if (iframeUrl.startsWith("http")) {
+                                loadExtractor(iframeUrl, url, subtitleCallback, callback)
+                                found = true
+                            }
+                        }
+                        found
+                    } catch(e: Exception) { false }
+                },
+                async {
+                    // API 9: PlayImdb Server 
+                    try {
+                        if (imdbId == null) return@async false
+                        val url = if (season == null) "https://playimdb.net/embed/$imdbId" else "https://playimdb.net/embed/tv?imdb=$imdbId&season=$season&episode=$episode"
+                        val html = app.get(url, timeout = 5).document
+                        val iframe = html.selectFirst("#player_iframe")?.attr("src") ?: return@async false
+                        val finalIframe = if (!iframe.startsWith("http")) "https:$iframe" else iframe
+                        
+                        loadExtractor(finalIframe, "https://playimdb.net/", subtitleCallback, callback)
+                        true
+                    } catch(e: Exception) { false }
+                }
+            )
+
+            // --- 4. WEBVIEW FALLBACK EXTRACTORS ---
+            val webviewExtractors = listOf(
+                async { Movies111Extractor.getStream(cleanData, callback) },
+                async { VidcoreExtractor.getStream(cleanData, callback) },
+                async { VidlinkExtractor.getStream(cleanData, callback) },
+                async { 
                     try {
                         val vidsrcUrl = if(isMovie) "https://vidsrc.in/embed/movie/$tmdbId" else "https://vidsrc.in/embed/tv/$tmdbId/$season/$episode"
                         val interceptor = WebViewResolver(Regex("""(?:vidsrc|rcp).*?\.m3u8"""))
@@ -422,8 +479,8 @@ class StreamHubProvider : MainAPI() {
                 }
             )
 
-            // Await all background jobs
-            val allResults = (directExtractors + webviewExtractors).awaitAll()
+            val allResults = (directExtractors + embedExtractors + webviewExtractors).awaitAll()
+            
             subJob.await()
 
             allResults.any { it }
