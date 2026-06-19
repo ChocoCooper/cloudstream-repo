@@ -7,6 +7,7 @@ import com.lagradost.cloudstream3.network.WebViewResolver
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
@@ -153,7 +154,8 @@ class StreamHubProvider : MainAPI() {
         
         val title = details.title ?: details.name ?: return null
         val poster = details.posterPath?.let { "$imageBase$it" }
-        val backdrop = details.backdropPath?.let { "$backdropBase$it" }
+        // backdropPath handles the giant Hero Banner images on Android TV
+        val backdrop = details.backdropPath?.let { "$backdropBase$it" } 
         val imdbId = details.externalIds?.imdbId ?: "null"
 
         val parsedYear = (details.releaseDate ?: details.firstAirDate)?.split("-")?.firstOrNull()?.toIntOrNull()
@@ -214,17 +216,14 @@ class StreamHubProvider : MainAPI() {
 
         return coroutineScope {
             
-            // --- ISOLATED SUBTITLE NETWORK ---
-            // Fix: Every API runs completely independently. If one crashes/404s, it won't affect the others.
-            
+            // --- 1. TV/ANIME SUBTITLE FIX (ISOLATED COROUTINES) ---
             val subJobs = listOf(
                 async {
-                    // Layer 1: Official Stremio OpenSubtitles v3
+                    // API 1: Stremio OpenSubtitles v3 (using IMDb)
                     if (imdbId != null) {
                         try {
-                            val os3Url = if(isMovie) "https://opensubtitles-v3.strem.io/subtitles/movie/$imdbId.json" 
-                                         else "https://opensubtitles-v3.strem.io/subtitles/series/$imdbId:$season:$episode.json"
-                            val res = app.get(os3Url, timeout = 5).text
+                            val osUrl = if(isMovie) "https://opensubtitles-v3.strem.io/subtitles/movie/$imdbId.json" else "https://opensubtitles-v3.strem.io/subtitles/series/$imdbId:$season:$episode.json"
+                            val res = app.get(osUrl, timeout = 8).text
                             val subs = JSONObject(res).optJSONArray("subtitles")
                             if (subs != null) {
                                 for (i in 0 until subs.length()) {
@@ -238,30 +237,27 @@ class StreamHubProvider : MainAPI() {
                     }
                 },
                 async {
-                    // Layer 2: Legacy Stremio OpenSubtitles
-                    if (imdbId != null) {
-                        try {
-                            val osLegacyUrl = if(isMovie) "https://opensubtitles.strem.io/stremio/v1/subtitles/movie/$imdbId.json" 
-                                              else "https://opensubtitles.strem.io/stremio/v1/subtitles/series/$imdbId:$season:$episode.json"
-                            val res = app.get(osLegacyUrl, timeout = 5).text
-                            val subs = JSONObject(res).optJSONArray("subtitles")
-                            if (subs != null) {
-                                for (i in 0 until subs.length()) {
-                                    val sub = subs.getJSONObject(i)
-                                    val url = sub.optString("url")
-                                    val lang = sub.optString("lang")
-                                    if (url.isNotBlank() && lang.isNotBlank()) subtitleCallback.invoke(newSubtitleFile(lang, url))
-                                }
+                    // API 2: Stremio OpenSubtitles TMDB-Fallback (Massive fix for Anime missing IMDb IDs)
+                    try {
+                        val osTmdbUrl = if(isMovie) "https://opensubtitles.strem.fun/subtitles/movie/tmdb:$tmdbId.json" else "https://opensubtitles.strem.fun/subtitles/series/tmdb:$tmdbId:$season:$episode.json"
+                        val res = app.get(osTmdbUrl, timeout = 8).text
+                        val subs = JSONObject(res).optJSONArray("subtitles")
+                        if (subs != null) {
+                            for (i in 0 until subs.length()) {
+                                val sub = subs.getJSONObject(i)
+                                val url = sub.optString("url")
+                                val lang = sub.optString("lang")
+                                if (url.isNotBlank() && lang.isNotBlank()) subtitleCallback.invoke(newSubtitleFile(lang, url))
                             }
-                        } catch (e: Exception) {}
-                    }
+                        }
+                    } catch (e: Exception) {}
                 },
                 async {
-                    // Layer 3: Wyziesubs API
+                    // API 3: Wyziesubs API
                     try {
                         var wyzieUrl = "https://sub.wyzie.io/search?id=$tmdbId&source=all&key=$wyzieApiKey"
                         if (!isMovie && season != null && episode != null) wyzieUrl += "&season=$season&episode=$episode"
-                        val wyzieResponse = app.get(wyzieUrl, timeout = 5).text
+                        val wyzieResponse = app.get(wyzieUrl, timeout = 8).text
                         
                         val wyzieList = AppUtils.tryParseJson<List<WyzieSub>>(wyzieResponse) 
                             ?: JSONObject(wyzieResponse).optJSONArray("subtitles")?.let { array ->
@@ -277,131 +273,103 @@ class StreamHubProvider : MainAPI() {
                 }
             )
 
-            // --- NATIVE WEBVIEW SERVERS ---
-            // Bulletproof resolution method that never fails due to API changes or Cloudflare
+            // --- 2. FAST NATIVE WEBVIEW SERVERS ---
+            // Wrapped in withTimeoutOrNull so broken servers CANNOT freeze the app
             val serverJobs = listOf(
                 async {
-                    try {
-                        val embedUrl = cleanData.replace("https://streamhub.app", "https://111movies.net")
-                        val interceptor = WebViewResolver(Regex(""".*\.m3u8.*"""))
-                        val response = app.get(embedUrl, interceptor = interceptor)
-                        if (response.url.contains(".m3u8")) {
-                            callback.invoke(newExtractorLink("111movies", "111movies", response.url, ExtractorLinkType.M3U8) {
-                                this.referer = "https://111movies.net/"
-                                this.quality = Qualities.P1080.value
-                            })
-                            true
-                        } else false
-                    } catch(e: Exception) { false }
-                },
-                async {
-                    try {
-                        val domains = listOf("https://vidcore.net", "https://vidup.to")
-                        val interceptor = WebViewResolver(Regex(""".*\.m3u8.*"""))
-                        var success = false
-                        for (domain in domains) {
-                            val targetUrl = cleanData.replace("https://streamhub.app", domain)
-                            val response = app.get(targetUrl, interceptor = interceptor)
+                    withTimeoutOrNull(15000) {
+                        try {
+                            val embedUrl = cleanData.replace("https://streamhub.app", "https://111movies.net")
+                            val interceptor = WebViewResolver(Regex(""".*\.m3u8.*"""))
+                            val response = app.get(embedUrl, interceptor = interceptor)
                             if (response.url.contains(".m3u8")) {
-                                val sourceName = if (domain.contains("vidcore")) "Vidcore" else "Vidup"
-                                callback.invoke(newExtractorLink(sourceName, sourceName, response.url, ExtractorLinkType.M3U8) {
-                                    this.referer = "$domain/"
+                                callback.invoke(newExtractorLink("111movies", "111movies", response.url, ExtractorLinkType.M3U8) {
+                                    this.referer = "https://111movies.net/"
                                     this.quality = Qualities.P1080.value
                                 })
-                                success = true
-                                break
+                                true
+                            } else false
+                        } catch(e: Exception) { false }
+                    } ?: false
+                },
+                async {
+                    withTimeoutOrNull(15000) {
+                        try {
+                            val domains = listOf("https://vidcore.net", "https://vidup.to")
+                            val interceptor = WebViewResolver(Regex(""".*\.m3u8.*"""))
+                            var success = false
+                            for (domain in domains) {
+                                val targetUrl = cleanData.replace("https://streamhub.app", domain)
+                                val response = app.get(targetUrl, interceptor = interceptor)
+                                if (response.url.contains(".m3u8")) {
+                                    val sourceName = if (domain.contains("vidcore")) "Vidcore" else "Vidup"
+                                    callback.invoke(newExtractorLink(sourceName, sourceName, response.url, ExtractorLinkType.M3U8) {
+                                        this.referer = "$domain/"
+                                        this.quality = Qualities.P1080.value
+                                    })
+                                    success = true
+                                    break
+                                }
                             }
-                        }
-                        success
-                    } catch(e: Exception) { false }
+                            success
+                        } catch(e: Exception) { false }
+                    } ?: false
                 },
                 async {
-                    try {
-                        val vidlinkUrl = cleanData.replace("https://streamhub.app", "https://vidlink.pro")
-                        val interceptor = WebViewResolver(Regex(""".*\.m3u8.*"""))
-                        val response = app.get(vidlinkUrl, interceptor = interceptor)
-                        if (response.url.contains(".m3u8")) {
-                            callback.invoke(newExtractorLink("Vidlink", "Vidlink", response.url, ExtractorLinkType.M3U8) {
-                                this.referer = "https://vidlink.pro/"
-                                this.quality = Qualities.P1080.value
-                            })
-                            true
-                        } else false
-                    } catch(e: Exception) { false }
-                },
-                async {
-                    try {
-                        val url = if(isMovie) "https://vidsrc.me/embed/movie/$tmdbId" else "https://vidsrc.me/embed/tv/$tmdbId/$season/$episode"
-                        val interceptor = WebViewResolver(Regex(""".*\.m3u8.*"""))
-                        val response = app.get(url, interceptor = interceptor)
-                        if (response.url.contains(".m3u8")) {
-                            callback.invoke(newExtractorLink("Vidsrc.me", "Vidsrc.me", response.url, ExtractorLinkType.M3U8) {
-                                this.referer = "https://vidsrc.me/"
-                                this.quality = Qualities.P1080.value
-                            })
-                            true
-                        } else false
-                    } catch(e: Exception) { false }
-                },
-                async {
-                    try {
-                        val url = if(isMovie) "https://vidsrc.to/embed/movie/$tmdbId" else "https://vidsrc.to/embed/tv/$tmdbId/$season/$episode"
-                        val interceptor = WebViewResolver(Regex(""".*\.m3u8.*"""))
-                        val response = app.get(url, interceptor = interceptor)
-                        if (response.url.contains(".m3u8")) {
-                            callback.invoke(newExtractorLink("Vidsrc.to", "Vidsrc.to", response.url, ExtractorLinkType.M3U8) {
-                                this.referer = "https://vidsrc.to/"
-                                this.quality = Qualities.P1080.value
-                            })
-                            true
-                        } else false
-                    } catch(e: Exception) { false }
-                },
-                async {
-                    try {
-                        val url = if(isMovie) "https://vidbinge.dev/embed/movie/$tmdbId" else "https://vidbinge.dev/embed/tv/$tmdbId/$season/$episode"
-                        val interceptor = WebViewResolver(Regex(""".*\.m3u8.*"""))
-                        val response = app.get(url, interceptor = interceptor)
-                        if (response.url.contains(".m3u8")) {
-                            callback.invoke(newExtractorLink("Vidbinge", "Vidbinge", response.url, ExtractorLinkType.M3U8) {
-                                this.referer = "https://vidbinge.dev/"
-                                this.quality = Qualities.P1080.value
-                            })
-                            true
-                        } else false
-                    } catch(e: Exception) { false }
-                },
-                async {
-                    try {
-                        val url = if(isMovie) "https://embed.su/embed/movie/$tmdbId" else "https://embed.su/embed/tv/$tmdbId/$season/$episode"
-                        val interceptor = WebViewResolver(Regex(""".*\.m3u8.*"""))
-                        val response = app.get(url, interceptor = interceptor)
-                        if (response.url.contains(".m3u8")) {
-                            callback.invoke(newExtractorLink("Embed.su", "Embed.su", response.url, ExtractorLinkType.M3U8) {
-                                this.referer = "https://embed.su/"
-                                this.quality = Qualities.P1080.value
-                            })
-                            true
-                        } else false
-                    } catch(e: Exception) { false }
-                },
-                async {
-                    try {
-                        val url = if(isMovie) "https://player.smashy.stream/movie/$tmdbId" else "https://player.smashy.stream/tv/$tmdbId?s=$season&e=$episode"
-                        val interceptor = WebViewResolver(Regex(""".*\.m3u8.*"""))
-                        val response = app.get(url, interceptor = interceptor)
-                        if (response.url.contains(".m3u8")) {
-                            callback.invoke(newExtractorLink("SmashyStream", "SmashyStream", response.url, ExtractorLinkType.M3U8) {
-                                this.referer = "https://player.smashy.stream/"
-                                this.quality = Qualities.P1080.value
-                            })
-                            true
-                        } else false
-                    } catch(e: Exception) { false }
+                    withTimeoutOrNull(15000) {
+                        try {
+                            val vidlinkUrl = cleanData.replace("https://streamhub.app", "https://vidlink.pro")
+                            val interceptor = WebViewResolver(Regex(""".*\.m3u8.*"""))
+                            val response = app.get(vidlinkUrl, interceptor = interceptor)
+                            if (response.url.contains(".m3u8")) {
+                                callback.invoke(newExtractorLink("Vidlink", "Vidlink", response.url, ExtractorLinkType.M3U8) {
+                                    this.referer = "https://vidlink.pro/"
+                                    this.quality = Qualities.P1080.value
+                                })
+                                true
+                            } else false
+                        } catch(e: Exception) { false }
+                    } ?: false
                 }
             )
 
-            val serverResults = serverJobs.awaitAll()
+            // --- 3. PREMIUM IFRAME HUBS (Fast & Native) ---
+            val embedJobs = listOf(
+                async {
+                    withTimeoutOrNull(12000) {
+                        try {
+                            val url = if (isMovie) "https://autoembed.co/movie/tmdb/$tmdbId" else "https://autoembed.co/tv/tmdb/$tmdbId-$season-$episode"
+                            val html = app.get(url).text
+                            val iframes = Regex("""<iframe[^>]+src="([^"]+)"""").findAll(html)
+                            var found = false
+                            iframes.forEach { match ->
+                                val iframeUrl = match.groupValues[1]
+                                if (iframeUrl.startsWith("http")) {
+                                    loadExtractor(iframeUrl, url, subtitleCallback, callback)
+                                    found = true
+                                }
+                            }
+                            found
+                        } catch(e: Exception) { false }
+                    } ?: false
+                },
+                async {
+                    withTimeoutOrNull(12000) {
+                        try {
+                            if (imdbId == null) return@withTimeoutOrNull false
+                            val url = if (season == null) "https://playimdb.net/embed/$imdbId" else "https://playimdb.net/embed/tv?imdb=$imdbId&season=$season&episode=$episode"
+                            val html = app.get(url).document
+                            val iframe = html.selectFirst("#player_iframe")?.attr("src") ?: return@withTimeoutOrNull false
+                            val finalIframe = if (!iframe.startsWith("http")) "https:$iframe" else iframe
+                            
+                            loadExtractor(finalIframe, "https://playimdb.net/", subtitleCallback, callback)
+                            true
+                        } catch(e: Exception) { false }
+                    } ?: false
+                }
+            )
+
+            val serverResults = (serverJobs + embedJobs).awaitAll()
             subJobs.awaitAll()
 
             serverResults.any { it }
