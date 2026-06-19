@@ -216,37 +216,46 @@ class StreamHubProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        var foundLinks = false
-
-        // Parse IDs from dummy URL to hit the Wyziesubs API
         val isMovie = data.contains("/movie/")
         val parts = data.split("/")
         val tmdbId = if (isMovie) parts.last() else parts[parts.size - 3]
         val season = if (!isMovie) parts[parts.size - 2].toIntOrNull() else null
         val episode = if (!isMovie) parts.last().toIntOrNull() else null
 
-        // --- WYZIESUBS FETCH ---
-        try {
-            var wyzieUrl = "https://sub.wyzie.io/search?id=$tmdbId"
-            if (!isMovie && season != null && episode != null) {
-                wyzieUrl += "&season=$season&episode=$episode"
+        return coroutineScope {
+            // 1. Fetch subtitles concurrently
+            val subJob = async {
+                try {
+                    var wyzieUrl = "https://sub.wyzie.io/search?id=$tmdbId"
+                    if (!isMovie && season != null && episode != null) {
+                        wyzieUrl += "&season=$season&episode=$episode"
+                    }
+                    val wyzieResponse = app.get(wyzieUrl).parsedSafe<List<WyzieSub>>()
+                    wyzieResponse?.forEach { sub ->
+                        val subUrl = sub.url ?: sub.link ?: return@forEach
+                        val lang = sub.language ?: sub.lang ?: sub.langIso ?: "English"
+                        subtitleCallback.invoke(SubtitleFile(lang = lang, url = subUrl))
+                    }
+                } catch (e: Exception) {
+                    // Silently skip if Wyziesubs fails to load
+                }
             }
-            val wyzieResponse = app.get(wyzieUrl).parsedSafe<List<WyzieSub>>()
-            wyzieResponse?.forEach { sub ->
-                val subUrl = sub.url ?: sub.link ?: return@forEach
-                val lang = sub.language ?: sub.lang ?: sub.langIso ?: "English"
-                subtitleCallback.invoke(SubtitleFile(lang = lang, url = subUrl))
-            }
-        } catch (e: Exception) {
-            // Silently skip if Wyziesubs fails to load
-        }
 
-        if (Movies111Extractor.getStream(data, callback)) foundLinks = true
-        if (VidcoreExtractor.getStream(data, callback)) foundLinks = true
-        if (VidlinkExtractor.getStream(data, callback)) foundLinks = true
-        if (VidsrcmeExtractor.getStream(data, callback)) foundLinks = true
-        if (VidzeeExtractor.getStream(data, callback)) foundLinks = true
-        
-        return foundLinks
+            // 2. Fire off all stable video extractors at the exact same time
+            val extractors = listOf(
+                async { Movies111Extractor.getStream(data, callback) },
+                async { VidcoreExtractor.getStream(data, callback) },
+                async { VidlinkExtractor.getStream(data, callback) }
+            )
+
+            // Wait for all extractors to finish their tasks
+            val results = extractors.awaitAll()
+            
+            // Wait for subtitles to finish injecting
+            subJob.await()
+
+            // If any extractor successfully returned true, return true overall
+            results.any { it }
+        }
     }
 }
