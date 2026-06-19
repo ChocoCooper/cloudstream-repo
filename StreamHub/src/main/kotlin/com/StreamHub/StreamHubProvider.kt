@@ -6,6 +6,8 @@ import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.awaitAll
+import org.json.JSONArray
+import org.json.JSONObject
 import java.net.URLEncoder
 
 class StreamHubProvider : MainAPI() {
@@ -45,6 +47,8 @@ class StreamHubProvider : MainAPI() {
         @JsonProperty("media_type") val mediaType: String?
     )
     
+    // Added external_ids to fetch the IMDb ID required by Stremio Addons
+    private data class TmdbExternalIds(@JsonProperty("imdb_id") val imdbId: String?)
     private data class TmdbDetails(
         @JsonProperty("id") val id: Int?,
         @JsonProperty("title") val title: String?,
@@ -56,7 +60,8 @@ class StreamHubProvider : MainAPI() {
         @JsonProperty("first_air_date") val firstAirDate: String?,
         @JsonProperty("genres") val genres: List<TmdbGenre>?,
         @JsonProperty("seasons") val seasons: List<TmdbSeason>?,
-        @JsonProperty("images") val images: TmdbImages?
+        @JsonProperty("images") val images: TmdbImages?,
+        @JsonProperty("external_ids") val externalIds: TmdbExternalIds?
     )
 
     private data class TmdbGenre(@JsonProperty("name") val name: String?)
@@ -77,13 +82,11 @@ class StreamHubProvider : MainAPI() {
         @JsonProperty("overview") val overview: String?
     )
 
-    // --- WYZIESUBS DATA CLASS ---
+    // --- FIXED WYZIESUBS DATA CLASS ---
     private data class WyzieSub(
         @JsonProperty("url") val url: String?,
-        @JsonProperty("link") val link: String?,
         @JsonProperty("language") val language: String?,
-        @JsonProperty("lang") val lang: String?,
-        @JsonProperty("lang_iso") val langIso: String?
+        @JsonProperty("display") val display: String?
     )
 
     // --- CORE LOGIC ---
@@ -155,13 +158,15 @@ class StreamHubProvider : MainAPI() {
         val tmdbId = url.substringAfterLast("/")
         
         val endpoint = if (isMovie) "movie" else "tv"
-        val detailsUrl = "$tmdbBase/$endpoint/$tmdbId?api_key={API_KEY}&append_to_response=images&include_image_language=en,null"
+        // Added 'external_ids' to fetch the IMDb ID needed for advanced Stremio Scraping
+        val detailsUrl = "$tmdbBase/$endpoint/$tmdbId?api_key={API_KEY}&append_to_response=images,external_ids&include_image_language=en,null"
         
         val details = fetchTmdb<TmdbDetails>(detailsUrl) ?: return null
         
         val title = details.title ?: details.name ?: return null
         val poster = details.posterPath?.let { "$imageBase$it" }
         val backdrop = details.backdropPath?.let { "$backdropBase$it" }
+        val imdbId = details.externalIds?.imdbId ?: "null"
 
         val parsedYear = (details.releaseDate ?: details.firstAirDate)?.split("-")?.firstOrNull()?.toIntOrNull()
         val parsedTags = details.genres?.mapNotNull { it.name } ?: emptyList()
@@ -170,7 +175,9 @@ class StreamHubProvider : MainAPI() {
         val parsedLogo = logoPath?.let { "$backdropBase$it" }
 
         if (isMovie) {
-            return newMovieLoadResponse(title, url, TvType.Movie, url) {
+            // Passing both tmdbId and imdbId forward
+            val dataUrl = "$mainUrl/movie/$tmdbId/$imdbId"
+            return newMovieLoadResponse(title, dataUrl, TvType.Movie, dataUrl) {
                 this.posterUrl = poster
                 this.backgroundPosterUrl = backdrop
                 this.plot = details.overview
@@ -187,7 +194,8 @@ class StreamHubProvider : MainAPI() {
                         
                         seasonDetails?.episodes?.mapNotNull { ep ->
                             val epNum = ep.episodeNumber ?: return@mapNotNull null
-                            val epUrl = "$mainUrl/tv/$tmdbId/${season.seasonNumber}/$epNum"
+                            // Passing both tmdbId and imdbId forward
+                            val epUrl = "$mainUrl/tv/$tmdbId/$imdbId/${season.seasonNumber}/$epNum"
                             
                             newEpisode(epUrl) {
                                 this.name = ep.name ?: "Episode $epNum"
@@ -201,7 +209,9 @@ class StreamHubProvider : MainAPI() {
                 }?.awaitAll()?.flatten() ?: emptyList()
             }
 
-            return newTvSeriesLoadResponse(title, url, TvType.TvSeries, episodes) {
+            // Passing both tmdbId and imdbId forward
+            val dataUrl = "$mainUrl/tv/$tmdbId/$imdbId"
+            return newTvSeriesLoadResponse(title, dataUrl, TvType.TvSeries, episodes) {
                 this.posterUrl = poster
                 this.backgroundPosterUrl = backdrop
                 this.plot = details.overview
@@ -218,50 +228,157 @@ class StreamHubProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // Strip trailing query parameters from the URL before parsing IDs
         val cleanData = data.substringBefore("?")
         val isMovie = cleanData.contains("/movie/")
         val parts = cleanData.split("/")
         
-        val tmdbId = if (isMovie) parts.last() else parts[parts.size - 3]
-        val season = if (!isMovie) parts[parts.size - 2].toIntOrNull() else null
-        val episode = if (!isMovie) parts.last().toIntOrNull() else null
+        // Extract both IDs
+        val tmdbId = parts[4]
+        val imdbId = parts[5].takeIf { it != "null" }
+        val season = if (!isMovie) parts[6].toIntOrNull() else null
+        val episode = if (!isMovie) parts[7].toIntOrNull() else null
 
         return coroutineScope {
-            // 1. Fetch subtitles concurrently via Wyziesubs API
+            
+            // --- 1. DOUBLE LAYER SUBTITLE NETWORK ---
             val subJob = async {
                 try {
-                    // Inject the user's provided API key
-                    var wyzieUrl = "https://sub.wyzie.io/search?id=$tmdbId&key=$wyzieApiKey"
+                    // Layer 1: Wyziesubs (Fixed parser & injected API key)
+                    var wyzieUrl = "https://sub.wyzie.io/search?id=${imdbId ?: tmdbId}&source=all&key=$wyzieApiKey"
                     if (!isMovie && season != null && episode != null) {
                         wyzieUrl += "&season=$season&episode=$episode"
                     }
-                    val wyzieResponse = app.get(wyzieUrl).parsedSafe<List<WyzieSub>>()
-                    wyzieResponse?.forEach { sub ->
-                        val subUrl = sub.url ?: sub.link ?: return@forEach
-                        val lang = sub.language ?: sub.lang ?: sub.langIso ?: "English"
+                    val wyzieResponse = app.get(wyzieUrl).text
+                    val wyzieList = AppUtils.tryParseJson<List<WyzieSub>>(wyzieResponse)
+                    
+                    wyzieList?.forEach { sub ->
+                        val subUrl = sub.url ?: return@forEach
+                        val lang = sub.display ?: sub.language ?: "English"
                         subtitleCallback.invoke(SubtitleFile(lang = lang, url = subUrl))
                     }
-                } catch (e: Exception) {
-                    // Silently skip if Wyziesubs fails so the video still plays
-                }
+
+                    // Layer 2: OpenSubtitles (Stremio Backup)
+                    if (imdbId != null) {
+                        val osUrl = if(isMovie) "https://opensubtitles.stremio.homes/en|es|hi|ar|fr/ai-translated=true|from=all/subtitles/movie/$imdbId.json" 
+                                    else "https://opensubtitles.stremio.homes/en|es|hi|ar|fr/ai-translated=true|from=all/subtitles/series/$imdbId:$season:$episode.json"
+                        
+                        val osRes = app.get(osUrl).text
+                        val osArray = JSONObject(osRes).optJSONArray("subtitles")
+                        if (osArray != null) {
+                            for (i in 0 until osArray.length()) {
+                                val sub = osArray.getJSONObject(i)
+                                val url = sub.optString("url")
+                                val lang = sub.optString("lang")
+                                if (url.isNotBlank() && lang.isNotBlank()) {
+                                    subtitleCallback.invoke(SubtitleFile(lang, url))
+                                }
+                            }
+                        }
+                    }
+                } catch (e: Exception) { /* Silently fail to protect video playback */ }
             }
 
-            // 2. Fire off all stable video extractors at the exact same time
-            val extractors = listOf(
+            // --- 2. BLAZING FAST DIRECT APIs (Zero Headless Browser needed) ---
+            val directExtractors = listOf(
+                async {
+                    // API 1: VidSrcWtf Direct
+                    try {
+                        val url = if (isMovie) "https://www.vidsrc.wtf/main/movie/$tmdbId" else "https://www.vidsrc.wtf/main/tv/$tmdbId/$season/$episode"
+                        val res = app.get(url, headers = mapOf("Origin" to "https://www.vidsrc.wtf", "Referer" to "https://www.vidsrc.wtf/")).text
+                        val streamUrl = JSONObject(res).getJSONObject("stream").getString("url")
+                        if (streamUrl.contains(".m3u8")) {
+                            callback.invoke(newExtractorLink("VidSrcWtf", "VidSrcWtf", streamUrl, ExtractorLinkType.M3U8) {
+                                this.headers = mapOf("Origin" to "https://www.vidsrc.wtf", "Referer" to "https://www.vidsrc.wtf/")
+                                this.quality = Qualities.P1080.value
+                            })
+                            true
+                        } else false
+                    } catch(e: Exception) { false }
+                },
+                async {
+                    // API 2: Madplay / Playsrc Direct
+                    try {
+                        val url = if (isMovie) "https://madplay.site/api/movies/holly?id=$tmdbId&token=direct" else "https://madplay.site/api/movies/holly?id=$tmdbId&season=$season&episode=$episode&token=direct"
+                        val resText = app.get(url).text
+                        val jsonArray = JSONArray(resText)
+                        var found = false
+                        for (i in 0 until jsonArray.length()) {
+                            val obj = jsonArray.getJSONObject(i)
+                            val file = obj.getString("file")
+                            val headersObj = obj.optJSONObject("headers")
+                            val referer = headersObj?.optString("Referer", "") ?: ""
+                            val origin = headersObj?.optString("Origin", "") ?: ""
+                            if (file.isNotBlank()) {
+                                callback.invoke(newExtractorLink("Madplay", "Madplay", file, ExtractorLinkType.M3U8) {
+                                    this.headers = mapOf("Referer" to referer, "Origin" to origin)
+                                    this.quality = Qualities.P1080.value
+                                })
+                                found = true
+                            }
+                        }
+                        found
+                    } catch(e: Exception) { false }
+                },
+                async {
+                    // API 3: Streamvix Stremio Addon
+                    try {
+                        if (imdbId == null) return@async false
+                        val url = if (isMovie) "https://streamvix.com/stream/movie/$imdbId.json" else "https://streamvix.com/stream/series/$imdbId:$season:$episode.json"
+                        val res = app.get(url).text
+                        val streams = JSONObject(res).optJSONArray("streams") ?: return@async false
+                        var found = false
+                        for(i in 0 until streams.length()) {
+                            val s = streams.getJSONObject(i)
+                            val title = s.optString("name", "Streamvix").replace("\n", " ")
+                            val streamUrl = s.optString("url")
+                            if (streamUrl.isNotBlank() && streamUrl.contains("m3u8")) {
+                                callback.invoke(newExtractorLink("Streamvix", "Streamvix $title", streamUrl, ExtractorLinkType.M3U8) {
+                                    this.quality = Qualities.P1080.value
+                                })
+                                found = true
+                            }
+                        }
+                        found
+                    } catch(e: Exception) { false }
+                },
+                async {
+                    // API 4: NoTorrent Stremio Addon
+                    try {
+                        if (imdbId == null) return@async false
+                        val url = if (isMovie) "https://notorrent.strem.fun/stream/movie/$imdbId.json" else "https://notorrent.strem.fun/stream/series/$imdbId:$season:$episode.json"
+                        val res = app.get(url).text
+                        val streams = JSONObject(res).optJSONArray("streams") ?: return@async false
+                        var found = false
+                        for(i in 0 until streams.length()) {
+                            val s = streams.getJSONObject(i)
+                            val title = s.optString("name", "NoTorrent").replace("\n", " ")
+                            val streamUrl = s.optString("url")
+                            if (streamUrl.isNotBlank() && streamUrl.contains("m3u8")) {
+                                callback.invoke(newExtractorLink("NoTorrent", "NoTorrent $title", streamUrl, ExtractorLinkType.M3U8) {
+                                    this.quality = Qualities.P1080.value
+                                })
+                                found = true
+                            }
+                        }
+                        found
+                    } catch(e: Exception) { false }
+                }
+            )
+
+            // --- 3. WEBVIEW FALLBACK EXTRACTORS ---
+            val webviewExtractors = listOf(
                 async { Movies111Extractor.getStream(data, callback) },
                 async { VidcoreExtractor.getStream(data, callback) },
                 async { VidlinkExtractor.getStream(data, callback) }
             )
 
-            // Wait for all extractors to finish their tasks
-            val results = extractors.awaitAll()
+            // Wait for all servers to resolve and populate the player
+            val allResults = (directExtractors + webviewExtractors).awaitAll()
             
-            // Ensure subtitle tasks complete before ending the scope
+            // Wait for double-layer subtitles to finish injecting
             subJob.await()
 
-            // If any extractor successfully returned true, return true overall
-            results.any { it }
+            allResults.any { it }
         }
     }
 }
