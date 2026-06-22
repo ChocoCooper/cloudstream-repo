@@ -1,10 +1,10 @@
 // use an integer for version numbers
-version = 9
+version = 10
 
 cloudstream {
     // All of these properties are optional, you can safely remove them
 
-    description = "Multi Server Provider"
+    description = "Multi Server Provider (beta)"
     language = "ta"
     authors = listOf("ChocoCooper")
 
