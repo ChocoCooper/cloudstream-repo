@@ -32,7 +32,6 @@ class MissAVProvider : MainAPI() {
     private fun Element.toSearchResult(): SearchResponse? {
         val aTag = this.selectFirst(".text-secondary") ?: this.selectFirst("a") ?: return null
         
-        // FIX: Makes sure the URL is absolute. This fixes the media page not responding.
         val href = fixUrlNull(aTag.attr("href")) ?: return null
         
         val rawTitle = aTag.text().trim()
@@ -41,7 +40,6 @@ class MissAVProvider : MainAPI() {
         val status = this.select(".bg-blue-800").text().trim()
         val title = if(status.isNotBlank()) "[$status] $rawTitle" else rawTitle
         
-        // FIX: Safely grabs the image, checking both data-src and src
         val img = this.selectFirst("img")
         val posterUrl = img?.attr("data-src")?.takeIf { it.isNotBlank() } ?: img?.attr("src")?.takeIf { it.isNotBlank() }
 
@@ -51,15 +49,9 @@ class MissAVProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        // FIX: URL Encode the query to prevent crashes on spaces/special characters
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
-        
-        // Removed the slow 7-page loop. This fetches the results instantly without timing out.
         val document = app.get("$mainUrl/en/search/$encodedQuery").document
-        
-        // Fallback selectors ensure that if MissAV changes their search HTML layout slightly, it still parses.
         val results = document.select(".thumbnail, .max-w-sm, .w-full.truncate").mapNotNull { it.toSearchResult() }
-
         return results.distinctBy { it.url }
     }
 
@@ -84,15 +76,17 @@ class MissAVProvider : MainAPI() {
         val finalLink = Regex("""source=['"](.*?)['"]""").find(unpackedText)?.groupValues?.get(1)
         
         if (!finalLink.isNullOrBlank()) {
+            // FIX: Using the trailing lambda {} to set referer and quality, which prevents the GitHub Action crash
             callback.invoke(
                 newExtractorLink(
-                    source = name,
-                    name = name,
-                    url = finalLink,
-                    referer = mainUrl,
-                    quality = Qualities.P1080.value,
-                    type = ExtractorLinkType.M3U8
-                )
+                    name,
+                    name,
+                    finalLink,
+                    ExtractorLinkType.M3U8
+                ) {
+                    this.referer = mainUrl
+                    this.quality = Qualities.P1080.value
+                }
             )
         }
 
@@ -114,8 +108,9 @@ class MissAVProvider : MainAPI() {
                                 val text = subItem.select(".sub-single span:nth-child(3) a")
                                 if(text.isNotEmpty() && text[0].text() == "Download") {
                                     val url = "$subtitleCatUrl${text[0].attr("href")}"
+                                    // FIX: Uses newSubtitleFile to fix deprecation warning
                                     subtitleCallback.invoke(
-                                        SubtitleFile(
+                                        newSubtitleFile(
                                             language.replace("\uD83D\uDC4D \uD83D\uDC4E","").trim(), 
                                             url     
                                         )
