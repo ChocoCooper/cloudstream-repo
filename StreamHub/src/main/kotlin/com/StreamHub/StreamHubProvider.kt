@@ -16,7 +16,7 @@ class StreamHubProvider : MainAPI() {
     override var mainUrl = "https://streamhub.app" 
     override var name = "StreamHub"
     override val hasMainPage = true 
-    override var lang = "en"
+    override var lang = "ta"
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime, TvType.AsianDrama)
 
     // --- WYZIESUBS API KEY ---
@@ -216,7 +216,7 @@ class StreamHubProvider : MainAPI() {
 
         return coroutineScope {
             
-            // --- 1. TV/ANIME SUBTITLE FIX (ISOLATED COROUTINES) ---
+            // --- 1. TRIPLE LAYER SUBTITLE NETWORK ---
             val subJobs = listOf(
                 async {
                     // API 1: Stremio OpenSubtitles v3 (using IMDb)
@@ -273,9 +273,8 @@ class StreamHubProvider : MainAPI() {
                 }
             )
 
-            // --- 2. FAST NATIVE WEBVIEW SERVERS ---
-            // Wrapped in withTimeoutOrNull so broken servers CANNOT freeze the app
-            val serverJobs = listOf(
+            // --- 2. FAST NATIVE WEBVIEW SERVERS (STATIC ONLY) ---
+            val webviewExtractors = listOf(
                 async {
                     withTimeoutOrNull(15000) {
                         try {
@@ -333,43 +332,7 @@ class StreamHubProvider : MainAPI() {
                 }
             )
 
-            // --- 3. PREMIUM IFRAME HUBS (Fast & Native) ---
-            val embedJobs = listOf(
-                async {
-                    withTimeoutOrNull(12000) {
-                        try {
-                            val url = if (isMovie) "https://autoembed.co/movie/tmdb/$tmdbId" else "https://autoembed.co/tv/tmdb/$tmdbId-$season-$episode"
-                            val html = app.get(url).text
-                            val iframes = Regex("""<iframe[^>]+src="([^"]+)"""").findAll(html)
-                            var found = false
-                            iframes.forEach { match ->
-                                val iframeUrl = match.groupValues[1]
-                                if (iframeUrl.startsWith("http")) {
-                                    loadExtractor(iframeUrl, url, subtitleCallback, callback)
-                                    found = true
-                                }
-                            }
-                            found
-                        } catch(e: Exception) { false }
-                    } ?: false
-                },
-                async {
-                    withTimeoutOrNull(12000) {
-                        try {
-                            if (imdbId == null) return@withTimeoutOrNull false
-                            val url = if (season == null) "https://playimdb.net/embed/$imdbId" else "https://playimdb.net/embed/tv?imdb=$imdbId&season=$season&episode=$episode"
-                            val html = app.get(url).document
-                            val iframe = html.selectFirst("#player_iframe")?.attr("src") ?: return@withTimeoutOrNull false
-                            val finalIframe = if (!iframe.startsWith("http")) "https:$iframe" else iframe
-                            
-                            loadExtractor(finalIframe, "https://playimdb.net/", subtitleCallback, callback)
-                            true
-                        } catch(e: Exception) { false }
-                    } ?: false
-                }
-            )
-
-            val serverResults = (serverJobs + embedJobs).awaitAll()
+            val serverResults = webviewExtractors.awaitAll()
             subJobs.awaitAll()
 
             serverResults.any { it }
