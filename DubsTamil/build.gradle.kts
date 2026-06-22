@@ -1,10 +1,10 @@
 // use an integer for version numbers
-version = 27
+version = 28
 
 cloudstream {
     // All of these properties are optional, you can safely remove them
 
-    description = "Tamil Dubbed Movies"
+    description = "Tamil Dubbed Movies [Isaidub]"
     language = "ta"
     authors = listOf("ChocoCooper")
 
