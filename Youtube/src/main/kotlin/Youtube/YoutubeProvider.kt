@@ -5,8 +5,8 @@ import com.lagradost.cloudstream3.utils.*
 import org.schabi.newpipe.extractor.ServiceList
 import org.schabi.newpipe.extractor.kiosk.KioskExtractor
 import org.schabi.newpipe.extractor.InfoItem
-//import org.schabi.newpipe.extractor.localization.ContentCountry
 import org.schabi.newpipe.extractor.stream.StreamInfo
+import org.schabi.newpipe.extractor.ListExtractor.InfoItemsPage
 
 class YoutubeProvider : MainAPI() {
     override var mainUrl = "https://www.youtube.com"
@@ -22,7 +22,6 @@ class YoutubeProvider : MainAPI() {
 
     private val service = ServiceList.YouTube
 
-    // Clean, static definition of the main page tabs using the available kiosks
     override val mainPage = mainPageOf(
         "Trending" to "Trending",
         "trending_movies_and_shows" to "Movies & Shows",
@@ -32,10 +31,6 @@ class YoutubeProvider : MainAPI() {
         "live" to "Live"
     )
 
-    // Cache to store pagination state (nextPage tokens).
-    // Cloudstream requests sequential integers for pagination (page 1, 2, 3...),
-    // but NewPipe requires the specific token object from the previous page
-    // to fetch the next batch of results.
     private val pageCache = mutableMapOf<String, org.schabi.newpipe.extractor.Page?>()
     
     override suspend fun getMainPage(
@@ -43,33 +38,40 @@ class YoutubeProvider : MainAPI() {
         request: MainPageRequest
     ): HomePageResponse {
         val key = request.data
-        if (page == 1) pageCache.remove(key)
+        if (page == 1) {
+            pageCache.remove(key)
+        }
 
         val extractor = getKioskExtractor(request.data)
+        var pageData: InfoItemsPage<out InfoItem>? = null
 
-        val pageData = try {
+        // FIX: Removed complex `.also{}` blocks to prevent Kotlin Internal Compiler Errors
+        try {
             if (page == 1) {
                 extractor.fetchPage()
-
-                extractor.initialPage.also {
-                    pageCache[key] = it.nextPage
-                }
+                pageData = extractor.initialPage
+                pageCache[key] = pageData?.nextPage
             } else {
-                val next = pageCache[key] ?: return newHomePageResponse(emptyList(), false)
-                extractor.getPage(next).also {
-                    pageCache[key] = it.nextPage
+                val next = pageCache[key]
+                if (next == null) {
+                    return newHomePageResponse(emptyList(), false)
                 }
+                pageData = extractor.getPage(next)
+                pageCache[key] = pageData?.nextPage
             }
         } catch (e: Exception) {
             return newHomePageResponse(emptyList(), false)
         }
+
+        if (pageData == null) return newHomePageResponse(emptyList(), false)
 
         val results = pageData.items.map {
             it.toSearchResponse()
         }
 
         val headerName = try {
-            extractor.name.ifEmpty { request.name }
+            val exName = extractor.name
+            if (exName.isNullOrEmpty()) request.name else exName
         } catch (e: Exception) {
             request.name
         }.ifEmpty { "Trending" }
@@ -87,20 +89,29 @@ class YoutubeProvider : MainAPI() {
     }
 
     private val searchPageCache = mutableMapOf<String, org.schabi.newpipe.extractor.Page?>()
+    
     override suspend fun search(query: String, page: Int): SearchResponseList {
         val extractor = service.getSearchExtractor(query)
+        var pageData: InfoItemsPage<out InfoItem>? = null
 
-        val pageData = if (!searchPageCache.containsKey(query)) {
-            extractor.fetchPage()
-            extractor.initialPage.also {
-                searchPageCache[query] = it.nextPage
+        try {
+            if (page == 1 || !searchPageCache.containsKey(query)) {
+                extractor.fetchPage()
+                pageData = extractor.initialPage
+                searchPageCache[query] = pageData?.nextPage
+            } else {
+                val next = searchPageCache[query]
+                if (next == null) {
+                    return newSearchResponseList(emptyList(), false)
+                }
+                pageData = extractor.getPage(next)
+                searchPageCache[query] = pageData?.nextPage
             }
-        } else {
-            val next = searchPageCache[query] ?: return newSearchResponseList(emptyList(), false)
-            extractor.getPage(next).also {
-                searchPageCache[query] = it.nextPage
-            }
+        } catch (e: Exception) {
+            return newSearchResponseList(emptyList(), false)
         }
+
+        if (pageData == null) return newSearchResponseList(emptyList(), false)
 
         val results = pageData.items.map {
             it.toSearchResponse()
@@ -122,11 +133,11 @@ class YoutubeProvider : MainAPI() {
 
     private fun InfoItem.toSearchResponse(): SearchResponse {
         return newMovieSearchResponse(
-            name ?: "Unknown",
-            url ?: "",
+            this.name ?: "Unknown",
+            this.url ?: "",
             TvType.Others
         ) {
-            posterUrl = thumbnails.lastOrNull()?.url
+            this.posterUrl = this@toSearchResponse.thumbnails?.lastOrNull()?.url
         }
     }
 
@@ -149,7 +160,7 @@ class YoutubeProvider : MainAPI() {
         return when {
             url.contains("/watch?v=") || url.contains("youtu.be/") -> UrlType.Video
             url.contains("/channel/") || url.contains("/@") || url.contains("/c/") -> UrlType.Channel
-            url.contains("/playlist?list=") || url.contains("/watch?v=") && url.contains("&list=") -> UrlType.Playlist
+            url.contains("/playlist?list=") || (url.contains("/watch?v=") && url.contains("&list=")) -> UrlType.Playlist
             else -> UrlType.Unknown
         }
     }
@@ -159,30 +170,27 @@ class YoutubeProvider : MainAPI() {
         extractor.fetchPage()
 
         val info = StreamInfo.getInfo(extractor)
+        val isLive = info.streamType?.name?.contains("LIVE") == true
+        val type = if (isLive) TvType.Live else TvType.Others
 
-        return newMovieLoadResponse(
-            info.name,
-            url,
-            if (info.streamType?.name?.contains("LIVE") == true)
-                TvType.Live else TvType.Others,
-            url // This is the 'data' that gets passed to loadLinks
-        ) {
-            plot = info.description.content.toString()
-            posterUrl = info.thumbnails.lastOrNull()?.url
-            duration = info.duration.toInt()
+        return newMovieLoadResponse(info.name, url, type, url) {
+            this.plot = info.description?.content?.toString()
+            this.posterUrl = info.thumbnails?.lastOrNull()?.url
+            this.duration = info.duration?.toInt()
 
-            info.uploaderName?.takeIf { it.isNotBlank() }?.let { uploader ->
-                actors = listOf(
+            val uploader = info.uploaderName
+            if (!uploader.isNullOrBlank()) {
+                this.actors = listOf(
                     ActorData(
                         Actor(
                             uploader,
-                            info.uploaderAvatars.lastOrNull()?.url ?: ""
+                            info.uploaderAvatars?.lastOrNull()?.url ?: ""
                         )
                     )
                 )
             }
 
-            tags = info.tags?.take(5)?.toList()
+            this.tags = info.tags?.take(5)?.toList()
         }
     }
 
@@ -190,23 +198,25 @@ class YoutubeProvider : MainAPI() {
         val extractor = ServiceList.YouTube.getChannelExtractor(url)
         extractor.fetchPage()
 
-        val channelName = extractor.name
+        val channelName = extractor.name ?: "Unknown Channel"
         val channelDescription = extractor.description
-        val channelAvatar = extractor.avatars.lastOrNull()?.url
-        val channelBanner = extractor.banners.lastOrNull()?.url
+        val channelAvatar = extractor.avatars?.lastOrNull()?.url
+        val channelBanner = extractor.banners?.lastOrNull()?.url
 
         val tabs = extractor.tabs
-        val videosTab = tabs.firstOrNull { it.url.contains("/videos") } ?: tabs.firstOrNull()
+        val videosTab = tabs?.firstOrNull { it.url.contains("/videos") } ?: tabs?.firstOrNull()
         ?: throw RuntimeException("No videos tab found")
 
         val videosExtractor = ServiceList.YouTube.getChannelTabExtractor(videosTab)
         val episodes = mutableListOf<Episode>()
 
+        videosExtractor.fetchPage()
         var page = videosExtractor.initialPage
+        
         episodes.addAll(page.items.map { item ->
             newEpisode(item.url) {
-                name = item.name
-                posterUrl = item.thumbnails.lastOrNull()?.url
+                this.name = item.name
+                this.posterUrl = item.thumbnails?.lastOrNull()?.url
             }
         })
 
@@ -214,27 +224,23 @@ class YoutubeProvider : MainAPI() {
         val maxPagesToLoad = 5
 
         while (page.hasNextPage() && pagesLoaded < maxPagesToLoad) {
-            page = videosExtractor.getPage(page.nextPage)
+            val nextPage = page.nextPage ?: break
+            page = videosExtractor.getPage(nextPage)
             episodes.addAll(page.items.map { item ->
                 newEpisode(item.url) {
-                    name = item.name
-                    posterUrl = item.thumbnails.lastOrNull()?.url
+                    this.name = item.name
+                    this.posterUrl = item.thumbnails?.lastOrNull()?.url
                 }
             })
             pagesLoaded++
         }
 
-        return newTvSeriesLoadResponse(
-            channelName,
-            url,
-            TvType.TvSeries,
-            episodes
-        ) {
-            plot = channelDescription
-            posterUrl = channelBanner
-            backgroundPosterUrl = channelBanner
-            tags = listOf("Channel")
-            actors = listOf(
+        return newTvSeriesLoadResponse(channelName, url, TvType.TvSeries, episodes) {
+            this.plot = channelDescription
+            this.posterUrl = channelBanner
+            this.backgroundPosterUrl = channelBanner
+            this.tags = listOf("Channel")
+            this.actors = listOf(
                 ActorData(
                     Actor(
                         channelName,
@@ -249,18 +255,18 @@ class YoutubeProvider : MainAPI() {
         val extractor = ServiceList.YouTube.getPlaylistExtractor(url)
         extractor.fetchPage()
 
-        val playlistName = extractor.name
-        val playlistDescription = extractor.description.content.toString()
-        val playlistThumbnail = extractor.thumbnails.lastOrNull()?.url
-        val uploaderName = extractor.uploaderName
+        val playlistName = extractor.name ?: "Unknown Playlist"
+        val playlistDescription = extractor.description?.content?.toString()
+        val playlistThumbnail = extractor.thumbnails?.lastOrNull()?.url
+        val uploaderName = extractor.uploaderName ?: ""
 
         val episodes = mutableListOf<Episode>()
 
-        var page = extractor.getInitialPage()
+        var page = extractor.initialPage
         episodes.addAll(page.items.map { item ->
             newEpisode(item.url) {
-                name = item.name
-                posterUrl = item.thumbnails.lastOrNull()?.url
+                this.name = item.name
+                this.posterUrl = item.thumbnails?.lastOrNull()?.url
             }
         })
 
@@ -268,31 +274,27 @@ class YoutubeProvider : MainAPI() {
         val maxPagesToLoad = 5
 
         while (page.hasNextPage() && pagesLoaded < maxPagesToLoad) {
-            page = extractor.getPage(page.nextPage)
+            val nextPage = page.nextPage ?: break
+            page = extractor.getPage(nextPage)
             episodes.addAll(page.items.map { item ->
                 newEpisode(item.url) {
-                    name = item.name
-                    posterUrl = item.thumbnails.lastOrNull()?.url
+                    this.name = item.name
+                    this.posterUrl = item.thumbnails?.lastOrNull()?.url
                 }
             })
             pagesLoaded++
         }
 
-        return newTvSeriesLoadResponse(
-            playlistName,
-            url,
-            TvType.TvSeries,
-            episodes
-        ) {
-            plot = playlistDescription
-            posterUrl = playlistThumbnail
-            tags = if (uploaderName.isNotBlank()) listOf("Channel: $uploaderName") else listOf("Playlist")
+        return newTvSeriesLoadResponse(playlistName, url, TvType.TvSeries, episodes) {
+            this.plot = playlistDescription
+            this.posterUrl = playlistThumbnail
+            this.tags = if (uploaderName.isNotBlank()) listOf("Channel: $uploaderName") else listOf("Playlist")
             if (uploaderName.isNotBlank()) {
-                actors = listOf(
+                this.actors = listOf(
                     ActorData(
                         Actor(
                             uploaderName,
-                            extractor.uploaderAvatars.lastOrNull()?.url ?: ""
+                            extractor.uploaderAvatars?.lastOrNull()?.url ?: ""
                         )
                     )
                 )
@@ -306,11 +308,12 @@ class YoutubeProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // FIX: Safe check to handle both raw video IDs AND full URLs correctly.
+        // Correctly handle the URL stack and pass 'mainUrl' as referer
         val finalUrl = if (data.startsWith("http")) data else "https://www.youtube.com/watch?v=$data"
         
         return loadExtractor(
             finalUrl,
+            mainUrl,
             subtitleCallback,
             callback
         )
