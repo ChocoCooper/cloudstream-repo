@@ -3,7 +3,6 @@ package com.dubstamil
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
-import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -416,16 +415,16 @@ class IsaidubProvider : MainAPI() {
 
             val isM3u8 = finalUrl.contains(".m3u8")
 
+            // FIX: Uses pure ExtractorLink class to bypass lambda mismatch crashes
             callback.invoke(
-                newExtractorLink(
+                ExtractorLink(
                     source = this.name,
                     name   = sourceName,
                     url    = finalUrl,
-                    type   = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO,
-                ) {
-                    this.referer = mainUrl
-                    this.quality = Qualities.Unknown.value 
-                }
+                    referer = mainUrl,
+                    quality = Qualities.Unknown.value,
+                    type   = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                )
             )
         }
         return true
