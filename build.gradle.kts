@@ -57,7 +57,6 @@ fun getSecret(key: String, fallback: String = ""): String {
 fun Project.cloudstream(configuration: CloudstreamExtension.() -> Unit) =
     extensions.getByName<CloudstreamExtension>("cloudstream").configuration()
 
-// FIX: Use LibraryExtension instead of BaseExtension so compileSdk is available
 fun Project.android(configuration: LibraryExtension.() -> Unit) =
     extensions.getByName<LibraryExtension>("android").configuration()
 
@@ -75,12 +74,10 @@ subprojects {
     android {
         namespace = "com.chococooper.${project.name.lowercase()}"
 
-        // FIX: compileSdk belongs here on LibraryExtension — now resolves correctly
         compileSdk = 35
 
         defaultConfig {
             minSdk = 21
-            // FIX: targetSdk belongs inside defaultConfig per AGP 8.x
             targetSdk = 35
         }
 
@@ -106,8 +103,12 @@ subprojects {
     dependencies {
         val implementation by configurations
         val cloudstream by configurations
+        val compileOnly by configurations
 
         cloudstream("com.lagradost:cloudstream3:pre-release")
+        
+        // This is required so YoutubeProvider.kt can use NewPipe
+        compileOnly("com.github.TeamNewPipe:NewPipeExtractor:v0.24.2")
 
         implementation(kotlin("stdlib"))
         implementation("com.github.Blatzar:NiceHttp:0.4.18")
