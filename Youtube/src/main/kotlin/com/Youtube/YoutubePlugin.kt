@@ -1,4 +1,4 @@
-package Youtube
+package com.Youtube
 
 import com.lagradost.cloudstream3.plugins.BasePlugin
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
