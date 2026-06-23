@@ -8,6 +8,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.withTimeoutOrNull
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
 
@@ -72,12 +73,6 @@ class StreamHubProvider : MainAPI() {
     private data class TmdbSeason(
         @JsonProperty("season_number") val seasonNumber: Int?,
         @JsonProperty("episode_count") val episodeCount: Int?
-    )
-
-    private data class WyzieSub(
-        @JsonProperty("url") val url: String?,
-        @JsonProperty("language") val language: String?,
-        @JsonProperty("display") val display: String?
     )
 
     // --- CORE LOGIC ---
@@ -269,27 +264,32 @@ class StreamHubProvider : MainAPI() {
                     } catch (e: Exception) {}
                 },
                 async {
-                    // Layer 4: Wyziesubs API
+                    // Layer 4: Wyziesubs API (Fixed to bypass Kotlin Compiler ICE)
                     try {
                         var wyzieUrl = "https://sub.wyzie.io/search?id=$tmdbId&source=all&key=$wyzieApiKey"
                         if (!isMovie && season != null && episode != null) wyzieUrl += "&season=$season&episode=$episode"
                         val wyzieResponse = app.get(wyzieUrl, timeout = 5).text
                         
-                        val wyzieList = AppUtils.tryParseJson<List<WyzieSub>>(wyzieResponse) 
-                            ?: JSONObject(wyzieResponse).optJSONArray("subtitles")?.let { array ->
-                                (0 until array.length()).mapNotNull { i -> AppUtils.tryParseJson<WyzieSub>(array.getJSONObject(i).toString()) }
-                            }
+                        // Using explicit JSON Array parsing prevents the Compiler from crashing on tryParseJson
+                        val array = if (wyzieResponse.trim().startsWith("{")) {
+                            JSONObject(wyzieResponse).optJSONArray("subtitles") ?: JSONArray()
+                        } else {
+                            JSONArray(wyzieResponse)
+                        }
 
-                        wyzieList?.forEach { sub ->
-                            val subUrl = sub.url ?: return@forEach
-                            val lang = sub.display ?: sub.language ?: "English"
-                            subtitleCallback.invoke(SubtitleFile(lang, subUrl))
+                        for (i in 0 until array.length()) {
+                            val sub = array.getJSONObject(i)
+                            val subUrl = sub.optString("url")
+                            val lang = sub.optString("display").takeIf { it.isNotBlank() } ?: sub.optString("language", "English")
+                            if (subUrl.isNotBlank()) {
+                                subtitleCallback.invoke(SubtitleFile(lang, subUrl))
+                            }
                         }
                     } catch (e: Exception) {}
                 }
             )
 
-            // --- 2. THE BIG 3 (PURE STATIC WEBVIEWS) ---
+            // --- 2. FAST NATIVE WEBVIEW SERVERS (STATIC ONLY) ---
             val webviewExtractors = listOf(
                 async {
                     withTimeoutOrNull(15000) {
@@ -360,7 +360,6 @@ class StreamHubProvider : MainAPI() {
                 }
             )
 
-            // Resolve and return
             val serverResults = webviewExtractors.awaitAll()
             subJobs.awaitAll()
 
