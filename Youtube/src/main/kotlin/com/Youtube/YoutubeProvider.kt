@@ -1,4 +1,4 @@
-package com.Youtube
+package com.Youtube // FIX: Changed from recloudstream so the Plugin class can find it!
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
@@ -9,7 +9,7 @@ import org.schabi.newpipe.extractor.stream.StreamInfo
 
 class YoutubeProvider : MainAPI() {
     override var mainUrl = "https://www.youtube.com"
-    override var name = "YouTube"
+    override var name = "YouTube Plugin" // FIX: Renamed so it doesn't conflict with the built-in YouTube!
     override var lang = "en"
     override val hasMainPage = true
     override val hasQuickSearch = true
@@ -43,7 +43,6 @@ class YoutubeProvider : MainAPI() {
 
         val extractor = getKioskExtractor(request.data)
 
-        // FIX: Removed generic `var` assignment. We use a direct `val` assignment to bypass the Compiler ICE.
         val pageData = try {
             if (page == 1) {
                 extractor.fetchPage()
@@ -88,7 +87,6 @@ class YoutubeProvider : MainAPI() {
     override suspend fun search(query: String, page: Int): SearchResponseList {
         val extractor = service.getSearchExtractor(query)
 
-        // FIX: Exact same direct `val` structure as getMainPage to prevent compiler crash
         val pageData = try {
             if (page == 1 || !searchPageCache.containsKey(query)) {
                 extractor.fetchPage()
@@ -204,8 +202,6 @@ class YoutubeProvider : MainAPI() {
 
         videosExtractor.fetchPage()
         
-        // FIX: Avoid re-assigning variables with generic types. 
-        // We separate the initial page from the loop completely to stop Compiler crashes.
         val initialPage = videosExtractor.initialPage
         episodes.addAll(initialPage.items.map { item ->
             newEpisode(item.url) {
@@ -259,7 +255,6 @@ class YoutubeProvider : MainAPI() {
 
         val episodes = mutableListOf<Episode>()
 
-        // FIX: Avoiding generic var reassignment loop for Playlists too
         val initialPage = extractor.initialPage
         episodes.addAll(initialPage.items.map { item ->
             newEpisode(item.url) {
@@ -311,7 +306,6 @@ class YoutubeProvider : MainAPI() {
     ): Boolean {
         val finalUrl = if (data.startsWith("http")) data else "https://www.youtube.com/watch?v=$data"
         
-        // Passed strictly as 3 parameters so it safely passes through the Native Extractor interface
         return loadExtractor(
             finalUrl,
             subtitleCallback,
