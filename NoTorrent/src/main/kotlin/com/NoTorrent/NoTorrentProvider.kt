@@ -157,7 +157,6 @@ class NoTorrentProvider : MainAPI() {
                         val lang = sub.optString("display", "").takeIf { it.isNotBlank() } ?: sub.optString("language", "English")
                         
                         if (subUrl.isNotBlank()) {
-                            // FIX: newSubtitleFile explicitly clears deprecation errors
                             subtitleCallback.invoke(newSubtitleFile(lang, subUrl))
                         }
                     }
@@ -182,7 +181,6 @@ class NoTorrentProvider : MainAPI() {
                             if (streamUrl.isNotBlank()) {
                                 val isM3u8 = streamUrl.contains(".m3u8")
                                 
-                                // FIX: Trailing lambda on newExtractorLink cleanly passes GitHub Action compiler
                                 callback.invoke(newExtractorLink(
                                     "NoTorrent",
                                     "NoTorrent ($name)",
