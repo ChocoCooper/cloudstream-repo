@@ -6,7 +6,6 @@ import org.schabi.newpipe.extractor.ServiceList
 import org.schabi.newpipe.extractor.kiosk.KioskExtractor
 import org.schabi.newpipe.extractor.InfoItem
 import org.schabi.newpipe.extractor.stream.StreamInfo
-import org.schabi.newpipe.extractor.ListExtractor.InfoItemsPage
 
 class YoutubeProvider : MainAPI() {
     override var mainUrl = "https://www.youtube.com"
@@ -43,27 +42,23 @@ class YoutubeProvider : MainAPI() {
         }
 
         val extractor = getKioskExtractor(request.data)
-        var pageData: InfoItemsPage<out InfoItem>? = null
 
-        // FIX: Removed complex `.also{}` blocks to prevent Kotlin Internal Compiler Errors
-        try {
+        // FIX: Removed generic `var` assignment. We use a direct `val` assignment to bypass the Compiler ICE.
+        val pageData = try {
             if (page == 1) {
                 extractor.fetchPage()
-                pageData = extractor.initialPage
-                pageCache[key] = pageData?.nextPage
+                val p = extractor.initialPage
+                pageCache[key] = p.nextPage
+                p
             } else {
-                val next = pageCache[key]
-                if (next == null) {
-                    return newHomePageResponse(emptyList(), false)
-                }
-                pageData = extractor.getPage(next)
-                pageCache[key] = pageData?.nextPage
+                val next = pageCache[key] ?: return newHomePageResponse(emptyList(), false)
+                val p = extractor.getPage(next)
+                pageCache[key] = p.nextPage
+                p
             }
         } catch (e: Exception) {
             return newHomePageResponse(emptyList(), false)
         }
-
-        if (pageData == null) return newHomePageResponse(emptyList(), false)
 
         val results = pageData.items.map {
             it.toSearchResponse()
@@ -92,26 +87,23 @@ class YoutubeProvider : MainAPI() {
     
     override suspend fun search(query: String, page: Int): SearchResponseList {
         val extractor = service.getSearchExtractor(query)
-        var pageData: InfoItemsPage<out InfoItem>? = null
 
-        try {
+        // FIX: Exact same direct `val` structure as getMainPage to prevent compiler crash
+        val pageData = try {
             if (page == 1 || !searchPageCache.containsKey(query)) {
                 extractor.fetchPage()
-                pageData = extractor.initialPage
-                searchPageCache[query] = pageData?.nextPage
+                val p = extractor.initialPage
+                searchPageCache[query] = p.nextPage
+                p
             } else {
-                val next = searchPageCache[query]
-                if (next == null) {
-                    return newSearchResponseList(emptyList(), false)
-                }
-                pageData = extractor.getPage(next)
-                searchPageCache[query] = pageData?.nextPage
+                val next = searchPageCache[query] ?: return newSearchResponseList(emptyList(), false)
+                val p = extractor.getPage(next)
+                searchPageCache[query] = p.nextPage
+                p
             }
         } catch (e: Exception) {
             return newSearchResponseList(emptyList(), false)
         }
-
-        if (pageData == null) return newSearchResponseList(emptyList(), false)
 
         val results = pageData.items.map {
             it.toSearchResponse()
@@ -211,27 +203,32 @@ class YoutubeProvider : MainAPI() {
         val episodes = mutableListOf<Episode>()
 
         videosExtractor.fetchPage()
-        var page = videosExtractor.initialPage
         
-        episodes.addAll(page.items.map { item ->
+        // FIX: Avoid re-assigning variables with generic types. 
+        // We separate the initial page from the loop completely to stop Compiler crashes.
+        val initialPage = videosExtractor.initialPage
+        episodes.addAll(initialPage.items.map { item ->
             newEpisode(item.url) {
                 this.name = item.name
                 this.posterUrl = item.thumbnails?.lastOrNull()?.url
             }
         })
 
+        var nextToken = initialPage.nextPage
+        var hasNext = initialPage.hasNextPage()
         var pagesLoaded = 1
         val maxPagesToLoad = 5
 
-        while (page.hasNextPage() && pagesLoaded < maxPagesToLoad) {
-            val nextPage = page.nextPage ?: break
-            page = videosExtractor.getPage(nextPage)
+        while (hasNext && nextToken != null && pagesLoaded < maxPagesToLoad) {
+            val page = videosExtractor.getPage(nextToken)
             episodes.addAll(page.items.map { item ->
                 newEpisode(item.url) {
                     this.name = item.name
                     this.posterUrl = item.thumbnails?.lastOrNull()?.url
                 }
             })
+            nextToken = page.nextPage
+            hasNext = page.hasNextPage()
             pagesLoaded++
         }
 
@@ -262,26 +259,30 @@ class YoutubeProvider : MainAPI() {
 
         val episodes = mutableListOf<Episode>()
 
-        var page = extractor.initialPage
-        episodes.addAll(page.items.map { item ->
+        // FIX: Avoiding generic var reassignment loop for Playlists too
+        val initialPage = extractor.initialPage
+        episodes.addAll(initialPage.items.map { item ->
             newEpisode(item.url) {
                 this.name = item.name
                 this.posterUrl = item.thumbnails?.lastOrNull()?.url
             }
         })
 
+        var nextToken = initialPage.nextPage
+        var hasNext = initialPage.hasNextPage()
         var pagesLoaded = 1
         val maxPagesToLoad = 5
 
-        while (page.hasNextPage() && pagesLoaded < maxPagesToLoad) {
-            val nextPage = page.nextPage ?: break
-            page = extractor.getPage(nextPage)
+        while (hasNext && nextToken != null && pagesLoaded < maxPagesToLoad) {
+            val page = extractor.getPage(nextToken)
             episodes.addAll(page.items.map { item ->
                 newEpisode(item.url) {
                     this.name = item.name
                     this.posterUrl = item.thumbnails?.lastOrNull()?.url
                 }
             })
+            nextToken = page.nextPage
+            hasNext = page.hasNextPage()
             pagesLoaded++
         }
 
@@ -308,12 +309,11 @@ class YoutubeProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // Correctly handle the URL stack and pass 'mainUrl' as referer
         val finalUrl = if (data.startsWith("http")) data else "https://www.youtube.com/watch?v=$data"
         
+        // Passed strictly as 3 parameters so it safely passes through the Native Extractor interface
         return loadExtractor(
             finalUrl,
-            mainUrl,
             subtitleCallback,
             callback
         )
