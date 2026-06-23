@@ -223,7 +223,7 @@ class StreamHubProvider : MainAPI() {
                                     val sub = subs.getJSONObject(i)
                                     val url = sub.optString("url")
                                     val lang = sub.optString("lang")
-                                    if (url.isNotBlank() && lang.isNotBlank()) subtitleCallback.invoke(SubtitleFile(lang, url))
+                                    if (url.isNotBlank() && lang.isNotBlank()) subtitleCallback.invoke(newSubtitleFile(lang, url))
                                 }
                             }
                         } catch (e: Exception) {}
@@ -241,7 +241,7 @@ class StreamHubProvider : MainAPI() {
                                     val sub = subs.getJSONObject(i)
                                     val url = sub.optString("url")
                                     val lang = sub.optString("lang")
-                                    if (url.isNotBlank() && lang.isNotBlank()) subtitleCallback.invoke(SubtitleFile(lang, url))
+                                    if (url.isNotBlank() && lang.isNotBlank()) subtitleCallback.invoke(newSubtitleFile(lang, url))
                                 }
                             }
                         } catch (e: Exception) {}
@@ -258,19 +258,19 @@ class StreamHubProvider : MainAPI() {
                                 val sub = subs.getJSONObject(i)
                                 val url = sub.optString("url")
                                 val lang = sub.optString("lang")
-                                if (url.isNotBlank() && lang.isNotBlank()) subtitleCallback.invoke(SubtitleFile(lang, url))
+                                if (url.isNotBlank() && lang.isNotBlank()) subtitleCallback.invoke(newSubtitleFile(lang, url))
                             }
                         }
                     } catch (e: Exception) {}
                 },
                 async {
-                    // Layer 4: Wyziesubs API (Fixed to bypass Kotlin Compiler ICE)
+                    // Layer 4: Wyziesubs API
+                    // FIX: Replaced AppUtils.tryParseJson with raw JSONObject/JSONArray parsing to prevent Kotlin Compiler Memory Crash
                     try {
                         var wyzieUrl = "https://sub.wyzie.io/search?id=$tmdbId&source=all&key=$wyzieApiKey"
                         if (!isMovie && season != null && episode != null) wyzieUrl += "&season=$season&episode=$episode"
                         val wyzieResponse = app.get(wyzieUrl, timeout = 5).text
                         
-                        // Using explicit JSON Array parsing prevents the Compiler from crashing on tryParseJson
                         val array = if (wyzieResponse.trim().startsWith("{")) {
                             JSONObject(wyzieResponse).optJSONArray("subtitles") ?: JSONArray()
                         } else {
@@ -282,7 +282,7 @@ class StreamHubProvider : MainAPI() {
                             val subUrl = sub.optString("url")
                             val lang = sub.optString("display").takeIf { it.isNotBlank() } ?: sub.optString("language", "English")
                             if (subUrl.isNotBlank()) {
-                                subtitleCallback.invoke(SubtitleFile(lang, subUrl))
+                                subtitleCallback.invoke(newSubtitleFile(lang, subUrl))
                             }
                         }
                     } catch (e: Exception) {}
