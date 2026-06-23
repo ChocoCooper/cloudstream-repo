@@ -8,7 +8,6 @@ concurrency:
 on:
   push:
     branches:
-      # choose your default branch
       - master
       - main
     paths-ignore:
@@ -45,9 +44,17 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/src
           chmod +x gradlew
-          ./gradlew make makePluginsJson
+          # Added --stacktrace for better error details and redirected all output to build_log.txt
+          ./gradlew make makePluginsJson --stacktrace > build_log.txt 2>&1
           cp **/build/*.cs3 $GITHUB_WORKSPACE/builds
           cp build/plugins.json $GITHUB_WORKSPACE/builds
+
+      - name: Upload Build Log Artifact
+        uses: actions/upload-artifact@v4
+        if: always() # This ensures the log is uploaded even if the Gradle build fails
+        with:
+          name: build-error-log
+          path: src/build_log.txt
 
       - name: Push builds
         run: |
