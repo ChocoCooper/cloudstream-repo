@@ -1,4 +1,4 @@
-package com.YT // FIX: Changed from recloudstream so the Plugin class can find it!
+package recloudstream
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
@@ -7,9 +7,9 @@ import org.schabi.newpipe.extractor.kiosk.KioskExtractor
 import org.schabi.newpipe.extractor.InfoItem
 import org.schabi.newpipe.extractor.stream.StreamInfo
 
-class YTProvider : MainAPI() {
+class YoutubeProvider : MainAPI() {
     override var mainUrl = "https://www.youtube.com"
-    override var name = "YouTube Plugin" // FIX: Renamed so it doesn't conflict with the built-in YouTube!
+    override var name = "YouTube" // FIX: Renamed so it doesn't conflict with the built-in YouTube!
     override var lang = "en"
     override val hasMainPage = true
     override val hasQuickSearch = true
