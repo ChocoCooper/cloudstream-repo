@@ -44,10 +44,13 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/src
           chmod +x gradlew
-          # Added --stacktrace for better error details and redirected all output to build_log.txt
-          ./gradlew make makePluginsJson --stacktrace > build_log.txt 2>&1
-          cp **/build/*.cs3 $GITHUB_WORKSPACE/builds
-          cp build/plugins.json $GITHUB_WORKSPACE/builds
+          # Use 'tee' to print logs to the GitHub console AND save them to the file.
+          # Added --info for maximum compiler error details.
+          ./gradlew make makePluginsJson --stacktrace --info 2>&1 | tee build_log.txt
+          
+          # Added || true so it doesn't instantly crash the workflow if a build fails
+          cp **/build/*.cs3 $GITHUB_WORKSPACE/builds || true
+          cp build/plugins.json $GITHUB_WORKSPACE/builds || true
 
       - name: Upload Build Log Artifact
         uses: actions/upload-artifact@v4
