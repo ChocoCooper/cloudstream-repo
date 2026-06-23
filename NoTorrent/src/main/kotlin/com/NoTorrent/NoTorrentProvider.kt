@@ -34,7 +34,7 @@ class NoTorrentProvider : MainAPI() {
         "09ad8ace66eec34302943272db0e8d2c", "ea118e768e75a1fe3b53dc99c9e4de09"
     )
 
-    // --- Core Safe TMDB Fetcher ---
+    // --- Core Safe TMDB Fetcher (Bypasses Compiler Crashes) ---
     private suspend fun fetchTmdb(path: String): JSONObject? {
         val keys = tmdbApiKeys.shuffled().take(3)
         for (key in keys) {
@@ -144,6 +144,7 @@ class NoTorrentProvider : MainAPI() {
                     val wyzieUrl = "https://sub.wyzie.io/search?id=$tmdbId&source=all&key=$wyzieApiKey"
                     val wyzieResponse = app.get(wyzieUrl, timeout = 5).text
                     
+                    // Safe JSON manual parsing completely bypasses Compiler ICE Memory constraints
                     val array = if (wyzieResponse.trim().startsWith("{")) {
                         JSONObject(wyzieResponse).optJSONArray("subtitles") ?: JSONArray()
                     } else {
@@ -155,9 +156,8 @@ class NoTorrentProvider : MainAPI() {
                         val subUrl = sub.optString("url", "")
                         val lang = sub.optString("display", "").takeIf { it.isNotBlank() } ?: sub.optString("language", "English")
                         
-                        // FIX: Uses raw SubtitleFile constructor to bypass deprecation wrapper bugs
                         if (subUrl.isNotBlank()) {
-                            subtitleCallback.invoke(SubtitleFile(lang, subUrl))
+                            subtitleCallback.invoke(newSubtitleFile(lang, subUrl))
                         }
                     }
                 } catch (e: Exception) {}
@@ -181,7 +181,6 @@ class NoTorrentProvider : MainAPI() {
                             if (streamUrl.isNotBlank()) {
                                 val isM3u8 = streamUrl.contains(".m3u8")
                                 
-                                // FIX: Uses pure ExtractorLink class to bypass lambda mismatch crashes
                                 callback.invoke(ExtractorLink(
                                     source = "NoTorrent",
                                     name = "NoTorrent ($name)",
