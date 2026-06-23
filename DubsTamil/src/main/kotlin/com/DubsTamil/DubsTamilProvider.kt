@@ -14,10 +14,6 @@ import org.json.JSONArray
 import java.net.URLDecoder
 import java.net.URLEncoder
 
-// ============================================================
-// DATA CLASSES
-// ============================================================
-
 data class ScrapedMovie(val title: String, val link: String)
 data class SimpleTmdbMovie(
     val title: String, 
@@ -25,10 +21,6 @@ data class SimpleTmdbMovie(
     val overview: String, 
     val releaseDate: String
 )
-
-// ============================================================
-// PROVIDER
-// ============================================================
 
 class IsaidubProvider : MainAPI() {
 
@@ -38,11 +30,9 @@ class IsaidubProvider : MainAPI() {
     override var lang           = "ta"
     override val hasMainPage    = true
 
-    // ── Semaphores ───────────────────────────────────────────
     private val tmdbSemaphore   = Semaphore(15)
     private val scrapeSemaphore = Semaphore(5)
 
-    // ── TMDB key pool (Master List Approach) ─────────────────
     private val masterTmdbKeys = listOf(
         "fb7bb23f03b6994dafc674c074d01761", "e55425032d3d0f371fc776f302e7c09b",
         "8301a21598f8b45668d5711a814f01f6", "8cf43ad9c085135b9479ad5cf6bbcbda",
@@ -56,7 +46,6 @@ class IsaidubProvider : MainAPI() {
     ).distinct()
 
     private val allTmdbKeys = masterTmdbKeys.toMutableList()
-
     private var keyIndex = 0
 
     @Synchronized
@@ -78,7 +67,6 @@ class IsaidubProvider : MainAPI() {
         }
     }
 
-    // ── Robust TMDB Fetcher ──────────────────────────────────
     private suspend fun fetchFromTmdb(urlBuilder: (String) -> String): String? {
         val keysToTry = getKeysRotated() 
         for (key in keysToTry) {
@@ -99,7 +87,6 @@ class IsaidubProvider : MainAPI() {
         return null
     }
 
-    // ── Page cache ───────────────────────────────────────────
     private val pageCache     = mutableMapOf<String, Pair<Long, Pair<List<ScrapedMovie>, Int>>>()
     private val cacheDuration = 5 * 60 * 1000L
 
@@ -110,10 +97,6 @@ class IsaidubProvider : MainAPI() {
         "$mainUrl/tamil-horror-dubbed-movies/"  to "Tamil Dubbed Horror Movies",
         "$mainUrl/tamil-family-dubbed-movies/"  to "Tamil Dubbed Family Movies"
     )
-
-    // ============================================================
-    // HOME PAGE
-    // ============================================================
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         val sectionUrl = request.data
@@ -148,10 +131,6 @@ class IsaidubProvider : MainAPI() {
 
         return newHomePageResponse(homePageLists, hasNext = false)
     }
-
-    // ============================================================
-    // FETCH SECTION ITEMS
-    // ============================================================
 
     private suspend fun fetchSectionItems(
         targetBaseUrl: String,
@@ -236,10 +215,6 @@ class IsaidubProvider : MainAPI() {
         return collected
     }
 
-    // ============================================================
-    // SEARCH
-    // ============================================================
-
     override suspend fun search(query: String): List<SearchResponse> {
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
         
@@ -306,10 +281,6 @@ class IsaidubProvider : MainAPI() {
         return searchResults
     }
 
-    // ============================================================
-    // LOAD
-    // ============================================================
-
     override suspend fun load(url: String): LoadResponse? {
         if (!url.contains("synthetic_meta")) {
             return newMovieLoadResponse("Isaidub Movie", url, TvType.Movie, url)
@@ -366,10 +337,6 @@ class IsaidubProvider : MainAPI() {
         }
     }
 
-    // ============================================================
-    // LOAD LINKS
-    // ============================================================
-
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -415,7 +382,6 @@ class IsaidubProvider : MainAPI() {
 
             val isM3u8 = finalUrl.contains(".m3u8")
 
-            // FIX: Uses pure ExtractorLink class to bypass lambda mismatch crashes
             callback.invoke(
                 ExtractorLink(
                     source = this.name,
@@ -429,10 +395,6 @@ class IsaidubProvider : MainAPI() {
         }
         return true
     }
-
-    // ============================================================
-    // TMDB TITLE LOOKUP
-    // ============================================================
 
     private suspend fun fetchTmdbTitle(
         rawTitle: String,
@@ -477,10 +439,6 @@ class IsaidubProvider : MainAPI() {
         }
         return Pair(null, usedYear)
     }
-
-    // ============================================================
-    // FIND MOVIE PAGE
-    // ============================================================
 
     private suspend fun findMoviePage(title: String, year: String): ScrapedMovie? {
         if (year.isBlank()) return null
@@ -545,10 +503,6 @@ class IsaidubProvider : MainAPI() {
         return bestMatchMovie
     }
 
-    // ============================================================
-    // SCRAPE PAGE
-    // ============================================================
-
     private suspend fun scrapePage(url: String): Pair<List<ScrapedMovie>, Int> {
         val cached = pageCache[url]
         if (cached != null) {
@@ -590,10 +544,6 @@ class IsaidubProvider : MainAPI() {
         return resultPair
     }
 
-    // ============================================================
-    // TOKEN HELPERS
-    // ============================================================
-
     private fun tokenize(text: String): Set<String> {
         val tokens = mutableSetOf<String>()
         val matches = Regex("[a-z0-9]+").findAll(text.lowercase())
@@ -602,10 +552,6 @@ class IsaidubProvider : MainAPI() {
         }
         return tokens
     }
-
-    // ============================================================
-    // RESOLVE ALL LINKS
-    // ============================================================
 
     private suspend fun resolveAllLinks(url: String, depth: Int): List<Pair<String, String>> {
         if (depth > 15) return emptyList()
@@ -700,10 +646,6 @@ class IsaidubProvider : MainAPI() {
         return uniqueLinks
     }
 
-    // ============================================================
-    // EXACT RESOLUTION EXTRACTOR
-    // ============================================================
-
     private fun extractResolution(text: String, url: String): String {
         val combined = (text + url).lowercase()
         
@@ -718,10 +660,6 @@ class IsaidubProvider : MainAPI() {
             else -> "HD"
         }
     }
-
-    // ============================================================
-    // PAGE EXTRACTORS
-    // ============================================================
 
     private fun isFinalUrl(url: String): Boolean {
         val low = url.lowercase()
