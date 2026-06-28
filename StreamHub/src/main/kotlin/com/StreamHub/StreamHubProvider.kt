@@ -206,7 +206,7 @@ class StreamHubProvider : MainAPI() {
         val imdbId = data.substringAfter("imdb=", "").substringBefore("&").takeIf { it.isNotBlank() && it != "null" }
 
         return coroutineScope {
-            // --- 1. RUN EXTRACTORS CONCURRENTLY ---
+            // --- 1. RUN EXTRACTORS CONCURRENTLY WITH 15-SECOND FAILSAVES ---
             val extractorJobs = listOf(
                 async { withTimeoutOrNull(15000) { Movies111Extractor.getStream(data, callback) } ?: false },
                 async { withTimeoutOrNull(15000) { VidcoreExtractor.getStream(data, callback) } ?: false },
