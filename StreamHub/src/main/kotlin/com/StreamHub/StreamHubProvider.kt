@@ -4,16 +4,17 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
 
 class StreamHubProvider : MainAPI() {
-    override var mainUrl = "https://streamhub.app" 
+    override var mainUrl = "https://streamhub.app"
     override var name = "StreamHub"
-    override val hasMainPage = true 
+    override val hasMainPage = true
     override var lang = "en"
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime, TvType.AsianDrama)
 
@@ -73,7 +74,6 @@ class StreamHubProvider : MainAPI() {
         @JsonProperty("episode_count") val episodeCount: Int?
     )
 
-    // --- CORE LOGIC ---
     private suspend inline fun <reified T : Any> fetchTmdb(url: String): T? {
         val keysToTry = tmdbApiKeys.shuffled().take(3)
         for (key in keysToTry) {
@@ -206,11 +206,16 @@ class StreamHubProvider : MainAPI() {
         val imdbId = data.substringAfter("imdb=", "").substringBefore("&").takeIf { it.isNotBlank() && it != "null" }
 
         return coroutineScope {
-            
-            // --- 1. FULLY ISOLATED SUBTITLE NETWORK ---
+            // --- 1. RUN EXTRACTORS CONCURRENTLY ---
+            val extractorJobs = listOf(
+                async { withTimeoutOrNull(15000) { Movies111Extractor.getStream(data, callback) } ?: false },
+                async { withTimeoutOrNull(15000) { VidcoreExtractor.getStream(data, callback) } ?: false },
+                async { withTimeoutOrNull(15000) { VidlinkExtractor.getStream(data, callback) } ?: false }
+            )
+
+            // --- 2. RUN SUBTITLES CONCURRENTLY ---
             val subJobs = listOf(
                 async {
-                    // Layer 1: Stremio OpenSubtitles v3 (Using IMDb)
                     if (imdbId != null) {
                         try {
                             val osUrl = if(isMovie) "https://opensubtitles-v3.strem.io/subtitles/movie/$imdbId.json" else "https://opensubtitles-v3.strem.io/subtitles/series/$imdbId:$season:$episode.json"
@@ -228,7 +233,6 @@ class StreamHubProvider : MainAPI() {
                     }
                 },
                 async {
-                    // Layer 2: Legacy Stremio OpenSubtitles
                     if (imdbId != null) {
                         try {
                             val osLegacyUrl = if(isMovie) "https://opensubtitles.strem.io/stremio/v1/subtitles/movie/$imdbId.json" else "https://opensubtitles.strem.io/stremio/v1/subtitles/series/$imdbId:$season:$episode.json"
@@ -246,7 +250,6 @@ class StreamHubProvider : MainAPI() {
                     }
                 },
                 async {
-                    // Layer 3: Stremio OpenSubtitles (Using TMDB Fallback for Anime)
                     try {
                         val osTmdbUrl = if(isMovie) "https://opensubtitles.strem.fun/subtitles/movie/tmdb:$tmdbId.json" else "https://opensubtitles.strem.fun/subtitles/series/tmdb:$tmdbId:$season:$episode.json"
                         val res = app.get(osTmdbUrl, timeout = 5).text
@@ -262,7 +265,6 @@ class StreamHubProvider : MainAPI() {
                     } catch (e: Exception) {}
                 },
                 async {
-                    // Layer 4: Wyziesubs API
                     try {
                         var wyzieUrl = "https://sub.wyzie.io/search?id=$tmdbId&source=all&key=$wyzieApiKey"
                         if (!isMovie && season != null && episode != null) wyzieUrl += "&season=$season&episode=$episode"
@@ -286,24 +288,14 @@ class StreamHubProvider : MainAPI() {
                 }
             )
 
-            // --- 2. DELEGATE TO SEPARATE EXTRACTORS ---
-            var foundLinks = false
-
-            if (Movies111Extractor.getStream(data, callback)) {
-                foundLinks = true
+            val results = extractorJobs.awaitAll()
+            
+            // Allow subtitles up to 10s to load without blocking the video starting
+            withTimeoutOrNull(10000) {
+                subJobs.awaitAll()
             }
 
-            if (VidcoreExtractor.getStream(data, callback)) {
-                foundLinks = true
-            }
-
-            if (VidlinkExtractor.getStream(data, callback)) {
-                foundLinks = true
-            }
-
-            subJobs.awaitAll()
-
-            return@coroutineScope foundLinks
+            return@coroutineScope results.any { it }
         }
     }
 }
