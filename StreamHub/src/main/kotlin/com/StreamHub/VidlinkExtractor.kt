@@ -8,21 +8,38 @@ object VidlinkExtractor {
     suspend fun getStream(dataUrl: String, callback: (ExtractorLink) -> Unit): Boolean {
         try {
             val vidlinkUrl = dataUrl.replace("https://streamhub.app", "https://vidlink.pro")
-            val targetRegex = Regex(""".*vodvidl\.site.*\.m3u8.*""")
-            val interceptor = WebViewResolver(targetRegex)
-
+            
+            // DYNAMIC: Catch any m3u8 or mp4 network request
+            val catchAllRegex = Regex("""(?i).*\.(m3u8|mp4).*""")
+            // BLACKLIST: Ignore common ad trackers and blank placeholders
+            val blacklist = listOf("youtube", "google", "doubleclick", "analytics", "blank.mp4", "googletagmanager", "cloudflare")
+            
+            val interceptor = WebViewResolver(catchAllRegex)
             val response = app.get(vidlinkUrl, interceptor = interceptor)
             val interceptedUrl = response.url
 
-            if (interceptedUrl.contains("vodvidl") || interceptedUrl.contains(".m3u8")) {
+            // Verify it's a media file and not blacklisted
+            val isMediaFile = interceptedUrl.contains(".m3u8") || interceptedUrl.contains(".mp4")
+            val isClean = blacklist.none { interceptedUrl.contains(it) }
+
+            if (isMediaFile && isClean) {
+                val linkType = if (interceptedUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                
                 callback.invoke(
-                    newExtractorLink("Vidlink", "Vidlink", interceptedUrl, ExtractorLinkType.M3U8) {
-                        this.referer = "https://vidlink.pro/" 
-                    }
+                    ExtractorLink(
+                        source = "Vidlink", 
+                        name = "Vidlink", 
+                        url = interceptedUrl, 
+                        referer = "https://vidlink.pro/",
+                        quality = Qualities.Unknown.value,
+                        type = linkType
+                    )
                 )
                 return true
             }
-        } catch (e: Exception) {}
+        } catch (e: Exception) {
+            // Silently fail on timeout
+        }
         return false
     }
 }
