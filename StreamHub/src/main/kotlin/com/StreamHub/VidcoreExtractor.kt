@@ -35,7 +35,7 @@ object VidcoreExtractor {
                             name = sourceName, 
                             url = interceptedUrl, 
                             referer = "$domain/",
-                            quality = Qualities.P1080.value, // Added 1080p flag to trigger immediate auto-play priority
+                            quality = Qualities.Unknown.value,
                             type = linkType
                         )
                     )
