@@ -6,6 +6,7 @@ import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
@@ -37,7 +38,6 @@ class StreamHubProvider : MainAPI() {
     private val imageBase = "https://image.tmdb.org/t/p/w500"
     private val backdropBase = "https://image.tmdb.org/t/p/original"
 
-    // --- TMDB DATA CLASSES ---
     private data class TmdbSearchResponse(@JsonProperty("results") val results: List<TmdbResult>?)
     private data class TmdbResult(
         @JsonProperty("id") val id: Int?,
@@ -206,19 +206,10 @@ class StreamHubProvider : MainAPI() {
         val imdbId = data.substringAfter("imdb=", "").substringBefore("&").takeIf { it.isNotBlank() && it != "null" }
 
         return coroutineScope {
-            // --- 1. RUN EXTRACTORS CONCURRENTLY ---
-            // REMOVED withTimeoutOrNull so Cloudstream's native WebViewResolver 
-            // can use its full 60-second limit to bypass Cloudflare and ads.
-            val extractorJobs = listOf(
-                async { Movies111Extractor.getStream(data, callback) },
-                async { VidcoreExtractor.getStream(data, callback) },
-                async { VidlinkExtractor.getStream(data, callback) }
-            )
-
-            // --- 2. RUN SUBTITLES CONCURRENTLY ---
-            val subJobs = listOf(
-                async {
-                    if (imdbId != null) {
+            // --- 1. RUN SUBTITLES IN BACKGROUND (Non-Blocking) ---
+            launch {
+                if (imdbId != null) {
+                    withTimeoutOrNull(8000) {
                         try {
                             val osUrl = if(isMovie) "https://opensubtitles-v3.strem.io/subtitles/movie/$imdbId.json" else "https://opensubtitles-v3.strem.io/subtitles/series/$imdbId:$season:$episode.json"
                             val res = app.get(osUrl, timeout = 5).text
@@ -233,9 +224,12 @@ class StreamHubProvider : MainAPI() {
                             }
                         } catch (e: Exception) {}
                     }
-                },
-                async {
-                    if (imdbId != null) {
+                }
+            }
+
+            launch {
+                if (imdbId != null) {
+                    withTimeoutOrNull(8000) {
                         try {
                             val osLegacyUrl = if(isMovie) "https://opensubtitles.strem.io/stremio/v1/subtitles/movie/$imdbId.json" else "https://opensubtitles.strem.io/stremio/v1/subtitles/series/$imdbId:$season:$episode.json"
                             val res = app.get(osLegacyUrl, timeout = 5).text
@@ -250,8 +244,11 @@ class StreamHubProvider : MainAPI() {
                             }
                         } catch (e: Exception) {}
                     }
-                },
-                async {
+                }
+            }
+
+            launch {
+                withTimeoutOrNull(8000) {
                     try {
                         val osTmdbUrl = if(isMovie) "https://opensubtitles.strem.fun/subtitles/movie/tmdb:$tmdbId.json" else "https://opensubtitles.strem.fun/subtitles/series/tmdb:$tmdbId:$season:$episode.json"
                         val res = app.get(osTmdbUrl, timeout = 5).text
@@ -265,8 +262,11 @@ class StreamHubProvider : MainAPI() {
                             }
                         }
                     } catch (e: Exception) {}
-                },
-                async {
+                }
+            }
+
+            launch {
+                withTimeoutOrNull(8000) {
                     try {
                         var wyzieUrl = "https://sub.wyzie.io/search?id=$tmdbId&source=all&key=$wyzieApiKey"
                         if (!isMovie && season != null && episode != null) wyzieUrl += "&season=$season&episode=$episode"
@@ -288,15 +288,19 @@ class StreamHubProvider : MainAPI() {
                         }
                     } catch (e: Exception) {}
                 }
-            )
-
-            val results = extractorJobs.awaitAll()
-            
-            withTimeoutOrNull(10000) {
-                subJobs.awaitAll()
             }
 
-            return@coroutineScope results.any { it }
+            // --- 2. RUN EXTRACTORS CONCURRENTLY ---
+            // A 25-second timeout gives Cloudflare exactly enough time to clear without hanging the app infinitely.
+            // Whichever finds a link first will instantly trigger the callback and start the player.
+            val extractorJobs = listOf(
+                async { withTimeoutOrNull(25000) { VidlinkExtractor.getStream(data, callback) } ?: false },
+                async { withTimeoutOrNull(25000) { Movies111Extractor.getStream(data, callback) } ?: false },
+                async { withTimeoutOrNull(25000) { VidcoreExtractor.getStream(data, callback) } ?: false }
+            )
+
+            // Returns true if at least one extractor succeeds.
+            return@coroutineScope extractorJobs.awaitAll().any { it }
         }
     }
 }
