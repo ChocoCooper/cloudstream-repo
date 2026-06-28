@@ -6,42 +6,45 @@ import com.lagradost.cloudstream3.network.WebViewResolver
 
 object VidcoreExtractor {
     suspend fun getStream(dataUrl: String, callback: (ExtractorLink) -> Unit): Boolean {
-        // Primary server first, fallback server second
         val domains = listOf("https://vidcore.net", "https://vidup.to")
-        val targetRegex = Regex(""".*digitalsun\.app.*\.m3u8.*""")
+        
+        // DYNAMIC: Catch any m3u8 or mp4 network request
+        val catchAllRegex = Regex("""(?i).*\.(m3u8|mp4).*""")
+        // BLACKLIST: Ignore common ad trackers and blank placeholders
+        val blacklist = listOf("youtube", "google", "doubleclick", "analytics", "blank.mp4", "googletagmanager", "cloudflare")
         
         for (domain in domains) {
             try {
-                // Swap the dummy URL for the current domain in the loop
                 val targetUrl = dataUrl.replace("https://streamhub.app", domain)
-                val interceptor = WebViewResolver(targetRegex)
+                val interceptor = WebViewResolver(catchAllRegex)
 
                 val response = app.get(targetUrl, interceptor = interceptor)
                 val interceptedUrl = response.url
 
-                if (interceptedUrl.contains("digitalsun.app") || interceptedUrl.contains(".m3u8")) {
-                    // Dynamically name the source based on which domain succeeded
+                // Verify it's a media file and not blacklisted
+                val isMediaFile = interceptedUrl.contains(".m3u8") || interceptedUrl.contains(".mp4")
+                val isClean = blacklist.none { interceptedUrl.contains(it) }
+
+                if (isMediaFile && isClean) {
+                    val linkType = if (interceptedUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                     val sourceName = if (domain.contains("vidcore")) "Vidcore" else "Vidup"
                     
                     callback.invoke(
-                        newExtractorLink(
+                        ExtractorLink(
                             source = sourceName, 
                             name = sourceName, 
                             url = interceptedUrl, 
-                            type = ExtractorLinkType.M3U8
-                        ) {
-                            this.referer = "$domain/" 
-                        }
+                            referer = "$domain/",
+                            quality = Qualities.Unknown.value,
+                            type = linkType
+                        )
                     )
-                    // Success! Return true to break the loop so it doesn't run the fallback
                     return true 
                 }
             } catch (e: Exception) {
-                // If it crashes or times out, silently continue to the next domain (Fallback)
-                continue
+                continue // Try the next domain in the list
             }
         }
-        // Returns false only if ALL domains in the list failed
         return false 
     }
 }
