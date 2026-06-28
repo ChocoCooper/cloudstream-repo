@@ -11,6 +11,7 @@ object Movies111Extractor {
             
             // DYNAMIC: Catch any m3u8 or mp4 network request
             val catchAllRegex = Regex("""(?i).*\.(m3u8|mp4).*""")
+            
             // BLACKLIST: Ignore common ad trackers and blank placeholders
             val blacklist = listOf("youtube", "google", "doubleclick", "analytics", "blank.mp4", "googletagmanager", "cloudflare")
             
@@ -18,11 +19,10 @@ object Movies111Extractor {
             val response = app.get(embedUrl, interceptor = interceptor)
             val interceptedUrl = response.url
 
-            // Verify it's a media file and not blacklisted
-            val isMediaFile = interceptedUrl.contains(".m3u8") || interceptedUrl.contains(".mp4")
-            val isClean = blacklist.none { interceptedUrl.contains(it) }
+            // Verify it's not blacklisted
+            val isClean = blacklist.none { interceptedUrl.lowercase().contains(it) }
 
-            if (isMediaFile && isClean) {
+            if (isClean) {
                 val linkType = if (interceptedUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                 
                 callback.invoke(
