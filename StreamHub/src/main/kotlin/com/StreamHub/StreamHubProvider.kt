@@ -206,11 +206,13 @@ class StreamHubProvider : MainAPI() {
         val imdbId = data.substringAfter("imdb=", "").substringBefore("&").takeIf { it.isNotBlank() && it != "null" }
 
         return coroutineScope {
-            // --- 1. RUN EXTRACTORS CONCURRENTLY WITH 15-SECOND FAILSAVES ---
+            // --- 1. RUN EXTRACTORS CONCURRENTLY ---
+            // REMOVED withTimeoutOrNull so Cloudstream's native WebViewResolver 
+            // can use its full 60-second limit to bypass Cloudflare and ads.
             val extractorJobs = listOf(
-                async { withTimeoutOrNull(15000) { Movies111Extractor.getStream(data, callback) } ?: false },
-                async { withTimeoutOrNull(15000) { VidcoreExtractor.getStream(data, callback) } ?: false },
-                async { withTimeoutOrNull(15000) { VidlinkExtractor.getStream(data, callback) } ?: false }
+                async { Movies111Extractor.getStream(data, callback) },
+                async { VidcoreExtractor.getStream(data, callback) },
+                async { VidlinkExtractor.getStream(data, callback) }
             )
 
             // --- 2. RUN SUBTITLES CONCURRENTLY ---
@@ -290,7 +292,6 @@ class StreamHubProvider : MainAPI() {
 
             val results = extractorJobs.awaitAll()
             
-            // Allow subtitles up to 10s to load without blocking the video starting
             withTimeoutOrNull(10000) {
                 subJobs.awaitAll()
             }
