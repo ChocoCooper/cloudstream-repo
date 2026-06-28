@@ -31,7 +31,7 @@ object Movies111Extractor {
                         name = "111movies", 
                         url = interceptedUrl, 
                         referer = "https://111movies.net/",
-                        quality = Qualities.Unknown.value,
+                        quality = Qualities.P1080.value, // Added 1080p flag to trigger immediate auto-play priority
                         type = linkType
                     )
                 )
