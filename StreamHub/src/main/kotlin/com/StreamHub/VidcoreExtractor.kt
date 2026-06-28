@@ -10,6 +10,7 @@ object VidcoreExtractor {
         
         // DYNAMIC: Catch any m3u8 or mp4 network request
         val catchAllRegex = Regex("""(?i).*\.(m3u8|mp4).*""")
+        
         // BLACKLIST: Ignore common ad trackers and blank placeholders
         val blacklist = listOf("youtube", "google", "doubleclick", "analytics", "blank.mp4", "googletagmanager", "cloudflare")
         
@@ -21,11 +22,10 @@ object VidcoreExtractor {
                 val response = app.get(targetUrl, interceptor = interceptor)
                 val interceptedUrl = response.url
 
-                // Verify it's a media file and not blacklisted
-                val isMediaFile = interceptedUrl.contains(".m3u8") || interceptedUrl.contains(".mp4")
-                val isClean = blacklist.none { interceptedUrl.contains(it) }
+                // Verify it's not blacklisted
+                val isClean = blacklist.none { interceptedUrl.lowercase().contains(it) }
 
-                if (isMediaFile && isClean) {
+                if (isClean) {
                     val linkType = if (interceptedUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                     val sourceName = if (domain.contains("vidcore")) "Vidcore" else "Vidup"
                     
@@ -42,7 +42,7 @@ object VidcoreExtractor {
                     return true 
                 }
             } catch (e: Exception) {
-                continue // Try the next domain in the list
+                continue // Try the fallback domain
             }
         }
         return false 
