@@ -3,11 +3,9 @@ package com.StreamHub
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.network.WebViewResolver
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
@@ -265,7 +263,6 @@ class StreamHubProvider : MainAPI() {
                 },
                 async {
                     // Layer 4: Wyziesubs API
-                    // FIX: Replaced AppUtils.tryParseJson with raw JSONObject/JSONArray parsing to prevent Kotlin Compiler Memory Crash
                     try {
                         var wyzieUrl = "https://sub.wyzie.io/search?id=$tmdbId&source=all&key=$wyzieApiKey"
                         if (!isMovie && season != null && episode != null) wyzieUrl += "&season=$season&episode=$episode"
@@ -289,81 +286,24 @@ class StreamHubProvider : MainAPI() {
                 }
             )
 
-            // --- 2. FAST NATIVE WEBVIEW SERVERS (STATIC ONLY) ---
-            val webviewExtractors = listOf(
-                async {
-                    withTimeoutOrNull(15000) {
-                        try {
-                            val embedUrl = cleanData.replace("https://streamhub.app", "https://111movies.net")
-                            val interceptor = WebViewResolver(Regex(""".*\.m3u8.*"""))
-                            val response = app.get(embedUrl, interceptor = interceptor)
-                            if (response.url.contains(".m3u8")) {
-                                callback.invoke(ExtractorLink(
-                                    source = "111movies", 
-                                    name = "111movies", 
-                                    url = response.url, 
-                                    referer = "https://111movies.net/", 
-                                    quality = Qualities.P1080.value, 
-                                    type = ExtractorLinkType.M3U8
-                                ))
-                                true
-                            } else false
-                        } catch(e: Exception) { false }
-                    } ?: false
-                },
-                async {
-                    withTimeoutOrNull(15000) {
-                        try {
-                            val domains = listOf("https://vidcore.net", "https://vidup.to")
-                            val interceptor = WebViewResolver(Regex(""".*\.m3u8.*"""))
-                            var success = false
-                            for (domain in domains) {
-                                val targetUrl = cleanData.replace("https://streamhub.app", domain)
-                                val response = app.get(targetUrl, interceptor = interceptor)
-                                if (response.url.contains(".m3u8")) {
-                                    val sourceName = if (domain.contains("vidcore")) "Vidcore" else "Vidup"
-                                    callback.invoke(ExtractorLink(
-                                        source = sourceName, 
-                                        name = sourceName, 
-                                        url = response.url, 
-                                        referer = "$domain/", 
-                                        quality = Qualities.P1080.value, 
-                                        type = ExtractorLinkType.M3U8
-                                    ))
-                                    success = true
-                                    break
-                                }
-                            }
-                            success
-                        } catch(e: Exception) { false }
-                    } ?: false
-                },
-                async {
-                    withTimeoutOrNull(15000) {
-                        try {
-                            val vidlinkUrl = cleanData.replace("https://streamhub.app", "https://vidlink.pro")
-                            val interceptor = WebViewResolver(Regex(""".*\.m3u8.*"""))
-                            val response = app.get(vidlinkUrl, interceptor = interceptor)
-                            if (response.url.contains(".m3u8")) {
-                                callback.invoke(ExtractorLink(
-                                    source = "Vidlink", 
-                                    name = "Vidlink", 
-                                    url = response.url, 
-                                    referer = "https://vidlink.pro/", 
-                                    quality = Qualities.P1080.value, 
-                                    type = ExtractorLinkType.M3U8
-                                ))
-                                true
-                            } else false
-                        } catch(e: Exception) { false }
-                    } ?: false
-                }
-            )
+            // --- 2. DELEGATE TO SEPARATE EXTRACTORS ---
+            var foundLinks = false
 
-            val serverResults = webviewExtractors.awaitAll()
+            if (Movies111Extractor.getStream(data, callback)) {
+                foundLinks = true
+            }
+
+            if (VidcoreExtractor.getStream(data, callback)) {
+                foundLinks = true
+            }
+
+            if (VidlinkExtractor.getStream(data, callback)) {
+                foundLinks = true
+            }
+
             subJobs.awaitAll()
 
-            serverResults.any { it }
+            return@coroutineScope foundLinks
         }
     }
 }
