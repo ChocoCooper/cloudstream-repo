@@ -6,6 +6,7 @@ import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
@@ -207,9 +208,9 @@ class StreamHubProvider : MainAPI() {
 
         return coroutineScope {
             // --- 1. RUN SUBTITLES IN BACKGROUND (Non-Blocking) ---
-            launch {
-                if (imdbId != null) {
-                    withTimeoutOrNull(8000) {
+            val subJobs = listOf(
+                async {
+                    if (imdbId != null) {
                         try {
                             val osUrl = if(isMovie) "https://opensubtitles-v3.strem.io/subtitles/movie/$imdbId.json" else "https://opensubtitles-v3.strem.io/subtitles/series/$imdbId:$season:$episode.json"
                             val res = app.get(osUrl, timeout = 5).text
@@ -224,12 +225,9 @@ class StreamHubProvider : MainAPI() {
                             }
                         } catch (e: Exception) {}
                     }
-                }
-            }
-
-            launch {
-                if (imdbId != null) {
-                    withTimeoutOrNull(8000) {
+                },
+                async {
+                    if (imdbId != null) {
                         try {
                             val osLegacyUrl = if(isMovie) "https://opensubtitles.strem.io/stremio/v1/subtitles/movie/$imdbId.json" else "https://opensubtitles.strem.io/stremio/v1/subtitles/series/$imdbId:$season:$episode.json"
                             val res = app.get(osLegacyUrl, timeout = 5).text
@@ -244,11 +242,8 @@ class StreamHubProvider : MainAPI() {
                             }
                         } catch (e: Exception) {}
                     }
-                }
-            }
-
-            launch {
-                withTimeoutOrNull(8000) {
+                },
+                async {
                     try {
                         val osTmdbUrl = if(isMovie) "https://opensubtitles.strem.fun/subtitles/movie/tmdb:$tmdbId.json" else "https://opensubtitles.strem.fun/subtitles/series/tmdb:$tmdbId:$season:$episode.json"
                         val res = app.get(osTmdbUrl, timeout = 5).text
@@ -262,11 +257,8 @@ class StreamHubProvider : MainAPI() {
                             }
                         }
                     } catch (e: Exception) {}
-                }
-            }
-
-            launch {
-                withTimeoutOrNull(8000) {
+                },
+                async {
                     try {
                         var wyzieUrl = "https://sub.wyzie.io/search?id=$tmdbId&source=all&key=$wyzieApiKey"
                         if (!isMovie && season != null && episode != null) wyzieUrl += "&season=$season&episode=$episode"
@@ -288,19 +280,35 @@ class StreamHubProvider : MainAPI() {
                         }
                     } catch (e: Exception) {}
                 }
-            }
-
-            // --- 2. RUN EXTRACTORS CONCURRENTLY ---
-            // A 25-second timeout gives Cloudflare exactly enough time to clear without hanging the app infinitely.
-            // Whichever finds a link first will instantly trigger the callback and start the player.
-            val extractorJobs = listOf(
-                async { withTimeoutOrNull(25000) { VidlinkExtractor.getStream(data, callback) } ?: false },
-                async { withTimeoutOrNull(25000) { Movies111Extractor.getStream(data, callback) } ?: false },
-                async { withTimeoutOrNull(25000) { VidcoreExtractor.getStream(data, callback) } ?: false }
             )
 
-            // Returns true if at least one extractor succeeds.
-            return@coroutineScope extractorJobs.awaitAll().any { it }
+            // --- 2. STAGGERED EXTRACTOR EXECUTION ---
+            // We launch Vidlink first, because it is the fastest.
+            val vidlinkJob = async { 
+                withTimeoutOrNull(25000) { VidlinkExtractor.getStream(data, callback) } ?: false 
+            }
+            
+            // IMPORTANT: We wait 1.5 seconds before launching the others.
+            // Android's WebView engine gets blocked if you launch 3 tabs at the exact same millisecond.
+            // This headstart guarantees Vidlink finishes first, pushes to the screen, and starts playing instantly.
+            delay(1500)
+
+            val movies111Job = async { 
+                withTimeoutOrNull(25000) { Movies111Extractor.getStream(data, callback) } ?: false 
+            }
+            
+            val vidcoreJob = async { 
+                withTimeoutOrNull(25000) { VidcoreExtractor.getStream(data, callback) } ?: false 
+            }
+
+            // Wait for all to cleanly finish their timeouts/executions
+            val results = listOf(vidlinkJob.await(), movies111Job.await(), vidcoreJob.await())
+            
+            withTimeoutOrNull(10000) {
+                subJobs.awaitAll()
+            }
+
+            return@coroutineScope results.any { it }
         }
     }
 }
