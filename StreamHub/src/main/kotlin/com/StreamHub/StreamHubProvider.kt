@@ -33,47 +33,77 @@ class StreamHubProvider : MainAPI() {
         "09ad8ace66eec34302943272db0e8d2c", "ea118e768e75a1fe3b53dc99c9e4de09"
     )
 
-    // UNIFIED ENDPOINT: Updated to avoid blocked domain issues in India
-    private val tmdbBase = "https://api.tmdb.org/3"
-    private val imageBase = "https://image.tmdb.org/t/p/w500"
+    private val tmdbBase    = "https://api.tmdb.org/3"
+    private val imageBase   = "https://image.tmdb.org/t/p/w500"
     private val backdropBase = "https://image.tmdb.org/t/p/original"
 
-    private data class TmdbSearchResponse(@JsonProperty("results") val results: List<TmdbResult>?)
-    private data class TmdbResult(
-        @JsonProperty("id") val id: Int?,
-        @JsonProperty("title") val title: String?,
-        @JsonProperty("name") val name: String?,
-        @JsonProperty("poster_path") val posterPath: String?,
-        @JsonProperty("media_type") val mediaType: String?
-    )
-    
-    private data class TmdbExternalIds(@JsonProperty("imdb_id") val imdbId: String?)
-    private data class TmdbDetails(
-        @JsonProperty("id") val id: Int?,
-        @JsonProperty("title") val title: String?,
-        @JsonProperty("name") val name: String?,
-        @JsonProperty("overview") val overview: String?,
-        @JsonProperty("poster_path") val posterPath: String?,
-        @JsonProperty("backdrop_path") val backdropPath: String?,
-        @JsonProperty("release_date") val releaseDate: String?,
-        @JsonProperty("first_air_date") val firstAirDate: String?,
-        @JsonProperty("genres") val genres: List<TmdbGenre>?,
-        @JsonProperty("seasons") val seasons: List<TmdbSeason>?,
-        @JsonProperty("images") val images: TmdbImages?,
-        @JsonProperty("external_ids") val externalIds: TmdbExternalIds?
+    // ── ISO 639-2 three-letter code → full display name ──────────────────────
+    private val iso639Map = mapOf(
+        "eng" to "English",   "spa" to "Spanish",   "fra" to "French",
+        "deu" to "German",    "ita" to "Italian",   "por" to "Portuguese",
+        "rus" to "Russian",   "jpn" to "Japanese",  "kor" to "Korean",
+        "zho" to "Chinese",   "chi" to "Chinese",   "ara" to "Arabic",
+        "hin" to "Hindi",     "tur" to "Turkish",   "nld" to "Dutch",
+        "pol" to "Polish",    "swe" to "Swedish",   "nor" to "Norwegian",
+        "dan" to "Danish",    "fin" to "Finnish",   "ces" to "Czech",
+        "slk" to "Slovak",    "hun" to "Hungarian", "ron" to "Romanian",
+        "bul" to "Bulgarian", "hrv" to "Croatian",  "srp" to "Serbian",
+        "ukr" to "Ukrainian", "vie" to "Vietnamese","tha" to "Thai",
+        "ind" to "Indonesian","msa" to "Malay",     "may" to "Malay",
+        "heb" to "Hebrew",    "fas" to "Persian",   "per" to "Persian",
+        "tam" to "Tamil",     "tel" to "Telugu",    "mal" to "Malayalam",
+        "kan" to "Kannada",   "ben" to "Bengali",   "mar" to "Marathi",
+        "pan" to "Punjabi",   "guj" to "Gujarati",  "urd" to "Urdu",
+        "cat" to "Catalan",   "glg" to "Galician",  "eus" to "Basque",
+        "lat" to "Latin",     "ell" to "Greek",     "bos" to "Bosnian",
+        "slv" to "Slovenian", "mkd" to "Macedonian","sqi" to "Albanian",
+        "lav" to "Latvian",   "lit" to "Lithuanian","est" to "Estonian",
+        "isl" to "Icelandic", "mlt" to "Maltese",   "afr" to "Afrikaans",
+        "swa" to "Swahili",   "zul" to "Zulu",      "xho" to "Xhosa"
     )
 
+    /** Expand a 3-letter ISO code to a full name; pass through if already full. */
+    private fun expandLang(code: String): String {
+        if (code.length != 3) return code          // already a full name or 2-letter
+        return iso639Map[code.lowercase()] ?: code // map or keep original
+    }
+
+    // ── Data classes ──────────────────────────────────────────────────────────
+    private data class TmdbSearchResponse(@JsonProperty("results") val results: List<TmdbResult>?)
+    private data class TmdbResult(
+        @JsonProperty("id")          val id: Int?,
+        @JsonProperty("title")       val title: String?,
+        @JsonProperty("name")        val name: String?,
+        @JsonProperty("poster_path") val posterPath: String?,
+        @JsonProperty("media_type")  val mediaType: String?
+    )
+    private data class TmdbExternalIds(@JsonProperty("imdb_id") val imdbId: String?)
+    private data class TmdbDetails(
+        @JsonProperty("id")             val id: Int?,
+        @JsonProperty("title")          val title: String?,
+        @JsonProperty("name")           val name: String?,
+        @JsonProperty("overview")       val overview: String?,
+        @JsonProperty("poster_path")    val posterPath: String?,
+        @JsonProperty("backdrop_path")  val backdropPath: String?,
+        @JsonProperty("release_date")   val releaseDate: String?,
+        @JsonProperty("first_air_date") val firstAirDate: String?,
+        @JsonProperty("genres")         val genres: List<TmdbGenre>?,
+        @JsonProperty("seasons")        val seasons: List<TmdbSeason>?,
+        @JsonProperty("images")         val images: TmdbImages?,
+        @JsonProperty("external_ids")   val externalIds: TmdbExternalIds?
+    )
     private data class TmdbGenre(@JsonProperty("name") val name: String?)
     private data class TmdbImages(@JsonProperty("logos") val logos: List<TmdbImage>?)
     private data class TmdbImage(
-        @JsonProperty("file_path") val filePath: String?,
-        @JsonProperty("iso_639_1") val lang: String?
+        @JsonProperty("file_path")  val filePath: String?,
+        @JsonProperty("iso_639_1")  val lang: String?
     )
     private data class TmdbSeason(
-        @JsonProperty("season_number") val seasonNumber: Int?,
-        @JsonProperty("episode_count") val episodeCount: Int?
+        @JsonProperty("season_number")  val seasonNumber: Int?,
+        @JsonProperty("episode_count")  val episodeCount: Int?
     )
 
+    // ── TMDB helper ───────────────────────────────────────────────────────────
     private suspend inline fun <reified T : Any> fetchTmdb(url: String): T? {
         val keysToTry = tmdbApiKeys.shuffled().take(3)
         for (key in keysToTry) {
@@ -86,6 +116,7 @@ class StreamHubProvider : MainAPI() {
         return null
     }
 
+    // ── Main page ─────────────────────────────────────────────────────────────
     override val mainPage = mainPageOf(
         "$tmdbBase/trending/movie/week?api_key={API_KEY}" to "Trending Movies",
         "$tmdbBase/trending/tv/week?api_key={API_KEY}" to "Trending Shows",
@@ -100,19 +131,16 @@ class StreamHubProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         val url = request.data + "&page=$page"
         val response = fetchTmdb<TmdbSearchResponse>(url) ?: return null
-        
         val items = response.results?.filter { it.posterPath != null }?.mapNotNull { result ->
             val isMovie = result.mediaType == "movie" || request.name.contains("Movie")
             val title = result.title ?: result.name ?: return@mapNotNull null
             val id = result.id ?: return@mapNotNull null
             val poster = "$imageBase${result.posterPath}"
             val urlPath = if (isMovie) "movie/$id" else "tv/$id"
-            
             newMovieSearchResponse(title, "$mainUrl/$urlPath", if (isMovie) TvType.Movie else TvType.TvSeries) {
                 this.posterUrl = poster
             }
         } ?: emptyList()
-        
         return newHomePageResponse(request.name, items)
     }
 
@@ -120,14 +148,12 @@ class StreamHubProvider : MainAPI() {
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
         val url = "$tmdbBase/search/multi?api_key={API_KEY}&query=$encodedQuery"
         val response = fetchTmdb<TmdbSearchResponse>(url)
-
         return response?.results?.filter { it.posterPath != null }?.mapNotNull { result ->
             val isMovie = result.mediaType == "movie" || result.title != null
             val title = result.title ?: result.name ?: return@mapNotNull null
             val id = result.id ?: return@mapNotNull null
             val poster = "$imageBase${result.posterPath}"
             val urlPath = if (isMovie) "movie/$id" else "tv/$id"
-
             newMovieSearchResponse(title, "$mainUrl/$urlPath", if (isMovie) TvType.Movie else TvType.TvSeries) {
                 this.posterUrl = poster
             }
@@ -136,57 +162,53 @@ class StreamHubProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse? {
         val cleanUrl = url.substringBefore("?")
-        val isMovie = cleanUrl.contains("/movie/")
-        val tmdbId = cleanUrl.substringAfterLast("/")
-        
+        val isMovie  = cleanUrl.contains("/movie/")
+        val tmdbId   = cleanUrl.substringAfterLast("/")
         val endpoint = if (isMovie) "movie" else "tv"
         val detailsUrl = "$tmdbBase/$endpoint/$tmdbId?api_key={API_KEY}&append_to_response=images,external_ids&include_image_language=en,null"
-        
-        val details = fetchTmdb<TmdbDetails>(detailsUrl) ?: return null
-        
-        val title = details.title ?: details.name ?: return null
-        val poster = details.posterPath?.let { "$imageBase$it" }
-        val backdrop = details.backdropPath?.let { "$backdropBase$it" } 
-        val imdbId = details.externalIds?.imdbId ?: "null"
 
-        val parsedYear = (details.releaseDate ?: details.firstAirDate)?.split("-")?.firstOrNull()?.toIntOrNull()
-        val parsedTags = details.genres?.mapNotNull { it.name } ?: emptyList()
-        val logoPath = details.images?.logos?.firstOrNull { it.lang == "en" }?.filePath 
-        val parsedLogo = logoPath?.let { "$backdropBase$it" }
+        val details = fetchTmdb<TmdbDetails>(detailsUrl) ?: return null
+        val title       = details.title ?: details.name ?: return null
+        val poster      = details.posterPath?.let { "$imageBase$it" }
+        val backdrop    = details.backdropPath?.let { "$backdropBase$it" }
+        val imdbId      = details.externalIds?.imdbId ?: "null"
+        val parsedYear  = (details.releaseDate ?: details.firstAirDate)?.split("-")?.firstOrNull()?.toIntOrNull()
+        val parsedTags  = details.genres?.mapNotNull { it.name } ?: emptyList()
+        val logoPath    = details.images?.logos?.firstOrNull { it.lang == "en" }?.filePath
+        val parsedLogo  = logoPath?.let { "$backdropBase$it" }
 
         if (isMovie) {
             val dataUrl = "$mainUrl/movie/$tmdbId?imdb=$imdbId"
             return newMovieLoadResponse(title, dataUrl, TvType.Movie, dataUrl) {
-                this.posterUrl = poster
+                this.posterUrl          = poster
                 this.backgroundPosterUrl = backdrop
-                this.plot = details.overview
-                this.year = parsedYear
-                this.tags = parsedTags
-                this.logoUrl = parsedLogo 
+                this.plot               = details.overview
+                this.year               = parsedYear
+                this.tags               = parsedTags
+                this.logoUrl            = parsedLogo
             }
         } else {
             val episodes = mutableListOf<Episode>()
             details.seasons?.filter { (it.seasonNumber ?: 0) > 0 }?.forEach { season ->
-                val sNum = season.seasonNumber ?: return@forEach
+                val sNum   = season.seasonNumber ?: return@forEach
                 val epCount = season.episodeCount ?: 0
                 for (epNum in 1..epCount) {
                     val epUrl = "$mainUrl/tv/$tmdbId/$sNum/$epNum?imdb=$imdbId"
                     episodes.add(newEpisode(epUrl) {
-                        this.name = "Episode $epNum"
-                        this.season = sNum
+                        this.name    = "Episode $epNum"
+                        this.season  = sNum
                         this.episode = epNum
                     })
                 }
             }
-
             val dataUrl = "$mainUrl/tv/$tmdbId?imdb=$imdbId"
             return newTvSeriesLoadResponse(title, dataUrl, TvType.TvSeries, episodes) {
-                this.posterUrl = poster
+                this.posterUrl          = poster
                 this.backgroundPosterUrl = backdrop
-                this.plot = details.overview
-                this.year = parsedYear
-                this.tags = parsedTags 
-                this.logoUrl = parsedLogo
+                this.plot               = details.overview
+                this.year               = parsedYear
+                this.tags               = parsedTags
+                this.logoUrl            = parsedLogo
             }
         }
     }
@@ -198,84 +220,112 @@ class StreamHubProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val cleanData = data.substringBefore("?")
-        val isMovie = cleanData.contains("/movie/")
-        
-        val tmdbId = Regex("""/(?:movie|tv)/(\d+)""").find(cleanData)?.groupValues?.get(1) ?: return false
-        val season = Regex("""/tv/\d+/(\d+)""").find(cleanData)?.groupValues?.get(1)?.toIntOrNull() ?: 1
-        val episode = Regex("""/tv/\d+/\d+/(\d+)""").find(cleanData)?.groupValues?.get(1)?.toIntOrNull() ?: 1
-        val imdbId = data.substringAfter("imdb=", "").substringBefore("&").takeIf { it.isNotBlank() && it != "null" }
+        val isMovie   = cleanData.contains("/movie/")
+        val tmdbId    = Regex("""/(?:movie|tv)/(\d+)""").find(cleanData)?.groupValues?.get(1) ?: return false
+        val season    = Regex("""/tv/\d+/(\d+)""").find(cleanData)?.groupValues?.get(1)?.toIntOrNull() ?: 1
+        val episode   = Regex("""/tv/\d+/\d+/(\d+)""").find(cleanData)?.groupValues?.get(1)?.toIntOrNull() ?: 1
+        val imdbId    = data.substringAfter("imdb=", "").substringBefore("&").takeIf { it.isNotBlank() && it != "null" }
 
-        // Fetch meta details dynamically using the shared infrastructure
-        val metaUrl = if (isMovie) "$tmdbBase/movie/$tmdbId?api_key={API_KEY}" else "$tmdbBase/tv/$tmdbId?api_key={API_KEY}"
-        val details = fetchTmdb<TmdbDetails>(metaUrl) ?: return false
+        // Build a clean embed URL without the ?imdb=… query param for WebView extractors
+        val embedData = "$mainUrl/${if (isMovie) "movie" else "tv"}/$tmdbId" +
+                        (if (!isMovie) "/$season/$episode" else "")
+
+        // Fetch title for Kisskh search
+        val metaUrl = if (isMovie) "$tmdbBase/movie/$tmdbId?api_key={API_KEY}"
+                      else         "$tmdbBase/tv/$tmdbId?api_key={API_KEY}"
+        val details   = fetchTmdb<TmdbDetails>(metaUrl) ?: return false
         val cleanTitle = details.title ?: details.name ?: return false
 
+        // Subtitle helper — wraps subtitleCallback and expands 3-letter codes
+        val mappedSubCallback = { sub: SubtitleFile ->
+            subtitleCallback.invoke(SubtitleFile(expandLang(sub.name), sub.url))
+        }
+
         return coroutineScope {
-            // --- 1. RUN EXTRACTORS CONCURRENTLY ---
+            // ── 1. Extractors ──────────────────────────────────────────────
             val extractorJobs = listOf(
-                async { Movies111Extractor.getStream(data, callback) },
-                async { VidcoreExtractor.getStream(data, callback) },
-                async { VidlinkExtractor.getStream(data, callback) },
-                async { KisskhExtractor.getStream(cleanTitle, season, episode, isMovie, callback, subtitleCallback) }
+                // Pass embedData (clean URL) to WebView-based extractors
+                async { Movies111Extractor.getStream(embedData, callback) },
+                async { VidcoreExtractor.getStream(embedData, callback) },
+                async { VidlinkExtractor.getStream(embedData, callback) },
+                // Kisskh uses its own search, just needs title + episode info
+                async { KisskhExtractor.getStream(cleanTitle, season, episode, isMovie, callback, mappedSubCallback) }
             )
 
-            // --- 2. RUN SUBTITLES CONCURRENTLY ---
+            // ── 2. Subtitles ───────────────────────────────────────────────
             val subJobs = listOf(
+
+                // OpenSubtitles v3 (Stremio add-on) — imdb-based
                 async {
                     if (imdbId != null) {
                         try {
-                            val osUrl = if(isMovie) "https://opensubtitles-v3.strem.io/subtitles/movie/$imdbId.json" else "https://opensubtitles-v3.strem.io/subtitles/series/$imdbId:$season:$episode.json"
-                            val res = app.get(osUrl, timeout = 5).text
-                            val subs = JSONObject(res).optJSONArray("subtitles")
+                            val osUrl = if (isMovie)
+                                "https://opensubtitles-v3.strem.io/subtitles/movie/$imdbId.json"
+                            else
+                                "https://opensubtitles-v3.strem.io/subtitles/series/$imdbId:$season:$episode.json"
+                            val subs = JSONObject(app.get(osUrl, timeout = 8).text).optJSONArray("subtitles")
                             if (subs != null) {
                                 for (i in 0 until subs.length()) {
-                                    val sub = subs.getJSONObject(i)
-                                    val url = sub.optString("url")
-                                    val lang = sub.optString("lang")
-                                    if (url.isNotBlank() && lang.isNotBlank()) subtitleCallback.invoke(newSubtitleFile(lang, url))
+                                    val sub  = subs.getJSONObject(i)
+                                    val url  = sub.optString("url")
+                                    val lang = expandLang(sub.optString("lang"))
+                                    if (url.isNotBlank() && lang.isNotBlank())
+                                        subtitleCallback.invoke(newSubtitleFile(lang, url))
                                 }
                             }
                         } catch (e: Exception) {}
                     }
                 },
+
+                // OpenSubtitles legacy (Stremio) — imdb-based
                 async {
                     if (imdbId != null) {
                         try {
-                            val osLegacyUrl = if(isMovie) "https://opensubtitles.strem.io/stremio/v1/subtitles/movie/$imdbId.json" else "https://opensubtitles.strem.io/stremio/v1/subtitles/series/$imdbId:$season:$episode.json"
-                            val res = app.get(osLegacyUrl, timeout = 5).text
-                            val subs = JSONObject(res).optJSONArray("subtitles")
+                            val osLegacyUrl = if (isMovie)
+                                "https://opensubtitles.strem.io/stremio/v1/subtitles/movie/$imdbId.json"
+                            else
+                                "https://opensubtitles.strem.io/stremio/v1/subtitles/series/$imdbId:$season:$episode.json"
+                            val subs = JSONObject(app.get(osLegacyUrl, timeout = 8).text).optJSONArray("subtitles")
                             if (subs != null) {
                                 for (i in 0 until subs.length()) {
-                                    val sub = subs.getJSONObject(i)
-                                    val url = sub.optString("url")
-                                    val lang = sub.optString("lang")
-                                    if (url.isNotBlank() && lang.isNotBlank()) subtitleCallback.invoke(newSubtitleFile(lang, url))
+                                    val sub  = subs.getJSONObject(i)
+                                    val url  = sub.optString("url")
+                                    val lang = expandLang(sub.optString("lang"))
+                                    if (url.isNotBlank() && lang.isNotBlank())
+                                        subtitleCallback.invoke(newSubtitleFile(lang, url))
                                 }
                             }
                         } catch (e: Exception) {}
                     }
                 },
+
+                // OpenSubtitles TMDB-based (strem.fun)
                 async {
                     try {
-                        val osTmdbUrl = if(isMovie) "https://opensubtitles.strem.fun/subtitles/movie/tmdb:$tmdbId.json" else "https://opensubtitles.strem.fun/subtitles/series/tmdb:$tmdbId:$season:$episode.json"
-                        val res = app.get(osTmdbUrl, timeout = 5).text
-                        val subs = JSONObject(res).optJSONArray("subtitles")
+                        val osTmdbUrl = if (isMovie)
+                            "https://opensubtitles.strem.fun/subtitles/movie/tmdb:$tmdbId.json"
+                        else
+                            "https://opensubtitles.strem.fun/subtitles/series/tmdb:$tmdbId:$season:$episode.json"
+                        val subs = JSONObject(app.get(osTmdbUrl, timeout = 8).text).optJSONArray("subtitles")
                         if (subs != null) {
                             for (i in 0 until subs.length()) {
-                                val sub = subs.getJSONObject(i)
-                                val url = sub.optString("url")
-                                val lang = sub.optString("lang")
-                                if (url.isNotBlank() && lang.isNotBlank()) subtitleCallback.invoke(newSubtitleFile(lang, url))
+                                val sub  = subs.getJSONObject(i)
+                                val url  = sub.optString("url")
+                                val lang = expandLang(sub.optString("lang"))
+                                if (url.isNotBlank() && lang.isNotBlank())
+                                    subtitleCallback.invoke(newSubtitleFile(lang, url))
                             }
                         }
                     } catch (e: Exception) {}
                 },
+
+                // WyzieSubs — already returns full display names via "display" field
                 async {
                     try {
                         var wyzieUrl = "https://sub.wyzie.io/search?id=$tmdbId&source=all&key=$wyzieApiKey"
                         if (!isMovie) wyzieUrl += "&season=$season&episode=$episode"
-                        val wyzieResponse = app.get(wyzieUrl, timeout = 5).text
-                        
+                        val wyzieResponse = app.get(wyzieUrl, timeout = 8).text
+
                         val array = if (wyzieResponse.trim().startsWith("{")) {
                             JSONObject(wyzieResponse).optJSONArray("subtitles") ?: JSONArray()
                         } else {
@@ -283,23 +333,20 @@ class StreamHubProvider : MainAPI() {
                         }
 
                         for (i in 0 until array.length()) {
-                            val sub = array.getJSONObject(i)
+                            val sub    = array.getJSONObject(i)
                             val subUrl = sub.optString("url")
-                            val lang = sub.optString("display").takeIf { it.isNotBlank() } ?: sub.optString("language", "English")
-                            if (subUrl.isNotBlank()) {
+                            // Prefer "display" (full name from Wyzie), fall back to expandLang("language")
+                            val lang   = sub.optString("display").takeIf { it.isNotBlank() }
+                                ?: expandLang(sub.optString("language", "English"))
+                            if (subUrl.isNotBlank())
                                 subtitleCallback.invoke(newSubtitleFile(lang, subUrl))
-                            }
                         }
                     } catch (e: Exception) {}
                 }
             )
 
             val results = extractorJobs.awaitAll()
-            
-            withTimeoutOrNull(10000) {
-                subJobs.awaitAll()
-            }
-
+            withTimeoutOrNull(12000) { subJobs.awaitAll() }
             return@coroutineScope results.any { it }
         }
     }
