@@ -1,0 +1,87 @@
+[
+    {
+        "iconUrl": "https://www.film1k.com/wp-content/uploads/2026/03/film1k-logo.webp",
+        "jarFileSize": 372961,
+        "fileHash": "sha256-3dae71cf3ebffe7b35ef09e5ed4243374603f888260764621eb39e59df2a983f",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/ChocoCooper/cloudstream-repo",
+        "fileSize": 72428,
+        "status": 1,
+        "language": "en",
+        "authors": [
+            "ChocoCooper"
+        ],
+        "tvTypes": [
+            "Movie"
+        ],
+        "version": 12,
+        "internalName": "Film1k",
+        "jarUrl": "https://raw.githubusercontent.com/ChocoCooper/cloudstream-repo/builds/Film1k.jar",
+        "description": "Old Erotic Films",
+        "url": "https://raw.githubusercontent.com/ChocoCooper/cloudstream-repo/builds/Film1k.cs3",
+        "name": "Film1k",
+        "jarHash": "sha256-3712e16a7b45aaa4bd3642a24157455ec542e1887f46ce163105b9e6cbac6dd9"
+    },
+    {
+        "iconUrl": "https://narto-drama.com/narto-drama-logo-compressed.png",
+        "fileHash": "sha256-29dbf6d23b4f18ce6cb2bdfb0eb2e66617decd6ecfa15414de834b527b32a0be",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/ChocoCooper/cloudstream-repo",
+        "fileSize": 28580,
+        "status": 1,
+        "language": "en",
+        "authors": [
+            "ChocoCooper"
+        ],
+        "tvTypes": [
+            "Movie",
+            "TvSeries",
+            "AsianDrama"
+        ],
+        "version": 1,
+        "internalName": "NartoDrama",
+        "description": "Vertical Short Drama",
+        "url": "https://raw.githubusercontent.com/ChocoCooper/cloudstream-repo/builds/NartoDrama.cs3",
+        "name": "NartoDrama"
+    },
+    {
+        "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://tamilbulb.cc&size=256",
+        "fileHash": "sha256-4a56005676f2fb7150f10e29dc385ff3f6f6669719ce7b5bb0d29eca552f6a58",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/ChocoCooper/cloudstream-repo",
+        "fileSize": 37942,
+        "status": 2,
+        "language": "ta",
+        "authors": [
+            "ChocoCooper"
+        ],
+        "tvTypes": [
+            "Movie"
+        ],
+        "version": 1,
+        "internalName": "TamilBulb",
+        "description": "TamilBulb Provider",
+        "url": "https://raw.githubusercontent.com/ChocoCooper/cloudstream-repo/builds/TamilBulb.cs3",
+        "name": "TamilBulb"
+    },
+    {
+        "iconUrl": "https://www.1tamilmv.capital/uploads/monthly_2026_04/logo.png.a2fe3a46dd23c8b4b3798642925294b9.png",
+        "fileHash": "sha256-6df1788160925e0365ae32f57fea55ac37eb614b8cfa8ac3d5dd4d70ac6a410b",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/ChocoCooper/cloudstream-repo",
+        "fileSize": 24908,
+        "status": 1,
+        "language": "ta",
+        "authors": [
+            "ChocoCooper"
+        ],
+        "tvTypes": [
+            "Movie"
+        ],
+        "version": 3,
+        "internalName": "TamilMV",
+        "description": "TamilMV Provider (only contents with DL)",
+        "url": "https://raw.githubusercontent.com/ChocoCooper/cloudstream-repo/builds/TamilMV.cs3",
+        "name": "TamilMV"
+    }
+]
