@@ -1,0 +1,150 @@
+[
+    {
+        "iconUrl": "https://www.film1k.com/wp-content/uploads/2026/03/film1k-logo.webp",
+        "jarFileSize": 372978,
+        "fileHash": "sha256-559b6d0a05a8c2cb6f19f210c226ad62fd3c4cf27bfcd35eeb3e6eac5534fc23",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/ChocoCooper/cloudstream-repo",
+        "fileSize": 72427,
+        "status": 1,
+        "language": "en",
+        "authors": [
+            "ChocoCooper"
+        ],
+        "tvTypes": [
+            "NSFW"
+        ],
+        "version": 12,
+        "internalName": "Film1k",
+        "jarUrl": "https://raw.githubusercontent.com/ChocoCooper/cloudstream-repo/builds/Film1k.jar",
+        "description": "Old Erotic Films",
+        "url": "https://raw.githubusercontent.com/ChocoCooper/cloudstream-repo/builds/Film1k.cs3",
+        "name": "Film1k",
+        "jarHash": "sha256-1203729f41d0ed57396b8f73119034c98c264e6c703af69bfa615aa49a7025c7"
+    },
+    {
+        "iconUrl": "https://raw.githubusercontent.com/phisher98/TVVVV/refs/heads/main/Icons/HDHUB.png",
+        "fileHash": "sha256-1f12e0140792ea7adc156bebe39cbb50d0b54f042b7543694ee667eb2960af55",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/ChocoCooper/cloudstream-repo",
+        "fileSize": 78428,
+        "status": 1,
+        "authors": [
+            "ChocoCooper"
+        ],
+        "tvTypes": [
+            "Movie",
+            "TvSeries"
+        ],
+        "version": 4,
+        "internalName": "HDhub4u",
+        "description": "HDhub4u Provider",
+        "url": "https://raw.githubusercontent.com/ChocoCooper/cloudstream-repo/builds/HDhub4u.cs3",
+        "name": "HDhub4u"
+    },
+    {
+        "iconUrl": "https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQYVzd07oSaIOJ4WYs2BAsQgmc8N-cj-hFpBaiYRSiq-Yah41Sl",
+        "jarFileSize": 139483,
+        "fileHash": "sha256-e282bffb2488407d9845b937967837f7e4e6722674657c796e830bc9af3de4c4",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/ChocoCooper/cloudstream-repo",
+        "fileSize": 29233,
+        "status": 1,
+        "language": "en",
+        "authors": [
+            "ChocoCooper"
+        ],
+        "tvTypes": [
+            "NSFW"
+        ],
+        "version": 8,
+        "internalName": "JavHub",
+        "jarUrl": "https://raw.githubusercontent.com/ChocoCooper/cloudstream-repo/builds/JavHub.jar",
+        "description": "#1 Best JAV Provider",
+        "url": "https://raw.githubusercontent.com/ChocoCooper/cloudstream-repo/builds/JavHub.cs3",
+        "name": "JavHub",
+        "jarHash": "sha256-6c9e75aee34b358440b9e411b4dcb5dd6e06fce89eac68acc2277198e422691d"
+    },
+    {
+        "iconUrl": "https://skymovieshd.band/images/favicon.ico",
+        "jarFileSize": 398485,
+        "fileHash": "sha256-703ec09bf35ea180829bb9811eb83c5de9b9ef593ca914e46951506ce2a419d9",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/ChocoCooper/cloudstream-repo",
+        "fileSize": 59285,
+        "status": 1,
+        "authors": [
+            "ChocoCooper"
+        ],
+        "tvTypes": [
+            "Movie"
+        ],
+        "version": 2,
+        "internalName": "Skybap",
+        "jarUrl": "https://raw.githubusercontent.com/ChocoCooper/cloudstream-repo/builds/Skybap.jar",
+        "description": "SkymoviesHD Provider",
+        "url": "https://raw.githubusercontent.com/ChocoCooper/cloudstream-repo/builds/Skybap.cs3",
+        "name": "Skybap",
+        "jarHash": "sha256-a4ad94a50628da6bfda0e588d31a5c05c47f833d5a4b357c593640c2f269d255"
+    },
+    {
+        "iconUrl": "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://tamilbulb.cc&size=256",
+        "fileHash": "sha256-4a56005676f2fb7150f10e29dc385ff3f6f6669719ce7b5bb0d29eca552f6a58",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/ChocoCooper/cloudstream-repo",
+        "fileSize": 37942,
+        "status": 2,
+        "language": "ta",
+        "authors": [
+            "ChocoCooper"
+        ],
+        "tvTypes": [
+            "Movie"
+        ],
+        "version": 1,
+        "internalName": "TamilBulb",
+        "description": "TamilBulb Provider",
+        "url": "https://raw.githubusercontent.com/ChocoCooper/cloudstream-repo/builds/TamilBulb.cs3",
+        "name": "TamilBulb"
+    },
+    {
+        "iconUrl": "https://www.1tamilmv.capital/uploads/monthly_2026_04/logo.png.a2fe3a46dd23c8b4b3798642925294b9.png",
+        "fileHash": "sha256-4325e64047af981869517c150356fc1cbb20bc72e1061701a0df1298500662f4",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/ChocoCooper/cloudstream-repo",
+        "fileSize": 24599,
+        "status": 1,
+        "language": "ta",
+        "authors": [
+            "ChocoCooper"
+        ],
+        "tvTypes": [
+            "Movie"
+        ],
+        "version": 3,
+        "internalName": "TamilMV",
+        "description": "TamilMV Provider (only contents with DL)",
+        "url": "https://raw.githubusercontent.com/ChocoCooper/cloudstream-repo/builds/TamilMV.cs3",
+        "name": "TamilMV"
+    },
+    {
+        "iconUrl": "https://t1.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://xmaal.net/&size=256",
+        "fileHash": "sha256-d4593294ccc3ea901878a409504ed869a23e8db746fd845e0394755321576f4b",
+        "apiVersion": 1,
+        "repositoryUrl": "https://github.com/ChocoCooper/cloudstream-repo",
+        "fileSize": 39405,
+        "status": 1,
+        "language": "hi",
+        "authors": [
+            "ChocoCooper"
+        ],
+        "tvTypes": [
+            "NSFW"
+        ],
+        "version": 4,
+        "internalName": "Xmaal",
+        "description": "Indian Bold Series",
+        "url": "https://raw.githubusercontent.com/ChocoCooper/cloudstream-repo/builds/Xmaal.cs3",
+        "name": "Xmaal"
+    }
+]
