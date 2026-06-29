@@ -5,46 +5,52 @@ import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.network.WebViewResolver
 
 object VidcoreExtractor {
-    suspend fun getStream(dataUrl: String, callback: (ExtractorLink) -> Unit): Boolean {
+
+    private val blacklist = listOf(
+        "youtube", "google", "doubleclick", "analytics",
+        "blank.mp4", "googletagmanager", "cloudflare"
+    )
+
+    /**
+     * @param embedData  Clean URL in the form "https://streamhub.app/movie/<id>"
+     *                   or "https://streamhub.app/tv/<id>/<season>/<episode>".
+     *                   Must NOT contain ?imdb= or any extra query parameters.
+     */
+    suspend fun getStream(embedData: String, callback: (ExtractorLink) -> Unit): Boolean {
         val domains = listOf("https://vidcore.net", "https://vidup.to")
-        
-        // DYNAMIC: Catch any m3u8 or mp4 network request
+
+        // Catch any m3u8 or mp4 network request made by the page
         val catchAllRegex = Regex("""(?i).*\.(m3u8|mp4).*""")
-        
-        // BLACKLIST: Ignore common ad trackers and blank placeholders
-        val blacklist = listOf("youtube", "google", "doubleclick", "analytics", "blank.mp4", "googletagmanager", "cloudflare")
-        
+
         for (domain in domains) {
             try {
-                val targetUrl = dataUrl.replace("https://streamhub.app", domain)
-                val interceptor = WebViewResolver(catchAllRegex)
-
-                val response = app.get(targetUrl, interceptor = interceptor)
+                val targetUrl     = embedData.replace("https://streamhub.app", domain)
+                val interceptor   = WebViewResolver(catchAllRegex)
+                val response      = app.get(targetUrl, interceptor = interceptor)
                 val interceptedUrl = response.url
 
-                // Verify it's not blacklisted
                 val isClean = blacklist.none { interceptedUrl.lowercase().contains(it) }
+                if (!isClean) continue
 
-                if (isClean) {
-                    val linkType = if (interceptedUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                    val sourceName = if (domain.contains("vidcore")) "Vidcore" else "Vidup"
-                    
-                    callback.invoke(
-                        ExtractorLink(
-                            source = sourceName, 
-                            name = sourceName, 
-                            url = interceptedUrl, 
-                            referer = "$domain/",
-                            quality = Qualities.Unknown.value,
-                            type = linkType
-                        )
+                val linkType   = if (interceptedUrl.contains(".m3u8")) ExtractorLinkType.M3U8
+                                 else ExtractorLinkType.VIDEO
+                val sourceName = if (domain.contains("vidcore")) "Vidcore" else "Vidup"
+
+                callback.invoke(
+                    ExtractorLink(
+                        source  = sourceName,
+                        name    = sourceName,
+                        url     = interceptedUrl,
+                        referer = "$domain/",
+                        quality = Qualities.Unknown.value,
+                        type    = linkType
                     )
-                    return true 
-                }
+                )
+                return true          // stop after first successful domain
             } catch (e: Exception) {
-                continue // Try the fallback domain
+                continue             // try the fallback domain
             }
         }
-        return false 
+        return false
     }
 }
