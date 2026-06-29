@@ -7,6 +7,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.withTimeoutOrNull
+import okhttp3.Interceptor
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.URLEncoder
@@ -37,7 +38,6 @@ class StreamHubProvider : MainAPI() {
     private val imageBase = "https://image.tmdb.org/t/p/w500"
     private val backdropBase = "https://image.tmdb.org/t/p/original"
 
-    // --- TMDB DATA CLASSES ---
     private data class TmdbSearchResponse(@JsonProperty("results") val results: List<TmdbResult>?)
     private data class TmdbResult(
         @JsonProperty("id") val id: Int?,
@@ -210,7 +210,8 @@ class StreamHubProvider : MainAPI() {
             val extractorJobs = listOf(
                 async { Movies111Extractor.getStream(data, callback) },
                 async { VidcoreExtractor.getStream(data, callback) },
-                async { VidlinkExtractor.getStream(data, callback) }
+                async { VidlinkExtractor.getStream(data, callback) },
+                async { KisskhExtractor.getStream(data, callback, subtitleCallback) }
             )
 
             // --- 2. RUN SUBTITLES CONCURRENTLY ---
@@ -290,12 +291,16 @@ class StreamHubProvider : MainAPI() {
 
             val results = extractorJobs.awaitAll()
             
-            // Allow subtitles up to 10s to load without blocking the video starting indefinitely
             withTimeoutOrNull(10000) {
                 subJobs.awaitAll()
             }
 
             return@coroutineScope results.any { it }
         }
+    }
+
+    // --- OVERRIDE VIDEO INTERCEPTOR ---
+    override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor {
+        return KisskhExtractor.subtitleInterceptor
     }
 }
