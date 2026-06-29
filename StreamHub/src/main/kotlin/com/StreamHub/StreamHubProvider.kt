@@ -299,8 +299,8 @@ class StreamHubProvider : MainAPI() {
         }
     }
 
-    // --- OVERRIDE VIDEO INTERCEPTOR ---
     override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor {
+        // Automatically intercepts and decrypts Kisskh's encrypted subtitles 
         return KisskhExtractor.subtitleInterceptor
     }
 }
