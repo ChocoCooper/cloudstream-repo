@@ -283,15 +283,10 @@ class StreamHubProvider : MainAPI() {
             )
 
             // --- 2. STAGGERED EXTRACTOR EXECUTION ---
-            // We launch Vidlink first, because it is the fastest.
+            
             val vidlinkJob = async { 
                 withTimeoutOrNull(25000) { VidlinkExtractor.getStream(data, callback) } ?: false 
             }
-            
-            // IMPORTANT: We wait 1.5 seconds before launching the others.
-            // Android's WebView engine gets blocked if you launch 3 tabs at the exact same millisecond.
-            // This headstart guarantees Vidlink finishes first, pushes to the screen, and starts playing instantly.
-            delay(1500)
 
             val movies111Job = async { 
                 withTimeoutOrNull(25000) { Movies111Extractor.getStream(data, callback) } ?: false 
