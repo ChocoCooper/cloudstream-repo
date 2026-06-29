@@ -3,7 +3,6 @@ package com.StreamHub
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.base64DecodeArray
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -13,6 +12,7 @@ import com.lagradost.cloudstream3.utils.loadExtractor
 import okhttp3.Interceptor
 import okhttp3.ResponseBody.Companion.toResponseBody
 import java.net.URLEncoder
+import java.util.Base64
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
@@ -20,22 +20,38 @@ import javax.crypto.spec.SecretKeySpec
 object KisskhExtractor {
     private const val mainUrl = "https://kisskh.nl"
 
-    // --- DECRYPTION KEYS ---
-    private const val KEY = "AmSmZVcH93UQUezi"
+    // ── Decryption keys ───────────────────────────────────────────────────────
+    private const val KEY  = "AmSmZVcH93UQUezi"
     private const val KEY2 = "8056483646328763"
     private const val KEY3 = "sWODXX04QRTkHdlZ"
-    private val IV = intArrayOf(1382367819, 1465333859, 1902406224, 1164854838)
-    private val IV2 = intArrayOf(909653298, 909193779, 925905208, 892483379)
-    private val IV3 = intArrayOf(946894696, 1634749029, 1127508082, 1396271183)
 
-    // --- DATA CLASSES ---
-    private data class KisskhMedia(@JsonProperty("id") val id: Int?, @JsonProperty("title") val title: String?)
-    private data class KisskhDetail(@JsonProperty("episodes") val episodes: List<KisskhEpisode>?)
-    private data class KisskhEpisode(@JsonProperty("id") val id: Int?, @JsonProperty("number") val number: Double?)
+    private val IV  = intArrayOf(1382367819, 1465333859, 1902406224, 1164854838)
+    private val IV2 = intArrayOf(909653298,  909193779,  925905208,  892483379)
+    private val IV3 = intArrayOf(946894696,  1634749029, 1127508082, 1396271183)
+
+    // ── Data classes ──────────────────────────────────────────────────────────
+    private data class KisskhMedia(
+        @JsonProperty("id")    val id: Int?,
+        @JsonProperty("title") val title: String?
+    )
+    private data class KisskhDetail(
+        @JsonProperty("episodes") val episodes: List<KisskhEpisode>?
+    )
+    private data class KisskhEpisode(
+        @JsonProperty("id")     val id: Int?,
+        @JsonProperty("number") val number: Double?
+    )
     private data class KisskhKey(val key: String?)
-    private data class KisskhSources(@JsonProperty("Video") val video: String?, @JsonProperty("ThirdParty") val thirdParty: String?)
-    private data class KisskhSubtitle(@JsonProperty("src") val src: String?, @JsonProperty("label") val label: String?)
+    private data class KisskhSources(
+        @JsonProperty("Video")      val video: String?,
+        @JsonProperty("ThirdParty") val thirdParty: String?
+    )
+    private data class KisskhSubtitle(
+        @JsonProperty("src")   val src: String?,
+        @JsonProperty("label") val label: String?
+    )
 
+    // ── Main entry point ──────────────────────────────────────────────────────
     suspend fun getStream(
         title: String,
         seasonNum: Int,
@@ -45,54 +61,65 @@ object KisskhExtractor {
         subtitleCallback: (SubtitleFile) -> Unit
     ): Boolean {
         try {
-            // 1. Search Kisskh intelligently handling split seasons
+            // 1. Search — try "Title Season X" first, fall back to bare title
             val searchTitle = if (isMovie || seasonNum == 1) title else "$title Season $seasonNum"
-            
-            var searchRes = app.get("$mainUrl/api/DramaList/Search?q=${URLEncoder.encode(searchTitle, "UTF-8")}&type=0").text
-            var searchArray = tryParseJson<List<KisskhMedia>>(searchRes)
-            
-            // Fallback: If "Title Season X" fails, just search the root title
-            if (searchArray.isNullOrEmpty() && seasonNum > 1) {
-                searchRes = app.get("$mainUrl/api/DramaList/Search?q=${URLEncoder.encode(title, "UTF-8")}&type=0").text
-                searchArray = tryParseJson<List<KisskhMedia>>(searchRes)
-            }
-            
-            val kisskhId = searchArray?.firstOrNull { it.title?.contains(searchTitle, true) == true }?.id 
-                ?: searchArray?.firstOrNull { it.title?.contains(title, true) == true }?.id 
-                ?: searchArray?.firstOrNull()?.id ?: return false
+            var searchArray = searchKisskh(searchTitle)
 
-            // 2. Get Episode ID
+            if (searchArray.isNullOrEmpty() && seasonNum > 1)
+                searchArray = searchKisskh(title)
+
+            val kisskhId = searchArray
+                ?.firstOrNull { it.title?.contains(searchTitle, ignoreCase = true) == true }?.id
+                ?: searchArray?.firstOrNull { it.title?.contains(title, ignoreCase = true) == true }?.id
+                ?: searchArray?.firstOrNull()?.id
+                ?: return false
+
+            // 2. Get episode ID
             val detailsRes = app.get("$mainUrl/api/DramaList/Drama/$kisskhId?isq=false").text
-            val details = tryParseJson<KisskhDetail>(detailsRes) ?: return false
-            val epsId = details.episodes?.find { it.number?.toInt() == epNum }?.id ?: return false
+            val details    = tryParseJson<KisskhDetail>(detailsRes) ?: return false
+            val epsId      = details.episodes?.find { it.number?.toInt() == epNum }?.id ?: return false
 
-            // 3. Extract Video Links
-            val kkeyJson = app.get("$mainUrl/api/Generate?id=$epsId&version=2.8.10", timeout = 10000).text
-            val kkey = tryParseJson<KisskhKey>(kkeyJson)?.key ?: ""
-            
-            val sourceRes = app.get("$mainUrl/api/DramaList/Episode/$epsId.png?err=false&ts=&time=&kkey=$kkey").text
+            // 3. Fetch video sources
+            //    kkey is optional; an empty string is fine if the API doesn't return one
+            val kkey = fetchKey(epsId)
+            val sourceRes = app.get(
+                "$mainUrl/api/DramaList/Episode/$epsId.png?err=false&ts=&time=&kkey=$kkey"
+            ).text
             val sources = tryParseJson<KisskhSources>(sourceRes) ?: return false
 
             listOfNotNull(sources.video, sources.thirdParty).forEach { link ->
-                if (link.contains(".m3u8")) {
-                    M3u8Helper.generateM3u8("Kisskh", link, referer = "$mainUrl/", headers = mapOf("Origin" to mainUrl)).forEach(callback)
-                } else if (link.contains("mp4")) {
-                    callback.invoke(ExtractorLink("Kisskh", "Kisskh", link, referer = mainUrl, quality = Qualities.Unknown.value, type = ExtractorLinkType.VIDEO))
-                } else {
-                    loadExtractor(link, "$mainUrl/", subtitleCallback, callback)
+                when {
+                    link.contains(".m3u8") ->
+                        M3u8Helper.generateM3u8(
+                            "Kisskh", link,
+                            referer = "$mainUrl/",
+                            headers = mapOf("Origin" to mainUrl)
+                        ).forEach(callback)
+                    link.contains("mp4") ->
+                        callback.invoke(
+                            ExtractorLink(
+                                "Kisskh", "Kisskh", link,
+                                referer = mainUrl,
+                                quality = Qualities.Unknown.value,
+                                type    = ExtractorLinkType.VIDEO
+                            )
+                        )
+                    else ->
+                        loadExtractor(link, "$mainUrl/", subtitleCallback, callback)
                 }
             }
 
-            // 4. Extract Subtitles
-            val kkey1Json = app.get("$mainUrl/api/Generate?sub=1&id=$epsId&version=2.8.10", timeout = 10000).text
-            val kkey1 = tryParseJson<KisskhKey>(kkey1Json)?.key ?: ""
-            
-            val subRes = app.get("$mainUrl/api/Sub/$epsId?kkey=$kkey1").text
+            // 4. Fetch subtitles
+            val kkey1    = fetchSubKey(epsId)
+            val subRes   = app.get("$mainUrl/api/Sub/$epsId?kkey=$kkey1").text
             tryParseJson<List<KisskhSubtitle>>(subRes)?.forEach { sub ->
-                val lang = if (sub.label == "Indonesia") "Indonesian" else sub.label ?: "English"
-                if (!sub.src.isNullOrBlank()) {
-                    subtitleCallback.invoke(SubtitleFile(lang, sub.src))
+                val lang = when (sub.label) {
+                    "Indonesia"  -> "Indonesian"
+                    null, ""     -> "English"
+                    else         -> sub.label
                 }
+                if (!sub.src.isNullOrBlank())
+                    subtitleCallback.invoke(SubtitleFile(lang, sub.src))
             }
 
             return true
@@ -101,68 +128,97 @@ object KisskhExtractor {
         }
     }
 
-    private val CHUNK_REGEX1 by lazy { Regex("^\\d+$", RegexOption.MULTILINE) }
-    
-    val subtitleInterceptor = Interceptor { chain ->
-        val request = chain.request()
-        val response = chain.proceed(request)
+    // ── Private helpers ───────────────────────────────────────────────────────
 
-        if (response.request.url.toString().contains("kisskh") && response.request.url.toString().contains(".txt")) {
-            val mediaType = response.body?.contentType()
+    private suspend fun searchKisskh(query: String): List<KisskhMedia>? {
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        val res     = app.get("$mainUrl/api/DramaList/Search?q=$encoded&type=0").text
+        return tryParseJson<List<KisskhMedia>>(res)
+    }
+
+    /** Fetch the video kkey; returns empty string on failure (API still works). */
+    private suspend fun fetchKey(epsId: Int): String = try {
+        tryParseJson<KisskhKey>(
+            app.get("$mainUrl/api/Generate?id=$epsId&version=2.8.10", timeout = 12000).text
+        )?.key ?: ""
+    } catch (e: Exception) { "" }
+
+    /** Fetch the subtitle kkey; returns empty string on failure. */
+    private suspend fun fetchSubKey(epsId: Int): String = try {
+        tryParseJson<KisskhKey>(
+            app.get("$mainUrl/api/Generate?sub=1&id=$epsId&version=2.8.10", timeout = 12000).text
+        )?.key ?: ""
+    } catch (e: Exception) { "" }
+
+    // ── Subtitle interceptor (decrypts encrypted .txt subtitle lines) ─────────
+    private val CHUNK_REGEX by lazy { Regex("^\\d+$", RegexOption.MULTILINE) }
+
+    val subtitleInterceptor = Interceptor { chain ->
+        val request  = chain.request()
+        val response = chain.proceed(request)
+        val url      = response.request.url.toString()
+
+        if (url.contains("kisskh") && url.contains(".txt")) {
+            val mediaType    = response.body?.contentType()
             val responseBody = response.body?.string() ?: return@Interceptor response
-            
-            val chunks = responseBody.split(CHUNK_REGEX1).filter(String::isNotBlank).map(String::trim)
+
+            val chunks    = responseBody.split(CHUNK_REGEX).filter(String::isNotBlank).map(String::trim)
             val decrypted = chunks.mapIndexed { index, chunk ->
                 if (chunk.isBlank()) return@mapIndexed ""
-                val parts = chunk.split("\n")
+                val parts  = chunk.split("\n")
                 if (parts.isEmpty()) return@mapIndexed ""
-
                 val header = parts.first()
-                val text = parts.drop(1)
-                val d = text.joinToString("\n") { line ->
-                    try { decrypt(line) } catch (e: Exception) { "DECRYPT_ERROR" }
+                val lines  = parts.drop(1)
+                val body   = lines.joinToString("\n") { line ->
+                    try { decrypt(line) } catch (e: Exception) { "" }
                 }
-                listOf(index + 1, header, d).joinToString("\n")
+                listOf(index + 1, header, body).joinToString("\n")
             }.filter { it.isNotEmpty() }.joinToString("\n\n")
-            
-            val newBody = decrypted.toResponseBody(mediaType)
-            return@Interceptor response.newBuilder().body(newBody).build()
+
+            return@Interceptor response.newBuilder()
+                .body(decrypted.toResponseBody(mediaType))
+                .build()
         }
         response
     }
 
+    // ── AES/CBC decryption ────────────────────────────────────────────────────
+
     private fun decrypt(encryptedB64: String): String {
+        // Use java.util.Base64 — available on all Android API 26+ and on JVM
+        val encryptedBytes = Base64.getDecoder().decode(encryptedB64)
+
         val keyIvPairs = listOf(
-            Pair(KEY.toByteArray(Charsets.UTF_8), IV.toByteArray()),
-            Pair(KEY2.toByteArray(Charsets.UTF_8), IV2.toByteArray()),
-            Pair(KEY3.toByteArray(Charsets.UTF_8), IV3.toByteArray())
+            KEY.toByteArray(Charsets.UTF_8)  to IV.toKisskhBytes(),
+            KEY2.toByteArray(Charsets.UTF_8) to IV2.toKisskhBytes(),
+            KEY3.toByteArray(Charsets.UTF_8) to IV3.toKisskhBytes()
         )
-        
-        // SAFE: Uses Cloudstream's native utility instead of Android SDK
-        val encryptedBytes = base64DecodeArray(encryptedB64)
 
         for ((keyBytes, ivBytes) in keyIvPairs) {
             try {
-                return decryptWithKeyIv(keyBytes, ivBytes, encryptedBytes)
-            } catch (ex: Exception) { continue }
+                return decryptAesCbc(keyBytes, ivBytes, encryptedBytes)
+            } catch (_: Exception) { continue }
         }
-        return "Decryption failed"
+        return ""
     }
 
-    private fun decryptWithKeyIv(keyBytes: ByteArray, ivBytes: ByteArray, encryptedBytes: ByteArray): String {
+    private fun decryptAesCbc(key: ByteArray, iv: ByteArray, data: ByteArray): String {
         val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
-        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keyBytes, "AES"), IvParameterSpec(ivBytes))
-        return String(cipher.doFinal(encryptedBytes), Charsets.UTF_8)
+        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
+        return String(cipher.doFinal(data), Charsets.UTF_8)
     }
 
-    private fun IntArray.toByteArray(): ByteArray {
-        return ByteArray(size * 4).also { bytes ->
-            forEachIndexed { index, value ->
-                bytes[index * 4] = (value shr 24).toByte()
-                bytes[index * 4 + 1] = (value shr 16).toByte()
-                bytes[index * 4 + 2] = (value shr 8).toByte()
-                bytes[index * 4 + 3] = value.toByte()
+    /**
+     * Convert an IntArray of big-endian 32-bit integers into a raw ByteArray.
+     * Named [toKisskhBytes] to avoid any ambiguity with Kotlin stdlib extensions.
+     */
+    private fun IntArray.toKisskhBytes(): ByteArray =
+        ByteArray(size * 4).also { bytes ->
+            forEachIndexed { i, v ->
+                bytes[i * 4 + 0] = (v shr 24).toByte()
+                bytes[i * 4 + 1] = (v shr 16).toByte()
+                bytes[i * 4 + 2] = (v shr 8).toByte()
+                bytes[i * 4 + 3] = v.toByte()
             }
         }
-    }
 }
