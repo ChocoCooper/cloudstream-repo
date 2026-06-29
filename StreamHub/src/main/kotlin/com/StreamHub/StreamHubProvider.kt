@@ -16,10 +16,9 @@ class StreamHubProvider : MainAPI() {
     override var mainUrl = "https://streamhub.app"
     override var name = "StreamHub"
     override val hasMainPage = true
-    override var lang = "en"
+    override var lang = "ta"
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime, TvType.AsianDrama)
 
-    // --- WYZIESUBS API KEY ---
     private val wyzieApiKey = "wyzie-qadj2lucrwvfqglskqdy67jy7zkaptgo"
 
     private val tmdbApiKeys = listOf(
@@ -34,6 +33,7 @@ class StreamHubProvider : MainAPI() {
         "09ad8ace66eec34302943272db0e8d2c", "ea118e768e75a1fe3b53dc99c9e4de09"
     )
 
+    // UNIFIED ENDPOINT: Updated to avoid blocked domain issues in India
     private val tmdbBase = "https://api.tmdb.org/3"
     private val imageBase = "https://image.tmdb.org/t/p/w500"
     private val backdropBase = "https://image.tmdb.org/t/p/original"
@@ -201,9 +201,14 @@ class StreamHubProvider : MainAPI() {
         val isMovie = cleanData.contains("/movie/")
         
         val tmdbId = Regex("""/(?:movie|tv)/(\d+)""").find(cleanData)?.groupValues?.get(1) ?: return false
-        val season = Regex("""/tv/\d+/(\d+)""").find(cleanData)?.groupValues?.get(1)?.toIntOrNull()
-        val episode = Regex("""/tv/\d+/\d+/(\d+)""").find(cleanData)?.groupValues?.get(1)?.toIntOrNull()
+        val season = Regex("""/tv/\d+/(\d+)""").find(cleanData)?.groupValues?.get(1)?.toIntOrNull() ?: 1
+        val episode = Regex("""/tv/\d+/\d+/(\d+)""").find(cleanData)?.groupValues?.get(1)?.toIntOrNull() ?: 1
         val imdbId = data.substringAfter("imdb=", "").substringBefore("&").takeIf { it.isNotBlank() && it != "null" }
+
+        // Fetch meta details dynamically using the shared infrastructure
+        val metaUrl = if (isMovie) "$tmdbBase/movie/$tmdbId?api_key={API_KEY}" else "$tmdbBase/tv/$tmdbId?api_key={API_KEY}"
+        val details = fetchTmdb<TmdbDetails>(metaUrl) ?: return false
+        val cleanTitle = details.title ?: details.name ?: return false
 
         return coroutineScope {
             // --- 1. RUN EXTRACTORS CONCURRENTLY ---
@@ -211,7 +216,7 @@ class StreamHubProvider : MainAPI() {
                 async { Movies111Extractor.getStream(data, callback) },
                 async { VidcoreExtractor.getStream(data, callback) },
                 async { VidlinkExtractor.getStream(data, callback) },
-                async { KisskhExtractor.getStream(data, callback, subtitleCallback) }
+                async { KisskhExtractor.getStream(cleanTitle, season, episode, isMovie, callback, subtitleCallback) }
             )
 
             // --- 2. RUN SUBTITLES CONCURRENTLY ---
@@ -268,7 +273,7 @@ class StreamHubProvider : MainAPI() {
                 async {
                     try {
                         var wyzieUrl = "https://sub.wyzie.io/search?id=$tmdbId&source=all&key=$wyzieApiKey"
-                        if (!isMovie && season != null && episode != null) wyzieUrl += "&season=$season&episode=$episode"
+                        if (!isMovie) wyzieUrl += "&season=$season&episode=$episode"
                         val wyzieResponse = app.get(wyzieUrl, timeout = 5).text
                         
                         val array = if (wyzieResponse.trim().startsWith("{")) {
@@ -300,7 +305,6 @@ class StreamHubProvider : MainAPI() {
     }
 
     override fun getVideoInterceptor(extractorLink: ExtractorLink): Interceptor {
-        // Automatically intercepts and decrypts Kisskh's encrypted subtitles 
         return KisskhExtractor.subtitleInterceptor
     }
 }
