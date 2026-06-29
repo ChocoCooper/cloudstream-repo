@@ -6,8 +6,6 @@ import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
@@ -39,6 +37,7 @@ class StreamHubProvider : MainAPI() {
     private val imageBase = "https://image.tmdb.org/t/p/w500"
     private val backdropBase = "https://image.tmdb.org/t/p/original"
 
+    // --- TMDB DATA CLASSES ---
     private data class TmdbSearchResponse(@JsonProperty("results") val results: List<TmdbResult>?)
     private data class TmdbResult(
         @JsonProperty("id") val id: Int?,
@@ -207,7 +206,14 @@ class StreamHubProvider : MainAPI() {
         val imdbId = data.substringAfter("imdb=", "").substringBefore("&").takeIf { it.isNotBlank() && it != "null" }
 
         return coroutineScope {
-            // --- 1. RUN SUBTITLES IN BACKGROUND (Non-Blocking) ---
+            // --- 1. RUN EXTRACTORS CONCURRENTLY ---
+            val extractorJobs = listOf(
+                async { Movies111Extractor.getStream(data, callback) },
+                async { VidcoreExtractor.getStream(data, callback) },
+                async { VidlinkExtractor.getStream(data, callback) }
+            )
+
+            // --- 2. RUN SUBTITLES CONCURRENTLY ---
             val subJobs = listOf(
                 async {
                     if (imdbId != null) {
@@ -282,23 +288,9 @@ class StreamHubProvider : MainAPI() {
                 }
             )
 
-            // --- 2. STAGGERED EXTRACTOR EXECUTION ---
+            val results = extractorJobs.awaitAll()
             
-            val vidlinkJob = async { 
-                withTimeoutOrNull(25000) { VidlinkExtractor.getStream(data, callback) } ?: false 
-            }
-
-            val movies111Job = async { 
-                withTimeoutOrNull(25000) { Movies111Extractor.getStream(data, callback) } ?: false 
-            }
-            
-            val vidcoreJob = async { 
-                withTimeoutOrNull(25000) { VidcoreExtractor.getStream(data, callback) } ?: false 
-            }
-
-            // Wait for all to cleanly finish their timeouts/executions
-            val results = listOf(vidlinkJob.await(), movies111Job.await(), vidcoreJob.await())
-            
+            // Allow subtitles up to 10s to load without blocking the video starting indefinitely
             withTimeoutOrNull(10000) {
                 subJobs.awaitAll()
             }
