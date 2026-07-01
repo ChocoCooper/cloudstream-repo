@@ -195,7 +195,7 @@ class StreamHubProvider : MainAPI() {
         val cleanTitle = details.title ?: details.name ?: return false
 
         val mappedSubCallback = { sub: SubtitleFile ->
-            subtitleCallback.invoke(SubtitleFile(expandLang(sub.name), sub.url))
+            subtitleCallback.invoke(SubtitleFile(expandLang(sub.lang), sub.url))
         }
 
         return coroutineScope {
