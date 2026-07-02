@@ -51,7 +51,7 @@ jobs:
           chmod +x gradlew
           
           # Run the build. If it fails, the workflow will now turn red so you know!
-          ./gradlew make makePluginsJson --stacktrace --info 2>&1 | tee build_log.txt
+          ./gradlew clean make makePluginsJson --stacktrace --info 2>&1 | tee build_log.txt
           
           # Copy files (this will only run if the build above succeeds)
           cp **/build/*.cs3 $GITHUB_WORKSPACE/builds || true
