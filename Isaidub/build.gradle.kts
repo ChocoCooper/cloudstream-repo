@@ -4,7 +4,7 @@ version = 28
 cloudstream {
     // All of these properties are optional, you can safely remove them
 
-    description = "Tamil Dubbed Movies [Isaidub]"
+    description = "Tamil Dubbed Movies"
     language = "ta"
     authors = listOf("ChocoCooper")
 
