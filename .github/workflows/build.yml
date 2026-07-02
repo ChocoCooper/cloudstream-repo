@@ -42,13 +42,18 @@ jobs:
 
       - name: Build Plugins
         run: |
+          # IMPORTANT: pipefail ensures that if gradlew fails, the step actually fails.
+          set -o pipefail 
+          # globstar ensures the ** wildcard accurately searches all folder levels.
+          shopt -s globstar 
+          
           cd $GITHUB_WORKSPACE/src
           chmod +x gradlew
-          # Use 'tee' to print logs to the GitHub console AND save them to the file.
-          # Added --info for maximum compiler error details.
+          
+          # Run the build. If it fails, the workflow will now turn red so you know!
           ./gradlew make makePluginsJson --stacktrace --info 2>&1 | tee build_log.txt
           
-          # Added || true so it doesn't instantly crash the workflow if a build fails
+          # Copy files (this will only run if the build above succeeds)
           cp **/build/*.cs3 $GITHUB_WORKSPACE/builds || true
           cp build/plugins.json $GITHUB_WORKSPACE/builds || true
 
@@ -65,5 +70,11 @@ jobs:
           git config --local user.email "actions@github.com"
           git config --local user.name "GitHub Actions"
           git add .
-          git commit --amend -m "Build $GITHUB_SHA" || exit 0   # do not error if nothing to commit
-          git push --force
+          
+          # Only commit and push if new files were actually generated
+          if git diff --staged --quiet; then
+            echo "No new builds to commit."
+          else
+            git commit --amend -m "Build $GITHUB_SHA" || git commit -m "Build $GITHUB_SHA"
+            git push --force
+          fi
