@@ -270,7 +270,13 @@ class IsaidubProvider : MainAPI() {
                     if (a != null) {
                         val title = a.text().trim()
                         val href = fixUrl(a.attr("href"))
-                        if (title.isNotBlank() && href.isNotBlank()) {
+                        val lowTitle = title.lowercase()
+                        
+                        // Strict Web Series Filtering for Fallback Search
+                        if (title.isNotBlank() && href.isNotBlank() && 
+                            !lowTitle.contains("web series") && 
+                            !lowTitle.contains("season") && 
+                            !lowTitle.contains("episode")) {
                             searchResults.add(newMovieSearchResponse(title, href, TvType.Movie))
                         }
                     }
@@ -310,11 +316,12 @@ class IsaidubProvider : MainAPI() {
                 foundMovie = pageDeferred.await()
                 plotStr = plotDeferred.await()
             }
-            if (foundMovie == null) return null
-            moviePageUrl = foundMovie!!.link
+            
+            // Fix: Do not return null here if movie not found. Let it gracefully show "no links" inside player
+            moviePageUrl = foundMovie?.link ?: ""
             synopsis = plotStr
             
-            if (scrapedTitle.isBlank()) scrapedTitle = foundMovie!!.title
+            if (scrapedTitle.isBlank()) scrapedTitle = foundMovie?.title ?: title
         }
 
         if (synopsis.isBlank()) {
@@ -576,7 +583,9 @@ class IsaidubProvider : MainAPI() {
         }
 
         var links = emptyList<Pair<String, String>>()
-        if (url.contains("isaidub.guru") && !url.contains("/download/")) {
+        
+        // FIX: Replaced strict 'isaidub.guru' checking with a flexible check that adapts to '.ceo' and future domains
+        if (url.contains("isaidub", ignoreCase = true) && !url.contains("/download/", ignoreCase = true)) {
             links = extractIsaidubLinks(doc, url)
             if (links.isEmpty()) {
                 links = extractDownloadLinks(doc, url)
@@ -688,8 +697,17 @@ class IsaidubProvider : MainAPI() {
             val a = div.selectFirst("a[href]") ?: continue
             val text = a.text().trim()
             val href = a.attr("href")
+            val lowText = text.lowercase()
+            
             if (text.isBlank() || href.isBlank()) continue
-            if (text.lowercase().contains("sample")) continue
+            
+            // Strict Filtering out for web series folders and samples
+            if (lowText.contains("sample") || 
+                lowText.contains("web series") || 
+                lowText.contains("season") || 
+                lowText.contains("episode")) {
+                continue
+            }
             
             val fullUrl = resolveUrl(baseUrl, href)
             val low = fullUrl.lowercase().trimEnd('/')
