@@ -151,12 +151,15 @@ class StreamHubProvider : MainAPI() {
                 this.logoUrl            = parsedLogo
             }
         } else {
-            val episodes = mutableListOf<Episode>()
-            details.seasons?.filter { (it.seasonNumber ?: 0) > 0 }?.forEach { season ->
-                val sNum   = season.seasonNumber ?: return@forEach
+            val validSeasons = details.seasons?.filter { (it.seasonNumber ?: 0) > 0 } ?: emptyList()
+            val lastSeason   = validSeasons.maxOfOrNull { it.seasonNumber ?: 0 } ?: 1
+            val episodes     = mutableListOf<Episode>()
+            validSeasons.forEach { season ->
+                val sNum    = season.seasonNumber ?: return@forEach
                 val epCount = season.episodeCount ?: 0
                 for (epNum in 1..epCount) {
-                    val epUrl = "$mainUrl/tv/$tmdbId/$sNum/$epNum?imdb=$imdbId"
+                    // Encode lastSeason into the URL so loadLinks can pass it to Kisskh
+                    val epUrl = "$mainUrl/tv/$tmdbId/$sNum/$epNum?imdb=$imdbId&ls=$lastSeason"
                     episodes.add(newEpisode(epUrl) {
                         this.name    = "Episode $epNum"
                         this.season  = sNum
@@ -188,6 +191,7 @@ class StreamHubProvider : MainAPI() {
         val season    = Regex("""/tv/\d+/(\d+)""").find(cleanData)?.groupValues?.get(1)?.toIntOrNull() ?: 1
         val episode   = Regex("""/tv/\d+/\d+/(\d+)""").find(cleanData)?.groupValues?.get(1)?.toIntOrNull() ?: 1
         val imdbId    = data.substringAfter("imdb=", "").substringBefore("&").takeIf { it.isNotBlank() && it != "null" }
+        val lastSeason = data.substringAfter("ls=", "").substringBefore("&").toIntOrNull()
         val embedData = "$mainUrl/${if (isMovie) "movie" else "tv"}/$tmdbId" + (if (!isMovie) "/$season/$episode" else "")
 
         val metaUrl = if (isMovie) "$tmdbBase/movie/$tmdbId?api_key={API_KEY}" else "$tmdbBase/tv/$tmdbId?api_key={API_KEY}"
@@ -203,7 +207,14 @@ class StreamHubProvider : MainAPI() {
                 async { Movies111Extractor.getStream(embedData, callback) },
                 async { VidcoreExtractor.getStream(embedData, callback) },
                 async { VidlinkExtractor.getStream(embedData, callback) },
-                async { KisskhExtractor.getStream(cleanTitle, season, episode, isMovie, callback, mappedSubCallback) }
+                async { KisskhExtractor.getStream(
+                    title      = cleanTitle,
+                    season     = if (isMovie) null else season,
+                    episode    = if (isMovie) null else episode,
+                    lastSeason = lastSeason,
+                    subtitleCallback = mappedSubCallback,
+                    callback   = callback
+                ) }
             )
 
             val subJobs = listOf(
