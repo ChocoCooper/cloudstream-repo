@@ -9,7 +9,6 @@ import com.lagradost.cloudstream3.utils.INFER_TYPE
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import com.lagradost.cloudstream3.utils.newSubtitleFile
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import okhttp3.Interceptor
@@ -201,7 +200,8 @@ object KisskhExtractor {
             // 6. Deliver subtitles ─────────────────────────────────────────────
             subResponse?.forEach { sub ->
                 val lang = getLanguage(sub.label ?: "Unknown")
-                subtitleCallback.invoke(newSubtitleFile(lang, sub.src ?: return@forEach))
+                val src = sub.src ?: return@forEach
+                subtitleCallback.invoke(SubtitleFile(lang, src))
             }
 
             return true
