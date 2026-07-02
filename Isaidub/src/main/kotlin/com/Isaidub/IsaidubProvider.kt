@@ -94,6 +94,69 @@ class IsaidubProvider : MainAPI() {
         return null
     }
 
+    /**
+     * Looks up a movie on TMDB by title (optionally constrained to a release year) and
+     * returns the best matching result plus the resolved release year.
+     *
+     * Returns Pair(null, year) if nothing usable was found, so callers can safely
+     * destructure the result without extra null checks on the Pair itself.
+     */
+    private suspend fun fetchTmdbTitle(title: String, year: String): Pair<SimpleTmdbMovie?, String> {
+        if (title.isBlank()) return Pair(null, year)
+
+        val encodedQuery = URLEncoder.encode(title, "UTF-8")
+
+        suspend fun search(withYear: Boolean): JSONArray? {
+            val json = fetchFromTmdb { apiKey ->
+                val yearParam = if (withYear && year.isNotBlank()) "&year=$year" else ""
+                "https://api.tmdb.org/3/search/movie?api_key=$apiKey&query=$encodedQuery$yearParam&language=en"
+            } ?: return null
+
+            return try {
+                JSONObject(json).optJSONArray("results")
+            } catch (e: Exception) {
+                null
+            }
+        }
+
+        // Try a year-constrained search first for a more precise match.
+        var results = if (year.isNotBlank()) search(withYear = true) else null
+
+        // Fall back to an unconstrained search if the year-scoped search found nothing.
+        if (results == null || results.length() == 0) {
+            results = search(withYear = false)
+        }
+
+        if (results == null || results.length() == 0) {
+            return Pair(null, year)
+        }
+
+        // Prefer the first result that actually has a poster (unusable without one),
+        // otherwise just take the top result.
+        var chosen: JSONObject? = null
+        for (i in 0 until results.length()) {
+            val candidate = results.getJSONObject(i)
+            if (candidate.optString("poster_path", "").isNotBlank()) {
+                chosen = candidate
+                break
+            }
+        }
+        if (chosen == null) chosen = results.optJSONObject(0)
+
+        val item = chosen ?: return Pair(null, year)
+
+        val posterPath  = item.optString("poster_path", "")
+        val overview    = item.optString("overview", "")
+        val releaseDate = item.optString("release_date", "")
+        val resolvedYear = releaseDate.substringBefore("-").ifBlank { year }
+        val resolvedTitle = item.optString("title", title)
+
+        return Pair(
+            SimpleTmdbMovie(resolvedTitle, posterPath, overview, releaseDate),
+            resolvedYear
+        )
+    }
+
     override val mainPage = mainPageOf(
         "$mainUrl/tamil-yearly-dubbed-movies/"  to "New Tamil Dubbed Movies",
         "$mainUrl/tamil-action-dubbed-movies/"  to "Tamil Dubbed Action Movies",
