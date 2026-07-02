@@ -1,4 +1,4 @@
-package com.dubstamil
+package com.isaidub
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
@@ -24,8 +24,8 @@ data class SimpleTmdbMovie(
 
 class IsaidubProvider : MainAPI() {
 
-    override var mainUrl        = "https://isaidub.guru"
-    override var name           = "DubsTamil"
+    override var mainUrl        = "https://isaidub.ceo"
+    override var name           = "Isaidub"
     override val supportedTypes = setOf(TvType.Movie)
     override var lang           = "ta"
     override val hasMainPage    = true
@@ -219,7 +219,7 @@ class IsaidubProvider : MainAPI() {
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
         
         val jsonResponse = fetchFromTmdb { apiKey ->
-            "https://api.tmdb.org/3/search/movie?api_key=$apiKey&query=$encodedQuery&language=ta"
+            "https://api.tmdb.org/3/search/movie?api_key=$apiKey&query=$encodedQuery&language=en"
         } ?: return emptyList()
 
         val searchResults = mutableListOf<SearchResponse>()
