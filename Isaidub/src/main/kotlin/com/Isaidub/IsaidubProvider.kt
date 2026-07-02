@@ -535,6 +535,7 @@ class IsaidubProvider : MainAPI() {
         return tokens
     }
 
+    // Pass visited history to prevent infinite loop regressions when navigating folders
     private suspend fun resolveAllLinks(
         url: String, 
         depth: Int, 
@@ -749,12 +750,13 @@ class IsaidubProvider : MainAPI() {
                 results.add(Pair(text, full))
             }
         }
+        
         val uniqueResults = mutableListOf<Pair<String, String>>()
         val seenUrls = mutableSetOf<String>()
         for (item in results) {
             if (!seenUrls.contains(item.second)) {
                 seenUrls.add(item.second)
-                uniqueLinks.add(item)
+                uniqueResults.add(item) // <--- FIXED THIS TYPO
             }
         }
         return uniqueResults
