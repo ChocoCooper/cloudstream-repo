@@ -418,13 +418,18 @@ class IsaidubProvider : MainAPI() {
             actualScrapedTitle = URLDecoder.decode(uri.getQueryParameter("t") ?: "Movie", "UTF-8")
         }
 
-        val links = resolveAllLinks(moviePageUrl, depth = 0)
-        if (links.isEmpty()) return false
+        val allLinks = resolveAllLinks(moviePageUrl, depth = 0)
+        if (allLinks.isEmpty()) return false
+
+        // Multiple download servers often mirror the exact same resolution (sometimes even
+        // the exact same file), which is why the same "Isaidub (720p)" source could show up
+        // several times. Collapse down to a single link per resolution label.
+        val links = allLinks.distinctBy { it.first }
 
         for (linkItem in links) {
             val label = linkItem.first
             val finalUrl = linkItem.second
-            val sourceName = "Isaidub ($label)"
+            val sourceName = "Isaidub ($label) \"$actualScrapedTitle\""
 
             val isM3u8 = finalUrl.contains(".m3u8")
 
