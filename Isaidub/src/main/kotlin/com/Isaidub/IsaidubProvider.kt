@@ -260,30 +260,7 @@ class IsaidubProvider : MainAPI() {
             }
         } catch (e: Exception) { }
 
-        if (searchResults.isEmpty()) {
-            val fallbackUrl = "$mainUrl/search.php?q=$encodedQuery"
-            try {
-                val document = app.get(fallbackUrl).document
-                val divs = document.select("div.f, div.f1")
-                for (div in divs) {
-                    val a = div.selectFirst("a")
-                    if (a != null) {
-                        val title = a.text().trim()
-                        val href = fixUrl(a.attr("href"))
-                        val lowTitle = title.lowercase()
-                        
-                        // Strict Web Series Filtering for Fallback Search
-                        if (title.isNotBlank() && href.isNotBlank() && 
-                            !lowTitle.contains("web series") && 
-                            !lowTitle.contains("season") && 
-                            !lowTitle.contains("episode")) {
-                            searchResults.add(newMovieSearchResponse(title, href, TvType.Movie))
-                        }
-                    }
-                }
-            } catch (e: Exception) {}
-        }
-
+        // Note: Removed native broken search fallback to prevent unneeded overhead.
         return searchResults
     }
 
@@ -317,7 +294,6 @@ class IsaidubProvider : MainAPI() {
                 plotStr = plotDeferred.await()
             }
             
-            // Fix: Do not return null here if movie not found. Let it gracefully show "no links" inside player
             moviePageUrl = foundMovie?.link ?: ""
             synopsis = plotStr
             
@@ -450,14 +426,13 @@ class IsaidubProvider : MainAPI() {
     private suspend fun findMoviePage(title: String, year: String): ScrapedMovie? {
         if (year.isBlank()) return null
 
-        val searchUrl = "$mainUrl/tamil-$year-dubbed-movies/"
-        var bestMatchMovie: ScrapedMovie? = null
-        var bestMatchScore = 0
-        
-        val targetTokens = tokenize("$title $year")
-        val targetTokenCount = targetTokens.size
+        val yearUrl = "$mainUrl/tamil-$year-dubbed-movies/"
+        var folderBestMovie: ScrapedMovie? = null
+        var folderBestScore = -1
+        val targetTokens = tokenize(title)
 
-        val firstPageData = scrapePage(searchUrl)
+        // Scrape the initial folder page
+        val firstPageData = scrapePage(yearUrl)
         val firstPageMovies = firstPageData.first
         val maxPage = firstPageData.second
 
@@ -468,23 +443,24 @@ class IsaidubProvider : MainAPI() {
             for (token in targetTokens) {
                 if (siteTokens.contains(token)) score++
             }
-            if (score > bestMatchScore) {
-                bestMatchScore = score
-                bestMatchMovie = movie
+            if (score > folderBestScore) {
+                folderBestScore = score
+                folderBestMovie = movie
             }
         }
 
-        if (bestMatchScore >= targetTokenCount) {
-            return bestMatchMovie
+        if (folderBestScore >= targetTokens.size) {
+            return folderBestMovie
         }
 
+        // Handle pagination scans inside the year folder fallback safely
         if (maxPage > 1) {
             val limit = if (maxPage > 10) 10 else maxPage
             val deferreds = mutableListOf<kotlinx.coroutines.Deferred<List<ScrapedMovie>>>()
             coroutineScope {
                 for (p in 2..limit) {
                     val def = async {
-                        val pageData = scrapePage("$searchUrl?get-page=$p")
+                        val pageData = scrapePage("$yearUrl?get-page=$p")
                         pageData.first
                     }
                     deferreds.add(def)
@@ -499,15 +475,15 @@ class IsaidubProvider : MainAPI() {
                     for (token in targetTokens) {
                         if (siteTokens.contains(token)) score++
                     }
-                    if (score > bestMatchScore) {
-                        bestMatchScore = score
-                        bestMatchMovie = movie
+                    if (score > folderBestScore) {
+                        folderBestScore = score
+                        folderBestMovie = movie
                     }
                 }
             }
         }
 
-        return bestMatchMovie
+        return folderBestMovie
     }
 
     private suspend fun scrapePage(url: String): Pair<List<ScrapedMovie>, Int> {
@@ -531,8 +507,7 @@ class IsaidubProvider : MainAPI() {
                     val a = div.selectFirst("a")
                     if (a != null) {
                         val t = a.text().trim()
-                        var l = a.attr("href")
-                        if (l.startsWith("/")) l = "$mainUrl$l"
+                        val l = resolveUrl(mainUrl, a.attr("href"))
                         if (t.isNotBlank() && l.isNotBlank()) {
                             parsedMovies.add(ScrapedMovie(t, l))
                         }
@@ -560,8 +535,18 @@ class IsaidubProvider : MainAPI() {
         return tokens
     }
 
-    private suspend fun resolveAllLinks(url: String, depth: Int): List<Pair<String, String>> {
-        if (depth > 15) return emptyList()
+    private suspend fun resolveAllLinks(
+        url: String, 
+        depth: Int, 
+        visited: Set<String> = emptySet()
+    ): List<Pair<String, String>> {
+        if (depth > 12) return emptyList()
+
+        val cleanUrl = url.lowercase().trimEnd('/')
+        if (visited.contains(cleanUrl)) return emptyList()
+        
+        val newVisited = visited.toMutableSet()
+        newVisited.add(cleanUrl)
 
         var html = ""
         var doc: org.jsoup.nodes.Document? = null
@@ -584,7 +569,6 @@ class IsaidubProvider : MainAPI() {
 
         var links = emptyList<Pair<String, String>>()
         
-        // FIX: Replaced strict 'isaidub.guru' checking with a flexible check that adapts to '.ceo' and future domains
         if (url.contains("isaidub", ignoreCase = true) && !url.contains("/download/", ignoreCase = true)) {
             links = extractIsaidubLinks(doc, url)
             if (links.isEmpty()) {
@@ -605,11 +589,11 @@ class IsaidubProvider : MainAPI() {
         }
 
         if (dlServer != null) {
-            return resolveAllLinks(dlServer.second, depth + 1)
+            return resolveAllLinks(dlServer.second, depth + 1, newVisited)
         }
 
         if (links.size == 1) {
-            return resolveAllLinks(links[0].second, depth + 1)
+            return resolveAllLinks(links[0].second, depth + 1, newVisited)
         }
 
         val deferreds = mutableListOf<kotlinx.coroutines.Deferred<List<Pair<String, String>>>>()
@@ -622,7 +606,7 @@ class IsaidubProvider : MainAPI() {
                         val res = extractResolution(label, linkUrl)
                         listOf(Pair(res, linkUrl))
                     } else {
-                        val resolvedLinks = resolveAllLinks(linkUrl, depth + 1)
+                        val resolvedLinks = resolveAllLinks(linkUrl, depth + 1, newVisited)
                         val formattedLinks = mutableListOf<Pair<String, String>>()
                         for (resolved in resolvedLinks) {
                             val lbl = resolved.first
@@ -692,16 +676,17 @@ class IsaidubProvider : MainAPI() {
         baseUrl: String
     ): List<Pair<String, String>> {
         val results = mutableListOf<Pair<String, String>>()
-        val divs = doc.select("div.f, div.bf")
+        val divs = doc.select("div.f, div.bf, div.f1") 
         for (div in divs) {
             val a = div.selectFirst("a[href]") ?: continue
-            val text = a.text().trim()
+            var text = a.text().trim()
             val href = a.attr("href")
+            
+            if (href.isBlank()) continue
+            if (text.isBlank()) text = a.attr("title").trim().ifBlank { "Folder" }
+            
             val lowText = text.lowercase()
             
-            if (text.isBlank() || href.isBlank()) continue
-            
-            // Strict Filtering out for web series folders and samples
             if (lowText.contains("sample") || 
                 lowText.contains("web series") || 
                 lowText.contains("season") || 
@@ -717,6 +702,7 @@ class IsaidubProvider : MainAPI() {
             
             results.add(Pair(text, fullUrl))
         }
+        
         val uniqueResults = mutableListOf<Pair<String, String>>()
         val seenUrls = mutableSetOf<String>()
         for (item in results) {
@@ -735,21 +721,27 @@ class IsaidubProvider : MainAPI() {
         val results = mutableListOf<Pair<String, String>>()
         val aTags = doc.select("a[href]")
         for (a in aTags) {
-            val text = a.text().trim()
+            var text = a.text().trim()
             val href = a.attr("href")
-            if (text.isBlank() || href.isBlank()) continue
+            
+            if (href.isBlank()) continue
+            if (text.isBlank()) text = a.attr("title").trim().ifBlank { "Download" }
+            
             val full = resolveUrl(baseUrl, href)
             val low  = full.lowercase()
             val lowT = text.lowercase()
             
             var matched = false
-            if (lowT.contains("download server") || lowT.contains("download")) {
+            
+            if (lowT.contains("download server") || lowT == "download" || lowT.contains("download file")) {
                 matched = true
             } else if (low.endsWith(".mp4") || low.endsWith(".mkv") || low.endsWith(".avi")) {
                 matched = true
             } else if (low.contains("download.php") || low.contains("dl.php")) {
                 matched = true
-            } else if (low.contains("dubpage.xyz") || low.contains("dubmv.xyz") || low.contains("dub.uptodub.ch")) {
+            } else if (low.contains("dubpage") || low.contains("dubmv") || low.contains("uptodub") || low.contains("dubshare")) {
+                matched = true
+            } else if (low.contains("/download/page/") || low.contains("/download/view/") || low.contains("/download/file/")) {
                 matched = true
             }
             
@@ -762,7 +754,7 @@ class IsaidubProvider : MainAPI() {
         for (item in results) {
             if (!seenUrls.contains(item.second)) {
                 seenUrls.add(item.second)
-                uniqueResults.add(item)
+                uniqueLinks.add(item)
             }
         }
         return uniqueResults
