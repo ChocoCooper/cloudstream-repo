@@ -146,7 +146,7 @@ class IsaidubProvider : MainAPI() {
                 val doc = scrapeSemaphore.withPermit { app.get(pageUrl, timeout = 15).document }
 
                 val candidates = mutableListOf<Pair<String, String>>()
-                val aTags = doc.select("div.f a")
+                val aTags = doc.select("div.f a, div.f1 a")
                 for (a in aTags) {
                     val title = a.text().trim()
                     var link  = a.attr("href")
@@ -260,7 +260,6 @@ class IsaidubProvider : MainAPI() {
             }
         } catch (e: Exception) { }
 
-        // Note: Removed native broken search fallback to prevent unneeded overhead.
         return searchResults
     }
 
@@ -437,18 +436,21 @@ class IsaidubProvider : MainAPI() {
         val maxPage = firstPageData.second
 
         for (movie in firstPageMovies) {
-            if (!movie.title.contains(year)) continue
             val siteTokens = tokenize(movie.title)
             var score = 0
             for (token in targetTokens) {
                 if (siteTokens.contains(token)) score++
             }
+            // Give a huge point boost if the correct year is in the title string
+            if (movie.title.contains(year)) score += 2 
+
             if (score > folderBestScore) {
                 folderBestScore = score
                 folderBestMovie = movie
             }
         }
 
+        // Return early if we got a perfect match on the first page!
         if (folderBestScore >= targetTokens.size) {
             return folderBestMovie
         }
@@ -469,12 +471,13 @@ class IsaidubProvider : MainAPI() {
             val otherPagesMovies = deferreds.awaitAll()
             for (pageMovies in otherPagesMovies) {
                 for (movie in pageMovies) {
-                    if (!movie.title.contains(year)) continue
                     val siteTokens = tokenize(movie.title)
                     var score = 0
                     for (token in targetTokens) {
                         if (siteTokens.contains(token)) score++
                     }
+                    if (movie.title.contains(year)) score += 2 
+
                     if (score > folderBestScore) {
                         folderBestScore = score
                         folderBestMovie = movie
@@ -502,7 +505,9 @@ class IsaidubProvider : MainAPI() {
             if (resp.isSuccessful) {
                 val doc = resp.document
                 val parsedMovies = mutableListOf<ScrapedMovie>()
-                val divs = doc.select("div.f")
+                
+                // FIXED: This used to ONLY be "div.f" which blinded us to exactly half of Isaidub's directory!
+                val divs = doc.select("div.f, div.f1, div.bf") 
                 for (div in divs) {
                     val a = div.selectFirst("a")
                     if (a != null) {
@@ -535,7 +540,6 @@ class IsaidubProvider : MainAPI() {
         return tokens
     }
 
-    // Pass visited history to prevent infinite loop regressions when navigating folders
     private suspend fun resolveAllLinks(
         url: String, 
         depth: Int, 
@@ -568,16 +572,16 @@ class IsaidubProvider : MainAPI() {
             return listOf(Pair(res, rawFinal))
         }
 
-        var links = emptyList<Pair<String, String>>()
+        val allRawLinks = mutableListOf<Pair<String, String>>()
         
+        // ADD BOTH: We shouldn't hide download links just because an internal folder link exists.
         if (url.contains("isaidub", ignoreCase = true) && !url.contains("/download/", ignoreCase = true)) {
-            links = extractIsaidubLinks(doc, url)
-            if (links.isEmpty()) {
-                links = extractDownloadLinks(doc, url)
-            }
-        } else {
-            links = extractDownloadLinks(doc, url)
+            allRawLinks.addAll(extractIsaidubLinks(doc, url))
         }
+        allRawLinks.addAll(extractDownloadLinks(doc, url))
+
+        // Dedup locally before traversing
+        val links = allRawLinks.distinctBy { it.second }.toMutableList()
 
         if (links.isEmpty()) return emptyList()
 
@@ -756,7 +760,7 @@ class IsaidubProvider : MainAPI() {
         for (item in results) {
             if (!seenUrls.contains(item.second)) {
                 seenUrls.add(item.second)
-                uniqueResults.add(item) // <--- FIXED THIS TYPO
+                uniqueResults.add(item) 
             }
         }
         return uniqueResults
