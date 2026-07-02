@@ -34,6 +34,12 @@ class IsaidubProvider : MainAPI() {
     private val tmdbSemaphore   = Semaphore(15)
     private val scrapeSemaphore = Semaphore(5)
 
+    // Standard headers to bypass basic Cloudflare/bot protections on Isaidub
+    private val baseHeaders = mapOf(
+        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
+    )
+
     private val masterTmdbKeys = listOf(
         "fb7bb23f03b6994dafc674c074d01761", "e55425032d3d0f371fc776f302e7c09b",
         "8301a21598f8b45668d5711a814f01f6", "8cf43ad9c085135b9479ad5cf6bbcbda",
@@ -103,7 +109,7 @@ class IsaidubProvider : MainAPI() {
         try {
             var targetUrl = sectionUrl
             if (sectionUrl.contains("yearly")) {
-                val doc = scrapeSemaphore.withPermit { app.get(sectionUrl, timeout = 15).document }
+                val doc = scrapeSemaphore.withPermit { app.get(sectionUrl, headers = baseHeaders, timeout = 15).document }
                 var resolved = ""
                 val aTags = doc.select("a[href]")
                 for (a in aTags) {
@@ -141,16 +147,22 @@ class IsaidubProvider : MainAPI() {
         while (collected.size < 12 && currentPage <= maxPages) {
             val pageUrl = if (currentPage == 1) targetBaseUrl else "$targetBaseUrl?get-page=$currentPage"
             try {
-                val doc = scrapeSemaphore.withPermit { app.get(pageUrl, timeout = 15).document }
+                val doc = scrapeSemaphore.withPermit { app.get(pageUrl, headers = baseHeaders, timeout = 15).document }
 
                 val candidates = mutableListOf<Pair<String, String>>()
-                val aTags = doc.select("div.container > div.f > a, div.container > div.f1 > a")
-                for (a in aTags) {
-                    val title = a.text().trim()
-                    var link  = a.attr("href")
-                    if (link.startsWith("/")) link = "$mainUrl$link"
+                
+                // CLASS-AGNOSTIC EXTRACTION: Finds movies no matter how deeply they are wrapped in tables
+                doc.select("a[href]").forEach { a ->
+                    val href = a.attr("href")
+                    if (!href.contains("/movie/", ignoreCase = true)) return@forEach
+                    
+                    val title = a.text().trim().ifBlank { a.attr("title").trim() }
+                    if (title.isBlank()) return@forEach
+                    
                     val low = title.lowercase()
-                    if (low.contains("web series") || low.contains("episode") || low.contains("season")) continue
+                    if (low.contains("web series") || low.contains("episode") || low.contains("season") || low.contains("sample")) return@forEach
+                    
+                    val link = resolveUrl(mainUrl, href)
                     candidates.add(Pair(title, link))
                 }
 
@@ -194,7 +206,7 @@ class IsaidubProvider : MainAPI() {
                     }
                 }
 
-                val maxPageStr = doc.selectFirst("div.pages-info span#totalPages")?.text()?.trim()
+                val maxPageStr = doc.selectFirst("span#totalPages")?.text()?.trim()
                 val maxPageNum = maxPageStr?.toIntOrNull() ?: 1
                 if (currentPage >= maxPageNum) break
 
@@ -343,7 +355,6 @@ class IsaidubProvider : MainAPI() {
             actualScrapedTitle = URLDecoder.decode(uri.getQueryParameter("t") ?: "Movie", "UTF-8")
         }
 
-        // Start crawling recursively at depth 0
         val links = resolveAllLinks(moviePageUrl, depth = 0)
         if (links.isEmpty()) return false
 
@@ -368,51 +379,7 @@ class IsaidubProvider : MainAPI() {
         return true
     }
 
-    private suspend fun fetchTmdbTitle(
-        rawTitle: String,
-        fallbackYear: String = ""
-    ): Pair<SimpleTmdbMovie?, String> {
-        val clean     = rawTitle.replace("isaiDub.me", "").replace(Regex("-"), " ").trim()
-        val yearMatch = Regex("\\b(19|20)\\d{2}\\b").find(clean)
-        val usedYear  = yearMatch?.value ?: fallbackYear
-        val searchTitle = if (yearMatch != null) clean.replace(yearMatch.value, "").trim() else clean
-        val encoded = URLEncoder.encode(searchTitle, "UTF-8")
-
-        val jsonResponse = fetchFromTmdb { apiKey ->
-            var url = "https://api.tmdb.org/3/search/movie?api_key=$apiKey&query=$encoded"
-            if (usedYear.isNotBlank()) {
-                url += "&primary_release_year=$usedYear"
-            }
-            url
-        }
-
-        if (jsonResponse != null) {
-            try {
-                val jsonObject = JSONObject(jsonResponse)
-                val resultsArray = jsonObject.optJSONArray("results") ?: JSONArray()
-                
-                for (i in 0 until resultsArray.length()) {
-                    val item = resultsArray.getJSONObject(i)
-                    val poster = item.optString("poster_path", "")
-                    val rDate = item.optString("release_date", "")
-                    val isUnreleased = rDate.isBlank()
-                    
-                    if (poster.isNotBlank() && !isUnreleased) {
-                        val movie = SimpleTmdbMovie(
-                            title = item.optString("title", ""),
-                            posterPath = poster,
-                            overview = item.optString("overview", ""),
-                            releaseDate = rDate
-                        )
-                        return Pair(movie, usedYear)
-                    }
-                }
-            } catch (e: Exception) {}
-        }
-        return Pair(null, usedYear)
-    }
-
-    // Explicitly navigates the tamil-{year}-dubbed-movies folder as requested
+    // Navigates the tamil-{year}-dubbed-movies folder ignoring nested DOM tables
     private suspend fun findMoviePage(title: String, year: String): ScrapedMovie? {
         if (year.isBlank()) return null
         val yearUrl = "$mainUrl/tamil-$year-dubbed-movies/"
@@ -423,21 +390,27 @@ class IsaidubProvider : MainAPI() {
 
         var maxPage = 1
         try {
-            val doc = scrapeSemaphore.withPermit { app.get(yearUrl, timeout = 10).document }
-            val maxPageStr = doc.selectFirst("div.pages-info span#totalPages")?.text()?.trim()
+            val doc = scrapeSemaphore.withPermit { app.get(yearUrl, headers = baseHeaders, timeout = 10).document }
+            // Using a safer lookup just in case the wrapper class changes
+            val maxPageStr = doc.selectFirst("span#totalPages")?.text()?.trim()
             if (maxPageStr != null) {
                 maxPage = maxPageStr.toIntOrNull() ?: 1
             }
         } catch (e: Exception) {}
 
-        // Reusable scan function
         suspend fun scanPage(url: String) {
             try {
-                val pageDoc = scrapeSemaphore.withPermit { app.get(url, timeout = 10).document }
-                // Searching precisely in div.container -> div.f as requested
-                pageDoc.select("div.container > div.f > a, div.container > div.f1 > a").forEach { a ->
-                    val movieTitle = a.text().trim()
+                val pageDoc = scrapeSemaphore.withPermit { app.get(url, headers = baseHeaders, timeout = 10).document }
+                
+                // CLASS-AGNOSTIC EXTRACTION
+                pageDoc.select("a[href]").forEach { a ->
                     val href = resolveUrl(mainUrl, a.attr("href"))
+                    
+                    // All valid movie targets on Isaidub exist under the /movie/ directory
+                    if (!href.contains("/movie/", ignoreCase = true)) return@forEach
+                    
+                    val movieTitle = a.text().trim().ifBlank { a.attr("title").trim() }
+                    if (movieTitle.isBlank() || movieTitle.lowercase().contains("sample")) return@forEach
 
                     val siteTokens = tokenize(movieTitle)
                     var score = 0
@@ -457,12 +430,11 @@ class IsaidubProvider : MainAPI() {
         // Scan page 1
         scanPage(yearUrl)
 
-        // Return early if perfect match
         if (folderBestScore >= targetTokens.size && folderBestMovie != null) {
             return folderBestMovie
         }
 
-        // Iterate through pagination if needed (up to 15 pages to save memory)
+        // Scan pagination safely
         if (maxPage > 1) {
             val limit = if (maxPage > 15) 15 else maxPage
             coroutineScope {
@@ -485,7 +457,7 @@ class IsaidubProvider : MainAPI() {
         return tokens
     }
 
-    // Core recursive web crawler - STRICTLY adheres to requested DOM structures
+    // Core Heuristic Web Crawler (Bypasses class rules entirely, acts like a human clicking words)
     private suspend fun resolveAllLinks(
         url: String, 
         depth: Int, 
@@ -501,12 +473,11 @@ class IsaidubProvider : MainAPI() {
         var html = ""
         var responseUrl = url
         try {
-            val response = scrapeSemaphore.withPermit { app.get(url, timeout = 15, referer = mainUrl) }
+            val response = scrapeSemaphore.withPermit { app.get(url, headers = baseHeaders, referer = mainUrl, timeout = 15) }
             if (!response.isSuccessful) return emptyList()
             html = response.text
             responseUrl = response.url
             
-            // If the server directly returned a stream URL natively
             if (isFinalUrl(responseUrl)) {
                 val res = extractResolution("", responseUrl)
                 return listOf(Pair(res, responseUrl))
@@ -518,73 +489,99 @@ class IsaidubProvider : MainAPI() {
         val doc = Jsoup.parse(html)
         val results = mutableListOf<Pair<String, String>>()
 
-        // Step 1: Follow Meta Refresh (Often used by dubpage, dubmv, dubshare)
+        // Step 1: Follow Invisible Auto-Redirects
         val metaRefresh = doc.selectFirst("meta[http-equiv=refresh]")
         if (metaRefresh != null) {
             val content = metaRefresh.attr("content")
             val urlMatch = Regex("url=(.+)", RegexOption.IGNORE_CASE).find(content)
             if (urlMatch != null) {
-                val nextUrl = urlMatch.groupValues[1].trim('\'', '"', ' ')
-                results.addAll(resolveAllLinks(resolveUrl(url, nextUrl), depth + 1, newVisited))
-                if (results.isNotEmpty()) return results.distinctBy { it.second }
-            }
-        }
-
-        // Step 2: Target the Final Download Page -> Download Servers (div.dlink a)
-        // Path requested: div.bf -> div.songinfo -> div.download -> div.dlink -> a
-        val dLinks = doc.select("div.bf div.songinfo div.download div.dlink a")
-        if (dLinks.isNotEmpty()) {
-            coroutineScope {
-                val deferreds = dLinks.map { link ->
-                    async {
-                        val text = link.text().trim().lowercase()
-                        val href = resolveUrl(url, link.attr("href"))
-                        if (text.contains("download server")) {
-                            resolveAllLinks(href, depth + 1, newVisited)
-                        } else {
-                            emptyList()
-                        }
-                    }
+                val nextUrl = resolveUrl(responseUrl, urlMatch.groupValues[1].trim('\'', '"', ' '))
+                if (!nextUrl.lowercase().contains("sample")) {
+                    results.addAll(resolveAllLinks(nextUrl, depth + 1, newVisited))
+                    if (results.isNotEmpty()) return results.distinctBy { it.second }
                 }
-                deferreds.awaitAll().forEach { results.addAll(it) }
             }
-            if (results.isNotEmpty()) return results.distinctBy { it.second }
         }
 
-        // Step 3: Target Format / Quality Folders (div.f a, div.f1 a)
-        // Path requested: body -> div.container -> div.f -> a
-        val formatLinks = doc.select("div.container > div.f > a, div.container > div.f1 > a")
-        if (formatLinks.isNotEmpty()) {
-            val validLinks = formatLinks.filter { a ->
-                val text = a.text().lowercase()
-                val href = a.attr("href").lowercase()
-                // IGNORE ALL SAMPLES EXACTLY AS REQUESTED
-                !text.contains("sample") && !href.contains("sample")
+        // Step 2: Grab links purely based on what humans would read on the buttons
+        val linksToFollow = mutableSetOf<Pair<String, String>>()
+        
+        doc.select("a[href]").forEach { a ->
+            val text = a.text().trim().ifBlank { a.attr("title").trim() }
+            val href = a.attr("href").trim()
+            if (href.isBlank() || href == "#" || href.startsWith("javascript:")) return@forEach
+            
+            val lowText = text.lowercase()
+            val lowHref = href.lowercase()
+            
+            // STRICT NEGATIVE FILTERS
+            if (lowText.contains("sample") || lowHref.contains("sample")) return@forEach
+            if (lowHref.contains("?get-page=") || lowHref.contains("/category/")) return@forEach
+            
+            val fullUrl = resolveUrl(responseUrl, href)
+            val cleanFullUrl = fullUrl.lowercase().trimEnd('/')
+            if (cleanFullUrl == responseUrl.lowercase().trimEnd('/')) return@forEach
+            
+            // POSITIVE FILTERS
+            val isFormat = lowText.contains("original") || lowText.contains("hdrip") || 
+                           lowText.contains("bdrip") || lowText.contains("720p") || 
+                           lowText.contains("1080p") || lowText.contains("360p") || 
+                           lowText.contains("480p") || lowText.contains("dvdsrc") || 
+                           lowText.contains("mp4 hd") || lowText.contains(" hd ") || 
+                           lowText.endsWith(" hd") || lowText.contains("hd)") || lowText.contains("hd (")
+                           
+            val isMovieFolder = lowHref.contains("/movie/")
+            val isServer = lowText.contains("download server") || lowText == "download" || lowText.contains("download file")
+            val isRedirector = lowHref.contains("download/page/") || lowHref.contains("download/view/") || 
+                               lowHref.contains("download/file/") || lowHref.contains("dubpage") || 
+                               lowHref.contains("dubmv") || lowHref.contains("uptodub") || 
+                               lowHref.contains("dubshare") || lowHref.contains("download.php") || 
+                               lowHref.contains("dl.php")
+            
+            if (isFormat || isMovieFolder || isServer || isRedirector || isFinalUrl(fullUrl)) {
+                linksToFollow.add(Pair(text.ifBlank { "Link" }, fullUrl))
             }
-
-            coroutineScope {
-                val deferreds = validLinks.map { link ->
-                    async {
-                        val href = resolveUrl(url, link.attr("href"))
-                        resolveAllLinks(href, depth + 1, newVisited)
-                    }
-                }
-                deferreds.awaitAll().forEach { results.addAll(it) }
-            }
-            if (results.isNotEmpty()) return results.distinctBy { it.second }
         }
 
-        // Step 4: Bruteforce Regex Fallback for External Links buried in HTML
+        // Step 3: Fallback regex to bypass DOM completely
         val regex = Regex("""https?://[^"'\s<>]*(?:dubpage|dubmv|uptodub|dubshare|download\.php|\.mp4|\.mkv)[^"'\s<>]*""", RegexOption.IGNORE_CASE)
         regex.findAll(html).forEach { match ->
             val fullUrl = match.value
             if (!fullUrl.lowercase().contains("sample")) {
-                if (isFinalUrl(fullUrl)) {
-                    results.add(Pair(extractResolution("", fullUrl), fullUrl))
-                } else {
-                    results.addAll(resolveAllLinks(fullUrl, depth + 1, newVisited))
+                linksToFollow.add(Pair("Direct", fullUrl))
+            }
+        }
+
+        // Optimization: Drill down into download servers natively before branching back to formats
+        val serverOrFinalLinks = linksToFollow.filter { 
+            it.first.lowercase().contains("download server") || 
+            isFinalUrl(it.second) || 
+            it.second.lowercase().contains("dubpage") || 
+            it.second.lowercase().contains("dubmv") || 
+            it.second.lowercase().contains("uptodub") || 
+            it.second.lowercase().contains("dubshare") || 
+            it.second.lowercase().contains("download.php")
+        }
+        
+        val targets = if (serverOrFinalLinks.isNotEmpty()) serverOrFinalLinks else linksToFollow.toList()
+
+        coroutineScope {
+            val deferreds = targets.map { linkPair ->
+                async {
+                    val lbl = linkPair.first
+                    val u = linkPair.second
+                    
+                    if (isFinalUrl(u)) {
+                        listOf(Pair(extractResolution(lbl, u), u))
+                    } else {
+                        val innerLinks = resolveAllLinks(u, depth + 1, newVisited)
+                        innerLinks.map { resolved ->
+                            Pair(extractResolution(lbl, resolved.second).ifBlank { resolved.first }, resolved.second)
+                        }
+                    }
                 }
             }
+            deferreds.awaitAll().forEach { results.addAll(it) }
         }
 
         return results.distinctBy { it.second }
@@ -608,8 +605,7 @@ class IsaidubProvider : MainAPI() {
         val low = url.lowercase()
         return low.endsWith(".mp4") || low.endsWith(".mkv") || low.endsWith(".avi") ||
                low.endsWith(".mov") || low.endsWith(".webm") ||
-               low.contains("download.php?dl=") || low.contains("download/file/") ||
-               low.contains("dub.uptodub.ch/download.php")
+               low.contains("download.php") || low.contains("dl.php")
     }
 
     private fun resolveUrl(base: String, href: String): String {
