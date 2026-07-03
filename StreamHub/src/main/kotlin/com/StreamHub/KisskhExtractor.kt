@@ -13,15 +13,16 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import okhttp3.Interceptor
 import okhttp3.ResponseBody.Companion.toResponseBody
+import java.net.URLEncoder
 import java.util.Base64
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 object KisskhExtractor {
-    private const val mainUrl = "https://kisskh.nl"
+    // Made a var so it can be updated easily if the domain changes
+    var mainUrl = "https://kisskh.nl"
     private const val encDecApi = "https://enc-dec.app/api/enc-kisskh"
-    // Anti-timeout user agent exactly mimicking Python's requests session
     private const val USER_AGENT = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36"
 
     // ── Decryption keys (Used to decrypt internal subtitle txt content) ───────
@@ -43,7 +44,10 @@ object KisskhExtractor {
     )
     private data class KisskhEpisodes(
         @param:JsonProperty("id")     val id: Int?,
-        @param:JsonProperty("number") val number: Double?, // Changed to Double to safely parse "1.5" formats
+        @param:JsonProperty("number") val number: Double?, 
+    )
+    private data class EncDecResponse(
+        @param:JsonProperty("result") val result: String?,
     )
     private data class KisskhSources(
         @param:JsonProperty("Video")      val video: String?,
@@ -66,56 +70,70 @@ object KisskhExtractor {
         try {
             val slug = title.createSlug() ?: return false
             val type = if (season == null) "2" else "1"
+            val encodedTitle = URLEncoder.encode(title, "UTF-8")
 
-            // 1. Search Kisskh (Using safe params map to properly format URL natively in OkHttp)
+            // 1. Search Kisskh
             val searchResText = app.get(
-                "$mainUrl/api/DramaList/Search",
-                params = mapOf("q" to title, "type" to type),
+                "$mainUrl/api/DramaList/Search?q=$encodedTitle&type=$type",
                 headers = mapOf("User-Agent" to USER_AGENT),
-                referer = "$mainUrl/"
+                referer = "$mainUrl/",
+                timeout = 15L
             ).text
 
             val searchRes = tryParseJson<List<KisskhResults>>(searchResText) ?: return false
             if (searchRes.isEmpty()) return false
 
-            // 2. Match result (Ported from python s.py match_result + Hardened for same-title years)
+            // 2. Match result (Hardened for identical titles with different years e.g. A Love So Beautiful)
             var matchedId: Int? = null
             var matchedTitle: String? = null
+
             if (searchRes.size == 1) {
                 matchedId = searchRes.first().id
                 matchedTitle = searchRes.first().title
             } else {
-                // Strategy 1: Strict match incorporating title slug and year/season rules
-                val match = searchRes.find { item ->
-                    val actualTitle = item.title ?: return@find false
-                    val tSlug = actualTitle.createSlug() ?: return@find false
-                    if (season == null) {
-                        // For movies, if slugs are identical, ensure the year matches if present in the title
-                        if (tSlug == slug) {
-                            if (year != null && searchRes.any { it.title?.contains(year) == true }) {
-                                actualTitle.contains(year)
-                            } else true
-                        } else false
+                var exactMatch: KisskhResults? = null
+                var fallbackMatch: KisskhResults? = null
+
+                for (item in searchRes) {
+                    val actualTitle = item.title ?: continue
+                    val tSlug = actualTitle.createSlug() ?: continue
+                    
+                    val isSlugMatch = if (season == null) {
+                        tSlug == slug || tSlug.contains(slug)
                     } else if (season == 1) {
-                        tSlug == slug || (tSlug.contains(slug) && (year != null && actualTitle.contains(year) || actualTitle.contains("season 1", ignoreCase = true)))
+                        tSlug == slug || tSlug.contains(slug)
                     } else {
                         tSlug.contains(slug) && actualTitle.contains("season $season", ignoreCase = true)
                     }
-                } ?: searchRes.find { it.title.equals(title, ignoreCase = true) }
+
+                    if (isSlugMatch) {
+                        if (fallbackMatch == null || tSlug == slug) {
+                            fallbackMatch = item // Save the closest text match
+                        }
+                        // Priority 1: Exact Year Match
+                        if (year != null && actualTitle.contains(year)) {
+                            exactMatch = item
+                            break
+                        }
+                    }
+                }
+
+                val match = exactMatch ?: fallbackMatch ?: searchRes.find { it.title.equals(title, ignoreCase = true) }
                 matchedId = match?.id
                 matchedTitle = match?.title
             }
 
             if (matchedId == null) return false
 
-            // 3. Detail fetch ──────────────────────────────────────────────────
+            // 3. Detail fetch
             val detailResText = app.get(
                 "$mainUrl/api/DramaList/Drama/$matchedId",
                 params = mapOf("isq" to "false"),
                 headers = mapOf("User-Agent" to USER_AGENT),
-                referer = "$mainUrl/Drama/${getKisskhTitle(matchedTitle)}?id=$matchedId"
+                referer = "$mainUrl/Drama/${getKisskhTitle(matchedTitle)}?id=$matchedId",
+                timeout = 15L
             ).text
-
+            
             val detailRes = tryParseJson<KisskhDetail>(detailResText) ?: return false
 
             val epsId  = if (season == null) {
@@ -124,65 +142,65 @@ object KisskhExtractor {
                 detailRes.episodes?.find { it.number?.toInt() == episode }?.id
             } ?: return false
 
-            // 4. Fetch kkeys in parallel using Python decryption API solution ──
+            // 4. Fetch kkeys in parallel using Python decryption API solution
             val (kkeyVid, kkeySub) = coroutineScope {
-                val videoKeyJob = async {
+                val videoKey = async {
                     try {
-                        val res = app.get(
+                        app.get(
                             encDecApi,
                             params = mapOf("text" to epsId.toString(), "type" to "vid"),
                             headers = mapOf("User-Agent" to USER_AGENT),
-                            referer = "https://kisskh.nl"
-                        ).text
-                        tryParseJson<Map<String, String>>(res)?.get("result")
-                    } catch (e: Exception) { null }
+                            referer = "$mainUrl/",
+                            timeout = 15L
+                        ).parsedSafe<EncDecResponse>()?.result
+                    } catch (_: Exception) { null }
                 }
-                val subKeyJob = async {
+                val subKey = async {
                     try {
-                        val res = app.get(
+                        app.get(
                             encDecApi,
                             params = mapOf("text" to epsId.toString(), "type" to "sub"),
                             headers = mapOf("User-Agent" to USER_AGENT),
-                            referer = "https://kisskh.nl"
-                        ).text
-                        tryParseJson<Map<String, String>>(res)?.get("result")
-                    } catch (e: Exception) { null }
+                            referer = "$mainUrl/",
+                            timeout = 15L
+                        ).parsedSafe<EncDecResponse>()?.result
+                    } catch (_: Exception) { null }
                 }
-                videoKeyJob.await() to subKeyJob.await()
+                videoKey.await() to subKey.await()
             }
 
             if (kkeyVid == null) return false
 
-            // 5. Fetch sources and subtitles in parallel ───────────────────────
+            // 5. Fetch sources and subtitles in parallel
+            val encodedKkeyVid = URLEncoder.encode(kkeyVid, "UTF-8")
             val (sourcesData, subResponse) = coroutineScope {
-                val sourcesJob = async {
+                val sources = async {
                     try {
-                        val res = app.get(
-                            "$mainUrl/api/DramaList/Episode/$epsId.png",
-                            params = mapOf("err" to "false", "ts" to "", "time" to "", "kkey" to kkeyVid),
+                        app.get(
+                            "$mainUrl/api/DramaList/Episode/$epsId.png?err=false&ts=&time=&kkey=$encodedKkeyVid",
                             headers = mapOf("User-Agent" to USER_AGENT),
-                            referer = mainUrl
-                        ).text
-                        tryParseJson<KisskhSources>(res)
-                    } catch (e: Exception) { null }
+                            referer = "$mainUrl/",
+                            timeout = 15L
+                        ).parsedSafe<KisskhSources>()
+                    } catch (_: Exception) { null }
                 }
-                val subsJob = async {
+                val subs = async {
                     if (kkeySub != null) {
                         try {
-                            val res = app.get(
-                                "$mainUrl/api/Sub/$epsId",
-                                params = mapOf("kkey" to kkeySub),
+                            val encodedKkeySub = URLEncoder.encode(kkeySub, "UTF-8")
+                            app.get(
+                                "$mainUrl/api/Sub/$epsId?kkey=$encodedKkeySub",
                                 headers = mapOf("User-Agent" to USER_AGENT),
-                                referer = mainUrl
-                            ).text
-                            tryParseJson<List<KisskhSubtitle>>(res)
-                        } catch (e: Exception) { null }
+                                referer = "$mainUrl/",
+                                timeout = 15L
+                            ).parsedSafe<List<KisskhSubtitle>>()
+                        } catch (_: Exception) { null }
                     } else null
                 }
-                sourcesJob.await() to subsJob.await()
+                sources.await() to subs.await()
             }
 
-            // 6. Deliver video links ───────────────────────────────────────────
+            // 6. Deliver video links
             sourcesData?.let { src ->
                 listOf(src.video, src.thirdParty).forEach { link ->
                     val safeLink = link ?: return@forEach
@@ -216,17 +234,15 @@ object KisskhExtractor {
                 }
             }
 
-            // 7. Deliver subtitles ─────────────────────────────────────────────
+            // 7. Deliver subtitles
             subResponse?.forEach { sub ->
                 val lang = getLanguage(sub.label ?: "Unknown")
                 val src = sub.src ?: return@forEach
-                // Mapped subtitle callback in Provider will filter for "English" automatically
                 subtitleCallback.invoke(SubtitleFile(lang, src))
             }
 
             return true
         } catch (e: Exception) {
-            e.printStackTrace()
             return false
         }
     }
@@ -258,8 +274,10 @@ object KisskhExtractor {
         val request  = chain.request()
         val response = chain.proceed(request)
         val url      = response.request.url.toString()
+        val domainName = mainUrl.substringAfter("://").substringBefore("/")
 
-        if (url.contains("kisskh") && url.contains(".txt")) {
+        // Ensures the interceptor targets the dynamic mainUrl host
+        if (url.contains(domainName) && url.contains(".txt")) {
             val mediaType    = response.body?.contentType()
             val responseBody = response.body?.string() ?: return@Interceptor response
 
