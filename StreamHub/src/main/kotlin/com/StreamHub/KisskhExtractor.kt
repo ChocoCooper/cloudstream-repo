@@ -10,6 +10,7 @@ import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import okhttp3.Interceptor
 import okhttp3.ResponseBody.Companion.toResponseBody
@@ -83,70 +84,84 @@ object KisskhExtractor {
             val searchRes = tryParseJson<List<KisskhResults>>(searchResText) ?: return false
             if (searchRes.isEmpty()) return false
 
-            // 2. Match result (scores every candidate across the FULL result set —
-            //    never short-circuits on the first loose title match — and weighs
-            //    year alignment heavily so remakes/re-releases sharing a base title,
-            //    e.g. "Love So Beautiful" 2017 vs 2024, aren't confused. title/year
-            //    here are the clean values TMDB (via the provider) already resolved.)
-            var matchedId: Int? = null
-            var matchedTitle: String? = null
+            // 2 & 3. Match + detail fetch, combined. Kisskh's search-result titles are
+            // often just the bare name with no year/country in them at all (unlike a
+            // scraped page title), so scoring against that short text can't reliably
+            // tell remakes/re-releases apart, e.g. "Love So Beautiful" 2017 vs 2024.
+            // Instead: pull every plausibly-matching candidate's real Drama detail
+            // page (which we need anyway for the episode list) and check its FULL
+            // content for the year — release dates, descriptions, etc. almost always
+            // carry it even when the short search listing doesn't. This also removes
+            // a redundant network call, since the winning candidate's detail response
+            // is reused directly below instead of being fetched a second time.
+            val baseCandidates = searchRes.filter { item ->
+                val actualTitle = item.title ?: return@filter false
+                val tSlug = actualTitle.createSlug() ?: return@filter false
+                tSlug == slug || tSlug.contains(slug) || slug.contains(tSlug)
+            }.ifEmpty { searchRes } // nothing loosely matched the title -> consider everything rather than failing outright
 
-            if (searchRes.size == 1) {
-                matchedId = searchRes.first().id
-                matchedTitle = searchRes.first().title
-            } else {
-                var bestMatch: KisskhResults? = null
-                var bestScore = Int.MIN_VALUE
+            data class Candidate(val result: KisskhResults, val detailText: String, val detail: KisskhDetail?)
 
-                for (item in searchRes) {
-                    val actualTitle = item.title ?: continue
-                    val tSlug = actualTitle.createSlug() ?: continue
-
-                    val exactSlugMatch = tSlug == slug
-                    val looseSlugMatch = !exactSlugMatch && (tSlug.contains(slug) || slug.contains(tSlug))
-                    if (!exactSlugMatch && !looseSlugMatch) continue // not even the same show, skip
-
-                    var score = if (exactSlugMatch) 40 else 10
-
-                    // Strong signal: year match. Checked against both the raw title text
-                    // AND the normalized slug (which retains digits), since Kisskh formats
-                    // years inconsistently ("(2024)", "- 2024", or sometimes omits them).
-                    if (year != null && (actualTitle.contains(year) || tSlug.contains(year))) {
-                        score += 100
+            val candidates: List<Candidate> = coroutineScope {
+                baseCandidates.take(6).map { item ->
+                    async {
+                        val id = item.id ?: return@async null
+                        val text = try {
+                            app.get(
+                                "$mainUrl/api/DramaList/Drama/$id",
+                                params = mapOf("isq" to "false"),
+                                headers = mapOf("User-Agent" to USER_AGENT),
+                                referer = "$mainUrl/Drama/${getKisskhTitle(item.title)}?id=$id",
+                                timeout = 15L
+                            ).text
+                        } catch (_: Exception) { null } ?: return@async null
+                        Candidate(item, text, tryParseJson<KisskhDetail>(text))
                     }
-
-                    // Season-specific structural checks
-                    when {
-                        season == null -> Unit
-                        season == 1 -> if (actualTitle.contains("season 1", ignoreCase = true)) score += 20
-                        else -> if (actualTitle.contains("season $season", ignoreCase = true)) score += 20
-                    }
-
-                    if (score > bestScore) {
-                        bestScore = score
-                        bestMatch = item
-                    }
-                }
-
-                // Only fall back to a raw exact-title equality check if nothing in the
-                // result set even loosely resembled the requested show.
-                val match = bestMatch ?: searchRes.find { it.title.equals(title, ignoreCase = true) }
-                matchedId = match?.id
-                matchedTitle = match?.title
+                }.awaitAll().filterNotNull()
             }
 
-            if (matchedId == null) return false
+            if (candidates.isEmpty()) return false
 
-            // 3. Detail fetch
-            val detailResText = app.get(
-                "$mainUrl/api/DramaList/Drama/$matchedId",
-                params = mapOf("isq" to "false"),
-                headers = mapOf("User-Agent" to USER_AGENT),
-                referer = "$mainUrl/Drama/${getKisskhTitle(matchedTitle)}?id=$matchedId",
-                timeout = 15L
-            ).text
-            
-            val detailRes = tryParseJson<KisskhDetail>(detailResText) ?: return false
+            // Score each fetched candidate. Year match against the full detail
+            // payload is the strongest signal; slug closeness and season-text hints
+            // in the title back it up; and actually having the requested episode
+            // available rules out entries that structurally can't be the right one.
+            var bestCandidate: Candidate? = null
+            var bestScore = Int.MIN_VALUE
+
+            for (c in candidates) {
+                val actualTitle = c.result.title ?: continue
+                val tSlug = actualTitle.createSlug() ?: continue
+
+                val exactSlugMatch = tSlug == slug
+                var score = if (exactSlugMatch) 40 else 10
+
+                if (year != null && c.detailText.contains(year)) {
+                    score += 100
+                }
+
+                when {
+                    season == null -> Unit
+                    season == 1 -> if (actualTitle.contains("season 1", ignoreCase = true)) score += 20
+                    else -> if (actualTitle.contains("season $season", ignoreCase = true)) score += 20
+                }
+
+                val hasRequestedEpisode = if (season == null) {
+                    c.detail?.episodes?.isNotEmpty() == true
+                } else {
+                    c.detail?.episodes?.any { it.number?.toInt() == episode } == true
+                }
+                if (hasRequestedEpisode) score += 15
+
+                if (score > bestScore) {
+                    bestScore = score
+                    bestCandidate = c
+                }
+            }
+
+            val winner = bestCandidate ?: return false
+            val detailRes = winner.detail ?: return false
+            val matchedId = winner.result.id ?: return false
 
             val epsId  = if (season == null) {
                 detailRes.episodes?.firstOrNull()?.id
