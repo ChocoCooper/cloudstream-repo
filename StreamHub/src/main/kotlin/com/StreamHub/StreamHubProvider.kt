@@ -187,9 +187,6 @@ class StreamHubProvider : MainAPI() {
 
         return coroutineScope {
             val extractorJobs = listOf(
-                async { Movies111Extractor.getStream(embedData, callback) },
-                async { VidcoreExtractor.getStream(embedData, callback) },
-                async { VidlinkExtractor.getStream(embedData, callback) },
                 async { KisskhExtractor.getStream(cleanTitle, year, season, episode, mappedSubCallback, callback) }
             )
 
