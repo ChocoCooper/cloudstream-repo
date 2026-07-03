@@ -20,8 +20,9 @@ import javax.crypto.spec.SecretKeySpec
 
 object KisskhExtractor {
     private const val mainUrl = "https://kisskh.nl"
+    private const val encDecApi = "https://enc-dec.app/api/enc-kisskh"
 
-    // ── Decryption keys ───────────────────────────────────────────────────────
+    // ── Decryption keys (Used to decrypt internal subtitle txt content) ───────
     private const val KEY  = "AmSmZVcH93UQUezi"
     private const val KEY2 = "8056483646328763"
     private const val KEY3 = "sWODXX04QRTkHdlZ"
@@ -30,7 +31,7 @@ object KisskhExtractor {
     private val IV2 = intArrayOf(909653298,  909193779,  925905208,  892483379)
     private val IV3 = intArrayOf(946894696,  1634749029, 1127508082, 1396271183)
 
-    // ── Data classes (using @param:JsonProperty per reference style) ──────────
+    // ── Data classes ──────────
     private data class KisskhResults(
         @param:JsonProperty("id")    val id: Int?,
         @param:JsonProperty("title") val title: String?,
@@ -40,12 +41,10 @@ object KisskhExtractor {
     )
     private data class KisskhEpisodes(
         @param:JsonProperty("id")     val id: Int?,
-        @param:JsonProperty("number") val number: Int?,   // Int, not Double
+        @param:JsonProperty("number") val number: Int?,
     )
-    private data class KisskhKey(
-        val id: String? = null,
-        val version: String? = null,
-        val key: String? = null,
+    private data class EncDecResponse(
+        @param:JsonProperty("result") val result: String?,
     )
     private data class KisskhSources(
         @param:JsonProperty("Video")      val video: String?,
@@ -57,113 +56,103 @@ object KisskhExtractor {
     )
 
     // ── Main entry point ──────────────────────────────────────────────────────
-    /**
-     * @param title      Show/movie title from TMDB
-     * @param season     Season number (null for movies)
-     * @param episode    Episode number (null for movies)
-     * @param lastSeason Total season count — used to decide whether to match
-     *                   by "Title Season N" or just by slug alone (single-season shows)
-     */
     suspend fun getStream(
         title: String,
+        year: String?,
         season: Int?,
         episode: Int?,
-        lastSeason: Int?,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         try {
             val slug = title.createSlug() ?: return false
-            // type=2 → movie, type=1 → series (reference uses this distinction)
             val type = if (season == null) "2" else "1"
 
-            // 1. Search ────────────────────────────────────────────────────────
+            // 1. Search Kisskh ──────────────────────────────────────────────────
             val searchRes = app.get(
                 "$mainUrl/api/DramaList/Search?q=${title}&type=$type",
                 referer = "$mainUrl/"
-            )
-            if (searchRes.code != 200) return false
+            ).parsedSafe<List<KisskhResults>>() ?: return false
 
-            val results = tryParseJson<ArrayList<KisskhResults>>(searchRes.text) ?: return false
-            if (results.isEmpty()) return false
+            if (searchRes.isEmpty()) return false
 
-            // Smart match — mirrors reference logic exactly
-            val (id, contentTitle) = if (results.size == 1) {
-                results.first().id to results.first().title
+            // 2. Match result (Ported exactly from python s.py match_result) ───
+            var matchedId: Int? = null
+            var matchedTitle: String? = null
+
+            if (searchRes.size == 1) {
+                matchedId = searchRes.first().id
+                matchedTitle = searchRes.first().title
             } else {
-                val match = results.find {
-                    val slugTitle = it.title.createSlug() ?: return@find false
-                    when {
-                        season == null  -> slugTitle == slug
-                        lastSeason == 1 -> slugTitle.contains(slug)
-                        else            -> slugTitle.contains(slug) &&
-                                           it.title?.contains("Season $season", ignoreCase = true) == true
+                val match = searchRes.find { item ->
+                    val actualTitle = item.title ?: return@find false
+                    val tSlug = actualTitle.createSlug() ?: return@find false
+                    
+                    if (season == null) {
+                        tSlug == slug
+                    } else if (season == 1) {
+                        tSlug == slug || (tSlug.contains(slug) && (year != null && actualTitle.contains(year) || actualTitle.contains("season 1", ignoreCase = true)))
+                    } else {
+                        tSlug.contains(slug) && actualTitle.contains("season $season", ignoreCase = true)
                     }
-                } ?: results.find { it.title.equals(title, ignoreCase = true) }
-                match?.id to match?.title
+                } ?: searchRes.find { it.title.equals(title, ignoreCase = true) }
+
+                matchedId = match?.id
+                matchedTitle = match?.title
             }
 
-            if (id == null) return false
+            if (matchedId == null) return false
 
-            // 2. Detail fetch (with proper Kisskh referer) ────────────────────
+            // 3. Detail fetch ──────────────────────────────────────────────────
             val detailRes = app.get(
-                "$mainUrl/api/DramaList/Drama/$id?isq=false",
-                referer = "$mainUrl/Drama/${getKisskhTitle(contentTitle)}?id=$id"
-            )
-            if (detailRes.code != 200) return false
+                "$mainUrl/api/DramaList/Drama/$matchedId?isq=false",
+                referer = "$mainUrl/Drama/${getKisskhTitle(matchedTitle)}?id=$matchedId"
+            ).parsedSafe<KisskhDetail>() ?: return false
 
-            val detail = detailRes.parsedSafe<KisskhDetail>() ?: return false
             val epsId  = if (season == null) {
-                detail.episodes?.firstOrNull()?.id
+                detailRes.episodes?.firstOrNull()?.id
             } else {
-                detail.episodes?.find { it.number == episode }?.id
+                detailRes.episodes?.find { it.number == episode }?.id
             } ?: return false
 
-            // 3. Fetch kkeys in parallel (null kkey = fatal, per reference) ───
-            val (kkey, kkey1) = coroutineScope {
+            // 4. Fetch kkeys in parallel using Python decryption API solution ──
+            val (kkeyVid, kkeySub) = coroutineScope {
                 val videoKey = async {
                     try {
-                        app.get(
-                            "$mainUrl/api/Generate?id=$epsId&version=2.8.10",
-                            timeout = 10000
-                        ).parsedSafe<KisskhKey>()?.key
+                        app.get("$encDecApi?text=$epsId&type=vid", referer = "$mainUrl/").parsedSafe<EncDecResponse>()?.result
                     } catch (_: Exception) { null }
                 }
                 val subKey = async {
                     try {
-                        app.get(
-                            "$mainUrl/api/Generate?sub=1&id=$epsId&version=2.8.10",
-                            timeout = 10000
-                        ).parsedSafe<KisskhKey>()?.key
+                        app.get("$encDecApi?text=$epsId&type=sub", referer = "$mainUrl/").parsedSafe<EncDecResponse>()?.result
                     } catch (_: Exception) { null }
                 }
                 videoKey.await() to subKey.await()
             }
 
-            if (kkey == null || kkey1 == null) return false
+            if (kkeyVid == null) return false
 
-            // 4. Fetch sources and subtitles in parallel ───────────────────────
+            // 5. Fetch sources and subtitles in parallel ───────────────────────
             val (sourcesData, subResponse) = coroutineScope {
                 val sources = async {
                     try {
                         app.get(
-                            "$mainUrl/api/DramaList/Episode/$epsId.png?err=false&ts=&time=&kkey=$kkey",
-                            referer = "$mainUrl/Drama/${getKisskhTitle(contentTitle)}/Episode-${episode ?: 0}?id=$id&ep=$epsId&page=0&pageSize=100"
+                            "$mainUrl/api/DramaList/Episode/$epsId.png?err=false&ts=&time=&kkey=$kkeyVid",
+                            referer = "$mainUrl/"
                         ).parsedSafe<KisskhSources>()
                     } catch (_: Exception) { null }
                 }
-                // Note: reference uses & not ? before kkey in the sub URL
                 val subs = async {
-                    try {
-                        tryParseJson<List<KisskhSubtitle>>(
-                            app.get("$mainUrl/api/Sub/$epsId&kkey=$kkey1").text
-                        )
-                    } catch (_: Exception) { null }
+                    if (kkeySub != null) {
+                        try {
+                            app.get("$mainUrl/api/Sub/$epsId?kkey=$kkeySub", referer = "$mainUrl/").parsedSafe<List<KisskhSubtitle>>()
+                        } catch (_: Exception) { null }
+                    } else null
                 }
                 sources.await() to subs.await()
             }
 
-            // 5. Deliver video links ───────────────────────────────────────────
+            // 6. Deliver video links ───────────────────────────────────────────
             sourcesData?.let { src ->
                 listOf(src.video, src.thirdParty).forEach { link ->
                     val safeLink = link ?: return@forEach
@@ -197,10 +186,11 @@ object KisskhExtractor {
                 }
             }
 
-            // 6. Deliver subtitles ─────────────────────────────────────────────
+            // 7. Deliver subtitles ─────────────────────────────────────────────
             subResponse?.forEach { sub ->
                 val lang = getLanguage(sub.label ?: "Unknown")
                 val src = sub.src ?: return@forEach
+                // Mapped subtitle callback in Provider will filter for "English" automatically
                 subtitleCallback.invoke(SubtitleFile(lang, src))
             }
 
@@ -210,16 +200,11 @@ object KisskhExtractor {
         }
     }
 
-    // ── Helpers (mirror reference) ────────────────────────────────────────────
+    // ── Helpers ────────────────────────────────────────────
 
-    /** Converts a drama title to its URL-slug form used in Kisskh referer paths. */
     private fun getKisskhTitle(str: String?): String? =
         str?.replace(Regex("[^a-zA-Z\\d]"), "-")
 
-    /**
-     * Produces a lowercase hyphenated slug from a title for fuzzy matching.
-     * e.g. "Twinkling Watermelon" → "twinkling-watermelon"
-     */
     private fun String?.createSlug(): String? {
         return this?.lowercase()
             ?.replace(Regex("[^a-z0-9\\s]"), "")
@@ -228,30 +213,10 @@ object KisskhExtractor {
             ?.takeIf { it.isNotBlank() }
     }
 
-    /**
-     * Expands common subtitle label strings to a clean display language name.
-     * Mirrors the reference's getLanguage() behaviour.
-     */
     private fun getLanguage(label: String): String {
         return when (label.lowercase().trim()) {
-            "indonesia", "indonesian" -> "Indonesian"
-            "english", "en"           -> "English"
-            "korean", "ko"            -> "Korean"
-            "chinese", "zh", "chi"    -> "Chinese"
-            "japanese", "ja", "jpn"   -> "Japanese"
-            "thai", "th"              -> "Thai"
-            "vietnamese", "vi"        -> "Vietnamese"
-            "arabic", "ar"            -> "Arabic"
-            "spanish", "es"           -> "Spanish"
-            "french", "fr"            -> "French"
-            "german", "de"            -> "German"
-            "portuguese", "pt"        -> "Portuguese"
-            "russian", "ru"           -> "Russian"
-            "hindi", "hi"             -> "Hindi"
-            "tamil", "ta"             -> "Tamil"
-            "malay", "ms"             -> "Malay"
-            "unknown", ""             -> "Unknown"
-            else                      -> label.replaceFirstChar { it.uppercase() }
+            "english", "en" -> "English"
+            else -> label.replaceFirstChar { it.uppercase() }
         }
     }
 
@@ -312,10 +277,6 @@ object KisskhExtractor {
         return String(cipher.doFinal(data), Charsets.UTF_8)
     }
 
-    /**
-     * Convert an IntArray of big-endian 32-bit integers into a raw ByteArray.
-     * Named toKisskhBytes to avoid ambiguity with Kotlin stdlib extensions.
-     */
     private fun IntArray.toKisskhBytes(): ByteArray =
         ByteArray(size * 4).also { bytes ->
             forEachIndexed { i, v ->
