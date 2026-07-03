@@ -171,13 +171,13 @@ class StreamHubProvider : MainAPI() {
         val imdbId    = data.substringAfter("imdb=", "").substringBefore("&").takeIf { it.isNotBlank() && it != "null" }
         val embedData = "$mainUrl/${if (isMovie) "movie" else "tv"}/$tmdbId" + (if (!isMovie) "/$season/$episode" else "")
 
-        // Fetch TMDB metadata here instead of in the extractor
+        // Fetch TMDB metadata safely
         val metaUrl = if (isMovie) "$tmdbBase/movie/$tmdbId?api_key={API_KEY}" else "$tmdbBase/tv/$tmdbId?api_key={API_KEY}"
         val details = fetchTmdb<TmdbDetails>(metaUrl) ?: return false
         val cleanTitle = details.title ?: details.name ?: return false
         val year = (details.releaseDate ?: details.firstAirDate)?.substringBefore("-")
 
-        // Dedicated wrapper mapped subtitle callback to filter only "English" subs from Extractors
+        // Wrapper to filter only English subs out of Extractors
         val mappedSubCallback = { sub: SubtitleFile ->
             val expandedLang = expandLang(sub.lang)
             if (expandedLang.equals("English", ignoreCase = true)) {
@@ -201,7 +201,6 @@ class StreamHubProvider : MainAPI() {
                                     val sub = subs.getJSONObject(i)
                                     val url = sub.optString("url")
                                     val lang = expandLang(sub.optString("lang"))
-                                    // Ensure only English subs are passed
                                     if (url.isNotBlank() && lang.equals("English", ignoreCase = true)) {
                                         subtitleCallback.invoke(SubtitleFile(lang, url))
                                     }
@@ -220,7 +219,6 @@ class StreamHubProvider : MainAPI() {
                             val sub = array.getJSONObject(i)
                             val subUrl = sub.optString("url")
                             val lang = sub.optString("display").takeIf { it.isNotBlank() } ?: expandLang(sub.optString("language", "English"))
-                            // Ensure only English subs are passed
                             if (subUrl.isNotBlank() && lang.equals("English", ignoreCase = true)) {
                                 subtitleCallback.invoke(SubtitleFile(lang, subUrl))
                             }
