@@ -83,7 +83,7 @@ object KisskhExtractor {
             val searchRes = tryParseJson<List<KisskhResults>>(searchResText) ?: return false
             if (searchRes.isEmpty()) return false
 
-            // 2. Match result (Hardened for identical titles with different years e.g. A Love So Beautiful)
+            // 2. Match result (Hardened prioritizing year match over title short-circuiting)
             var matchedId: Int? = null
             var matchedTitle: String? = null
 
@@ -91,34 +91,40 @@ object KisskhExtractor {
                 matchedId = searchRes.first().id
                 matchedTitle = searchRes.first().title
             } else {
-                var exactMatch: KisskhResults? = null
-                var fallbackMatch: KisskhResults? = null
+                var exactYearMatch: KisskhResults? = null
+                var fallbackTitleMatch: KisskhResults? = null
 
                 for (item in searchRes) {
                     val actualTitle = item.title ?: continue
                     val tSlug = actualTitle.createSlug() ?: continue
                     
-                    val isSlugMatch = if (season == null) {
-                        tSlug == slug || tSlug.contains(slug)
-                    } else if (season == 1) {
-                        tSlug == slug || tSlug.contains(slug)
-                    } else {
-                        tSlug.contains(slug) && actualTitle.contains("season $season", ignoreCase = true)
-                    }
+                    // Check if the base titles align
+                    val isBaseTitleMatch = tSlug == slug || tSlug.contains(slug) || slug.contains(tSlug)
 
-                    if (isSlugMatch) {
-                        if (fallbackMatch == null || tSlug == slug) {
-                            fallbackMatch = item // Save the closest text match
-                        }
-                        // Priority 1: Exact Year Match
+                    if (isBaseTitleMatch) {
+                        // 1. Highest Priority: If we have a year and this entry contains it, lock it immediately
                         if (year != null && actualTitle.contains(year)) {
-                            exactMatch = item
+                            exactYearMatch = item
                             break
+                        }
+
+                        // 2. Secondary Priority: Season specific structural checks
+                        if (season == null) {
+                            if (fallbackTitleMatch == null) fallbackTitleMatch = item
+                        } else if (season == 1) {
+                            if (actualTitle.contains("season 1", ignoreCase = true) || fallbackTitleMatch == null) {
+                                fallbackTitleMatch = item
+                            }
+                        } else {
+                            if (actualTitle.contains("season $season", ignoreCase = true)) {
+                                fallbackTitleMatch = item
+                            }
                         }
                     }
                 }
 
-                val match = exactMatch ?: fallbackMatch ?: searchRes.find { it.title.equals(title, ignoreCase = true) }
+                // Lock the strict year match first, otherwise drop back to title matching
+                val match = exactYearMatch ?: fallbackMatch ?: searchRes.find { it.title.equals(title, ignoreCase = true) }
                 matchedId = match?.id
                 matchedTitle = match?.title
             }
