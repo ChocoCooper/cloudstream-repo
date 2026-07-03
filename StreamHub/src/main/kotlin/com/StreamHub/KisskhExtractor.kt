@@ -98,7 +98,13 @@ object KisskhExtractor {
                 val actualTitle = item.title ?: return@filter false
                 val tSlug = actualTitle.createSlug() ?: return@filter false
                 tSlug == slug || tSlug.contains(slug) || slug.contains(tSlug)
-            }.ifEmpty { searchRes } // nothing loosely matched the title -> consider everything rather than failing outright
+            }
+            // If nothing in the results even loosely resembles the requested title,
+            // the media simply isn't on Kisskh — bail out instead of grabbing whatever
+            // unrelated result happens to score "best" out of an irrelevant pool
+            // (this was how e.g. "Project Hail Mary" ended up playing an unrelated
+            // "Moebius Project 2012" listing).
+            if (baseCandidates.isEmpty()) return false
 
             data class Candidate(val result: KisskhResults, val detailText: String, val detail: KisskhDetail?)
 
@@ -158,6 +164,13 @@ object KisskhExtractor {
                     bestCandidate = c
                 }
             }
+
+            // Require at least an exact title match OR a confirmed year hit before
+            // trusting the winner. A bare loose-substring title match (score 10-25)
+            // isn't enough on its own — that's a coincidental overlap, not the same
+            // show, and playing it silently is worse than playing nothing.
+            val MIN_ACCEPTABLE_SCORE = 40
+            if (bestScore < MIN_ACCEPTABLE_SCORE) return false
 
             val winner = bestCandidate ?: return false
             val detailRes = winner.detail ?: return false
