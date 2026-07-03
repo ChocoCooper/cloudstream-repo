@@ -56,7 +56,7 @@ class StreamHubProvider : MainAPI() {
         for (key in keysToTry) {
             try {
                 val finalUrl = url.replace("{API_KEY}", key)
-                val responseText = app.get(finalUrl).text
+                val responseText = app.get(finalUrl, timeout = 15L).text
                 val response = AppUtils.tryParseJson<T>(responseText)
                 if (response != null) return response
             } catch (e: Exception) { continue }
@@ -210,7 +210,7 @@ class StreamHubProvider : MainAPI() {
             )
 
             val results = extractorJobs.awaitAll()
-            withTimeoutOrNull(12000) { subJobs.awaitAll() }
+            withTimeoutOrNull(15000) { subJobs.awaitAll() }
             return@coroutineScope results.any { it }
         }
     }
