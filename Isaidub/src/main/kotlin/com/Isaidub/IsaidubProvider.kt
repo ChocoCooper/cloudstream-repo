@@ -160,7 +160,13 @@ class IsaidubProvider : MainAPI() {
                     if (title.isBlank()) return@forEach
                     
                     val low = title.lowercase()
-                    if (low.contains("web series") || low.contains("episode") || low.contains("season") || low.contains("sample")) return@forEach
+                    // ADDED EXCLUSIONS FOR TVSHOWS, SERIES, ETC AS REQUESTED
+                    if (low.contains("web series") || low.contains("episode") || low.contains("season") || 
+                        low.contains("sample") || low.contains("tvmedia") || low.contains("tvseries") || 
+                        low.contains("tvshow") || low.contains("tv series") || low.contains("tv show") || 
+                        low.contains("tv media")) {
+                        return@forEach
+                    }
                     
                     val link = resolveUrl(mainUrl, href)
                     candidates.add(Pair(title, link))
@@ -379,50 +385,6 @@ class IsaidubProvider : MainAPI() {
         return true
     }
 
-    private suspend fun fetchTmdbTitle(
-        rawTitle: String,
-        fallbackYear: String = ""
-    ): Pair<SimpleTmdbMovie?, String> {
-        val clean     = rawTitle.replace("isaiDub.me", "").replace(Regex("-"), " ").trim()
-        val yearMatch = Regex("\\b(19|20)\\d{2}\\b").find(clean)
-        val usedYear  = yearMatch?.value ?: fallbackYear
-        val searchTitle = if (yearMatch != null) clean.replace(yearMatch.value, "").trim() else clean
-        val encoded = URLEncoder.encode(searchTitle, "UTF-8")
-
-        val jsonResponse = fetchFromTmdb { apiKey ->
-            var url = "https://api.tmdb.org/3/search/movie?api_key=$apiKey&query=$encoded"
-            if (usedYear.isNotBlank()) {
-                url += "&primary_release_year=$usedYear"
-            }
-            url
-        }
-
-        if (jsonResponse != null) {
-            try {
-                val jsonObject = JSONObject(jsonResponse)
-                val resultsArray = jsonObject.optJSONArray("results") ?: JSONArray()
-                
-                for (i in 0 until resultsArray.length()) {
-                    val item = resultsArray.getJSONObject(i)
-                    val poster = item.optString("poster_path", "")
-                    val rDate = item.optString("release_date", "")
-                    val isUnreleased = rDate.isBlank()
-                    
-                    if (poster.isNotBlank() && !isUnreleased) {
-                        val movie = SimpleTmdbMovie(
-                            title = item.optString("title", ""),
-                            posterPath = poster,
-                            overview = item.optString("overview", ""),
-                            releaseDate = rDate
-                        )
-                        return Pair(movie, usedYear)
-                    }
-                }
-            } catch (e: Exception) {}
-        }
-        return Pair(null, usedYear)
-    }
-
     // Navigates the tamil-{year}-dubbed-movies folder ignoring nested DOM tables
     private suspend fun findMoviePage(title: String, year: String): ScrapedMovie? {
         if (year.isBlank()) return null
@@ -457,7 +419,11 @@ class IsaidubProvider : MainAPI() {
                     if (movieTitle.isBlank() || movieTitle.lowercase().contains("sample")) return@forEach
 
                     val siteTokens = tokenize(movieTitle)
-                    val score = targetTokens.intersect(siteTokens).size + (if (movieTitle.contains(year)) 2 else 0)
+                    var score = 0
+                    for (token in targetTokens) {
+                        if (siteTokens.contains(token)) score++
+                    }
+                    if (movieTitle.contains(year)) score += 2 
 
                     if (score > folderBestScore) {
                         folderBestScore = score
@@ -645,7 +611,7 @@ class IsaidubProvider : MainAPI() {
         val low = url.lowercase()
         return low.endsWith(".mp4") || low.endsWith(".mkv") || low.endsWith(".avi") ||
                low.endsWith(".mov") || low.endsWith(".webm") ||
-               low.contains("download.php") || low.contains("dl.php")
+               low.contains("download.php") || low.contains("dl.php") || low.contains("uptodub.ch")
     }
 
     private fun resolveUrl(base: String, href: String): String {
