@@ -94,6 +94,37 @@ class IsaidubProvider : MainAPI() {
         return null
     }
 
+    // Searches TMDB for a title (optionally scoped to a year) and returns the best match
+    // along with the resolved release year (falls back to the input year if TMDB has none).
+    private suspend fun fetchTmdbTitle(title: String, year: String = ""): Pair<SimpleTmdbMovie?, String> {
+        val encodedQuery = URLEncoder.encode(title, "UTF-8")
+
+        val jsonResponse = fetchFromTmdb { apiKey ->
+            val base = "https://api.tmdb.org/3/search/movie?api_key=$apiKey&query=$encodedQuery&language=en"
+            if (year.isNotBlank()) "$base&year=$year" else base
+        } ?: return Pair(null, year)
+
+        return try {
+            val jsonObject = JSONObject(jsonResponse)
+            val resultsArray = jsonObject.optJSONArray("results") ?: JSONArray()
+            if (resultsArray.length() == 0) return Pair(null, year)
+
+            val item = resultsArray.getJSONObject(0)
+            val rDate = item.optString("release_date", "")
+            val resolvedYear = rDate.substringBefore("-").ifBlank { year }
+
+            val movie = SimpleTmdbMovie(
+                title = item.optString("title", title),
+                posterPath = item.optString("poster_path", ""),
+                overview = item.optString("overview", ""),
+                releaseDate = rDate
+            )
+            Pair(movie, resolvedYear)
+        } catch (e: Exception) {
+            Pair(null, year)
+        }
+    }
+
     override val mainPage = mainPageOf(
         "$mainUrl/tamil-yearly-dubbed-movies/"  to "New Tamil Dubbed Movies",
         "$mainUrl/tamil-action-dubbed-movies/"  to "Tamil Dubbed Action Movies",
