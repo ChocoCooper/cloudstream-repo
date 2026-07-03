@@ -13,6 +13,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import okhttp3.Interceptor
 import okhttp3.ResponseBody.Companion.toResponseBody
+import java.net.URLEncoder
 import java.util.Base64
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
@@ -21,6 +22,8 @@ import javax.crypto.spec.SecretKeySpec
 object KisskhExtractor {
     private const val mainUrl = "https://kisskh.nl"
     private const val encDecApi = "https://enc-dec.app/api/enc-kisskh"
+    // Anti-timeout user agent mirroring the python script
+    private const val USER_AGENT = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36"
 
     // ── Decryption keys (Used to decrypt internal subtitle txt content) ───────
     private const val KEY  = "AmSmZVcH93UQUezi"
@@ -41,7 +44,7 @@ object KisskhExtractor {
     )
     private data class KisskhEpisodes(
         @param:JsonProperty("id")     val id: Int?,
-        @param:JsonProperty("number") val number: Int?,
+        @param:JsonProperty("number") val number: Double?, // Changed to double for accurate match to deal with 1.5 format
     )
     private data class EncDecResponse(
         @param:JsonProperty("result") val result: String?,
@@ -67,11 +70,14 @@ object KisskhExtractor {
         try {
             val slug = title.createSlug() ?: return false
             val type = if (season == null) "2" else "1"
+            val encodedTitle = URLEncoder.encode(title, "UTF-8")
 
             // 1. Search Kisskh ──────────────────────────────────────────────────
             val searchRes = app.get(
-                "$mainUrl/api/DramaList/Search?q=${title}&type=$type",
-                referer = "$mainUrl/"
+                "$mainUrl/api/DramaList/Search?q=$encodedTitle&type=$type",
+                headers = mapOf("User-Agent" to USER_AGENT),
+                referer = "$mainUrl/",
+                timeout = 15L // Catch unhandled server hangs quickly
             ).parsedSafe<List<KisskhResults>>() ?: return false
 
             if (searchRes.isEmpty()) return false
@@ -106,25 +112,37 @@ object KisskhExtractor {
             // 3. Detail fetch ──────────────────────────────────────────────────
             val detailRes = app.get(
                 "$mainUrl/api/DramaList/Drama/$matchedId?isq=false",
-                referer = "$mainUrl/Drama/${getKisskhTitle(matchedTitle)}?id=$matchedId"
+                headers = mapOf("User-Agent" to USER_AGENT),
+                referer = "$mainUrl/Drama/${getKisskhTitle(matchedTitle)}?id=$matchedId",
+                timeout = 15L
             ).parsedSafe<KisskhDetail>() ?: return false
 
             val epsId  = if (season == null) {
                 detailRes.episodes?.firstOrNull()?.id
             } else {
-                detailRes.episodes?.find { it.number == episode }?.id
+                detailRes.episodes?.find { it.number?.toInt() == episode }?.id
             } ?: return false
 
             // 4. Fetch kkeys in parallel using Python decryption API solution ──
             val (kkeyVid, kkeySub) = coroutineScope {
                 val videoKey = async {
                     try {
-                        app.get("$encDecApi?text=$epsId&type=vid", referer = "$mainUrl/").parsedSafe<EncDecResponse>()?.result
+                        app.get(
+                            "$encDecApi?text=$epsId&type=vid",
+                            headers = mapOf("User-Agent" to USER_AGENT),
+                            referer = "$mainUrl/",
+                            timeout = 15L
+                        ).parsedSafe<EncDecResponse>()?.result
                     } catch (_: Exception) { null }
                 }
                 val subKey = async {
                     try {
-                        app.get("$encDecApi?text=$epsId&type=sub", referer = "$mainUrl/").parsedSafe<EncDecResponse>()?.result
+                        app.get(
+                            "$encDecApi?text=$epsId&type=sub", 
+                            headers = mapOf("User-Agent" to USER_AGENT),
+                            referer = "$mainUrl/",
+                            timeout = 15L
+                        ).parsedSafe<EncDecResponse>()?.result
                     } catch (_: Exception) { null }
                 }
                 videoKey.await() to subKey.await()
@@ -133,19 +151,28 @@ object KisskhExtractor {
             if (kkeyVid == null) return false
 
             // 5. Fetch sources and subtitles in parallel ───────────────────────
+            val encodedKkeyVid = URLEncoder.encode(kkeyVid, "UTF-8")
             val (sourcesData, subResponse) = coroutineScope {
                 val sources = async {
                     try {
                         app.get(
-                            "$mainUrl/api/DramaList/Episode/$epsId.png?err=false&ts=&time=&kkey=$kkeyVid",
-                            referer = "$mainUrl/"
+                            "$mainUrl/api/DramaList/Episode/$epsId.png?err=false&ts=&time=&kkey=$encodedKkeyVid",
+                            headers = mapOf("User-Agent" to USER_AGENT),
+                            referer = "$mainUrl/",
+                            timeout = 15L
                         ).parsedSafe<KisskhSources>()
                     } catch (_: Exception) { null }
                 }
                 val subs = async {
                     if (kkeySub != null) {
                         try {
-                            app.get("$mainUrl/api/Sub/$epsId?kkey=$kkeySub", referer = "$mainUrl/").parsedSafe<List<KisskhSubtitle>>()
+                            val encodedKkeySub = URLEncoder.encode(kkeySub, "UTF-8")
+                            app.get(
+                                "$mainUrl/api/Sub/$epsId?kkey=$encodedKkeySub",
+                                headers = mapOf("User-Agent" to USER_AGENT),
+                                referer = "$mainUrl/",
+                                timeout = 15L
+                            ).parsedSafe<List<KisskhSubtitle>>()
                         } catch (_: Exception) { null }
                     } else null
                 }
