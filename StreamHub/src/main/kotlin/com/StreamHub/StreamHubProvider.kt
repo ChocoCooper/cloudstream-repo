@@ -166,10 +166,16 @@ class StreamHubProvider : MainAPI() {
         val cleanData = data.substringBefore("?")
         val isMovie   = cleanData.contains("/movie/")
         val tmdbId    = Regex("""/(?:movie|tv)/(\d+)""").find(cleanData)?.groupValues?.get(1) ?: return false
-        val season    = Regex("""/tv/\d+/(\d+)""").find(cleanData)?.groupValues?.get(1)?.toIntOrNull() ?: 1
-        val episode   = Regex("""/tv/\d+/\d+/(\d+)""").find(cleanData)?.groupValues?.get(1)?.toIntOrNull() ?: 1
+        val season    = if (!isMovie) Regex("""/tv/\d+/(\d+)""").find(cleanData)?.groupValues?.get(1)?.toIntOrNull() else null
+        val episode   = if (!isMovie) Regex("""/tv/\d+/\d+/(\d+)""").find(cleanData)?.groupValues?.get(1)?.toIntOrNull() else null
         val imdbId    = data.substringAfter("imdb=", "").substringBefore("&").takeIf { it.isNotBlank() && it != "null" }
         val embedData = "$mainUrl/${if (isMovie) "movie" else "tv"}/$tmdbId" + (if (!isMovie) "/$season/$episode" else "")
+
+        // Fetch TMDB metadata here instead of in the extractor
+        val metaUrl = if (isMovie) "$tmdbBase/movie/$tmdbId?api_key={API_KEY}" else "$tmdbBase/tv/$tmdbId?api_key={API_KEY}"
+        val details = fetchTmdb<TmdbDetails>(metaUrl) ?: return false
+        val cleanTitle = details.title ?: details.name ?: return false
+        val year = (details.releaseDate ?: details.firstAirDate)?.substringBefore("-")
 
         // Dedicated wrapper mapped subtitle callback to filter only "English" subs from Extractors
         val mappedSubCallback = { sub: SubtitleFile ->
@@ -184,7 +190,7 @@ class StreamHubProvider : MainAPI() {
                 async { Movies111Extractor.getStream(embedData, callback) },
                 async { VidcoreExtractor.getStream(embedData, callback) },
                 async { VidlinkExtractor.getStream(embedData, callback) },
-                async { KisskhExtractor.getStream(embedData, mappedSubCallback, callback) }
+                async { KisskhExtractor.getStream(cleanTitle, year, season, episode, mappedSubCallback, callback) }
             )
 
             val subJobs = listOf(
