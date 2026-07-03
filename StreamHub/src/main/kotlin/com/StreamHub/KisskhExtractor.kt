@@ -13,7 +13,6 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import okhttp3.Interceptor
 import okhttp3.ResponseBody.Companion.toResponseBody
-import java.net.URLEncoder
 import java.util.Base64
 import javax.crypto.Cipher
 import javax.crypto.spec.IvParameterSpec
@@ -22,7 +21,7 @@ import javax.crypto.spec.SecretKeySpec
 object KisskhExtractor {
     private const val mainUrl = "https://kisskh.nl"
     private const val encDecApi = "https://enc-dec.app/api/enc-kisskh"
-    // Anti-timeout user agent mirroring the python script
+    // Anti-timeout user agent exactly mimicking Python's requests session
     private const val USER_AGENT = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Mobile Safari/537.36"
 
     // ── Decryption keys (Used to decrypt internal subtitle txt content) ───────
@@ -44,10 +43,7 @@ object KisskhExtractor {
     )
     private data class KisskhEpisodes(
         @param:JsonProperty("id")     val id: Int?,
-        @param:JsonProperty("number") val number: Double?, // Changed to double for accurate match to deal with 1.5 format
-    )
-    private data class EncDecResponse(
-        @param:JsonProperty("result") val result: String?,
+        @param:JsonProperty("number") val number: Double?, // Changed to Double to safely parse "1.5" formats
     )
     private data class KisskhSources(
         @param:JsonProperty("Video")      val video: String?,
@@ -70,16 +66,16 @@ object KisskhExtractor {
         try {
             val slug = title.createSlug() ?: return false
             val type = if (season == null) "2" else "1"
-            val encodedTitle = URLEncoder.encode(title, "UTF-8")
 
-            // 1. Search Kisskh ──────────────────────────────────────────────────
-            val searchRes = app.get(
-                "$mainUrl/api/DramaList/Search?q=$encodedTitle&type=$type",
+            // 1. Search Kisskh (Using safe params map to properly format URL natively in OkHttp)
+            val searchResText = app.get(
+                "$mainUrl/api/DramaList/Search",
+                params = mapOf("q" to title, "type" to type),
                 headers = mapOf("User-Agent" to USER_AGENT),
-                referer = "$mainUrl/",
-                timeout = 15L // Catch unhandled server hangs quickly
-            ).parsedSafe<List<KisskhResults>>() ?: return false
+                referer = "$mainUrl/"
+            ).text
 
+            val searchRes = tryParseJson<List<KisskhResults>>(searchResText) ?: return false
             if (searchRes.isEmpty()) return false
 
             // 2. Match result (Ported exactly from python s.py match_result) ───
@@ -110,12 +106,14 @@ object KisskhExtractor {
             if (matchedId == null) return false
 
             // 3. Detail fetch ──────────────────────────────────────────────────
-            val detailRes = app.get(
-                "$mainUrl/api/DramaList/Drama/$matchedId?isq=false",
+            val detailResText = app.get(
+                "$mainUrl/api/DramaList/Drama/$matchedId",
+                params = mapOf("isq" to "false"),
                 headers = mapOf("User-Agent" to USER_AGENT),
-                referer = "$mainUrl/Drama/${getKisskhTitle(matchedTitle)}?id=$matchedId",
-                timeout = 15L
-            ).parsedSafe<KisskhDetail>() ?: return false
+                referer = "$mainUrl/Drama/${getKisskhTitle(matchedTitle)}?id=$matchedId"
+            ).text
+
+            val detailRes = tryParseJson<KisskhDetail>(detailResText) ?: return false
 
             val epsId  = if (season == null) {
                 detailRes.episodes?.firstOrNull()?.id
@@ -125,58 +123,60 @@ object KisskhExtractor {
 
             // 4. Fetch kkeys in parallel using Python decryption API solution ──
             val (kkeyVid, kkeySub) = coroutineScope {
-                val videoKey = async {
+                val videoKeyJob = async {
                     try {
-                        app.get(
-                            "$encDecApi?text=$epsId&type=vid",
+                        val res = app.get(
+                            encDecApi,
+                            params = mapOf("text" to epsId.toString(), "type" to "vid"),
                             headers = mapOf("User-Agent" to USER_AGENT),
-                            referer = "$mainUrl/",
-                            timeout = 15L
-                        ).parsedSafe<EncDecResponse>()?.result
-                    } catch (_: Exception) { null }
+                            referer = "https://kisskh.nl"
+                        ).text
+                        tryParseJson<Map<String, String>>(res)?.get("result")
+                    } catch (e: Exception) { null }
                 }
-                val subKey = async {
+                val subKeyJob = async {
                     try {
-                        app.get(
-                            "$encDecApi?text=$epsId&type=sub", 
+                        val res = app.get(
+                            encDecApi,
+                            params = mapOf("text" to epsId.toString(), "type" to "sub"),
                             headers = mapOf("User-Agent" to USER_AGENT),
-                            referer = "$mainUrl/",
-                            timeout = 15L
-                        ).parsedSafe<EncDecResponse>()?.result
-                    } catch (_: Exception) { null }
+                            referer = "https://kisskh.nl"
+                        ).text
+                        tryParseJson<Map<String, String>>(res)?.get("result")
+                    } catch (e: Exception) { null }
                 }
-                videoKey.await() to subKey.await()
+                videoKeyJob.await() to subKeyJob.await()
             }
 
             if (kkeyVid == null) return false
 
             // 5. Fetch sources and subtitles in parallel ───────────────────────
-            val encodedKkeyVid = URLEncoder.encode(kkeyVid, "UTF-8")
             val (sourcesData, subResponse) = coroutineScope {
-                val sources = async {
+                val sourcesJob = async {
                     try {
-                        app.get(
-                            "$mainUrl/api/DramaList/Episode/$epsId.png?err=false&ts=&time=&kkey=$encodedKkeyVid",
+                        val res = app.get(
+                            "$mainUrl/api/DramaList/Episode/$epsId.png",
+                            params = mapOf("err" to "false", "ts" to "", "time" to "", "kkey" to kkeyVid),
                             headers = mapOf("User-Agent" to USER_AGENT),
-                            referer = "$mainUrl/",
-                            timeout = 15L
-                        ).parsedSafe<KisskhSources>()
-                    } catch (_: Exception) { null }
+                            referer = mainUrl
+                        ).text
+                        tryParseJson<KisskhSources>(res)
+                    } catch (e: Exception) { null }
                 }
-                val subs = async {
+                val subsJob = async {
                     if (kkeySub != null) {
                         try {
-                            val encodedKkeySub = URLEncoder.encode(kkeySub, "UTF-8")
-                            app.get(
-                                "$mainUrl/api/Sub/$epsId?kkey=$encodedKkeySub",
+                            val res = app.get(
+                                "$mainUrl/api/Sub/$epsId",
+                                params = mapOf("kkey" to kkeySub),
                                 headers = mapOf("User-Agent" to USER_AGENT),
-                                referer = "$mainUrl/",
-                                timeout = 15L
-                            ).parsedSafe<List<KisskhSubtitle>>()
-                        } catch (_: Exception) { null }
+                                referer = mainUrl
+                            ).text
+                            tryParseJson<List<KisskhSubtitle>>(res)
+                        } catch (e: Exception) { null }
                     } else null
                 }
-                sources.await() to subs.await()
+                sourcesJob.await() to subsJob.await()
             }
 
             // 6. Deliver video links ───────────────────────────────────────────
@@ -223,6 +223,7 @@ object KisskhExtractor {
 
             return true
         } catch (e: Exception) {
+            e.printStackTrace()
             return false
         }
     }
