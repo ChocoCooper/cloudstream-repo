@@ -1,6 +1,5 @@
 name: Build
 
-# https://docs.github.com/en/actions/learn-github-actions/workflow-syntax-for-github-actions#concurrency
 concurrency: 
   group: "build"
   cancel-in-progress: true
@@ -29,7 +28,7 @@ jobs:
           path: "builds"
 
       - name: Clean old builds
-        run: rm $GITHUB_WORKSPACE/builds/*.cs3 || true
+        run: rm -rf $GITHUB_WORKSPACE/builds/*.cs3
 
       - name: Setup JDK 17
         uses: actions/setup-java@v4.6.0
@@ -44,17 +43,16 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/src
           chmod +x gradlew
-          # Use 'tee' to print logs to the GitHub console AND save them to the file.
-          # Added --info for maximum compiler error details.
-          ./gradlew make makePluginsJson --stacktrace --info 2>&1 | tee build_log.txt
+          # ADDED: --no-daemon (prevents worker deadlocks), --parallel (controlled parallelism), and --max-workers (restricts thread count)
+          ./gradlew clean make makePluginsJson --no-daemon --parallel --max-workers=2 --stacktrace --info 2>&1 | tee build_log.txt
           
-          # Added || true so it doesn't instantly crash the workflow if a build fails
+          mkdir -p $GITHUB_WORKSPACE/builds
           cp **/build/*.cs3 $GITHUB_WORKSPACE/builds || true
           cp build/plugins.json $GITHUB_WORKSPACE/builds || true
 
       - name: Upload Build Log Artifact
         uses: actions/upload-artifact@v4
-        if: always() # This ensures the log is uploaded even if the Gradle build fails
+        if: always()
         with:
           name: build-error-log
           path: src/build_log.txt
@@ -65,5 +63,5 @@ jobs:
           git config --local user.email "actions@github.com"
           git config --local user.name "GitHub Actions"
           git add .
-          git commit --amend -m "Build $GITHUB_SHA" || exit 0   # do not error if nothing to commit
+          git commit --amend -m "Build $GITHUB_SHA" || exit 0
           git push --force
