@@ -78,27 +78,30 @@ object KisskhExtractor {
             val searchRes = tryParseJson<List<KisskhResults>>(searchResText) ?: return false
             if (searchRes.isEmpty()) return false
 
-            // 2. Match result (Ported exactly from python s.py match_result) ───
+            // 2. Match result (Ported from python s.py match_result + Hardened for same-title years)
             var matchedId: Int? = null
             var matchedTitle: String? = null
-
             if (searchRes.size == 1) {
                 matchedId = searchRes.first().id
                 matchedTitle = searchRes.first().title
             } else {
+                // Strategy 1: Strict match incorporating title slug and year/season rules
                 val match = searchRes.find { item ->
                     val actualTitle = item.title ?: return@find false
                     val tSlug = actualTitle.createSlug() ?: return@find false
-                    
                     if (season == null) {
-                        tSlug == slug
+                        // For movies, if slugs are identical, ensure the year matches if present in the title
+                        if (tSlug == slug) {
+                            if (year != null && searchRes.any { it.title?.contains(year) == true }) {
+                                actualTitle.contains(year)
+                            } else true
+                        } else false
                     } else if (season == 1) {
                         tSlug == slug || (tSlug.contains(slug) && (year != null && actualTitle.contains(year) || actualTitle.contains("season 1", ignoreCase = true)))
                     } else {
                         tSlug.contains(slug) && actualTitle.contains("season $season", ignoreCase = true)
                     }
                 } ?: searchRes.find { it.title.equals(title, ignoreCase = true) }
-
                 matchedId = match?.id
                 matchedTitle = match?.title
             }
