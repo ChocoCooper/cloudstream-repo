@@ -18,8 +18,6 @@ class StreamHubProvider : MainAPI() {
     override var lang = "ta"
     override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime, TvType.AsianDrama)
 
-    private val wyzieApiKey = "wyzie-qadj2lucrwvfqglskqdy67jy7zkaptgo"
-
     private val tmdbApiKeys = listOf(
         "fb7bb23f03b6994dafc674c074d01761", "e55425032d3d0f371fc776f302e7c09b",
         "8301a21598f8b45668d5711a814f01f6", "8cf43ad9c085135b9479ad5cf6bbcbda",
@@ -172,7 +170,7 @@ class StreamHubProvider : MainAPI() {
         val imdbId    = data.substringAfter("imdb=", "").substringBefore("&").takeIf { it.isNotBlank() && it != "null" }
         val embedData = "$mainUrl/${if (isMovie) "movie" else "tv"}/$tmdbId" + (if (!isMovie) "/$season/$episode" else "")
 
-        // Fetch TMDB metadata safely
+        // Fetch TMDB metadata securely in the provider
         val metaUrl = if (isMovie) "$tmdbBase/movie/$tmdbId?api_key={API_KEY}" else "$tmdbBase/tv/$tmdbId?api_key={API_KEY}"
         val details = fetchTmdb<TmdbDetails>(metaUrl) ?: return false
         val cleanTitle = details.title ?: details.name ?: return false
@@ -188,10 +186,7 @@ class StreamHubProvider : MainAPI() {
 
         return coroutineScope {
             val extractorJobs = listOf(
-                async { Movies111Extractor.getStream(embedData, callback) },
-                async { VidcoreExtractor.getStream(embedData, callback) },
-                async { VidlinkExtractor.getStream(embedData, callback) },
-                async { KisskhExtractor.getStream(cleanTitle, year, season, episode, mappedSubCallback, callback) }
+                async { OnetouchtvExtractor.getStream(cleanTitle, year, season, episode, mappedSubCallback, callback) }
             )
 
             val subJobs = listOf(
@@ -212,22 +207,6 @@ class StreamHubProvider : MainAPI() {
                             }
                         } catch (e: Exception) {}
                     }
-                },
-                async {
-                    try {
-                        var wyzieUrl = "https://sub.wyzie.io/search?id=$tmdbId&source=all&key=$wyzieApiKey"
-                        if (!isMovie) wyzieUrl += "&season=$season&episode=$episode"
-                        val wyzieResponse = app.get(wyzieUrl, timeout = 8L).text
-                        val array = if (wyzieResponse.trim().startsWith("{")) JSONObject(wyzieResponse).optJSONArray("subtitles") ?: JSONArray() else JSONArray(wyzieResponse)
-                        for (i in 0 until array.length()) {
-                            val sub = array.getJSONObject(i)
-                            val subUrl = sub.optString("url")
-                            val lang = sub.optString("display").takeIf { it.isNotBlank() } ?: expandLang(sub.optString("language", "English"))
-                            if (subUrl.isNotBlank() && lang.equals("English", ignoreCase = true)) {
-                                subtitleCallback.invoke(SubtitleFile(lang, subUrl))
-                            }
-                        }
-                    } catch (e: Exception) {}
                 }
             )
 
