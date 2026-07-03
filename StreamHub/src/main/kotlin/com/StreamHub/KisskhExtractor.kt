@@ -194,7 +194,7 @@ object KisskhExtractor {
                                     INFER_TYPE
                                 ) {
                                     referer = mainUrl
-                                    quality = Qualities.P720.value
+                                    quality = Qualities.Unknown.value
                                     headers = mapOf("Origin" to mainUrl)
                                 }
                             )
