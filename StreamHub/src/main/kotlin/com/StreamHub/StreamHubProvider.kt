@@ -59,7 +59,8 @@ class StreamHubProvider : MainAPI() {
         for (key in keysToTry) {
             try {
                 val finalUrl = url.replace("{API_KEY}", key)
-                val response = app.get(finalUrl).parsedSafe<T>()
+                val responseText = app.get(finalUrl).text
+                val response = AppUtils.tryParseJson<T>(responseText)
                 if (response != null) return response
             } catch (e: Exception) { continue }
         }
