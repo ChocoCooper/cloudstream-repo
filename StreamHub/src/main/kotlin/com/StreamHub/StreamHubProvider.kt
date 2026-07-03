@@ -37,31 +37,11 @@ class StreamHubProvider : MainAPI() {
     private val backdropBase = "https://image.tmdb.org/t/p/original"
 
     private val iso639Map = mapOf(
-        "eng" to "English",   "spa" to "Spanish",   "fra" to "French",
-        "deu" to "German",    "ita" to "Italian",   "por" to "Portuguese",
-        "rus" to "Russian",   "jpn" to "Japanese",  "kor" to "Korean",
-        "zho" to "Chinese",   "chi" to "Chinese",   "ara" to "Arabic",
-        "hin" to "Hindi",     "tur" to "Turkish",   "nld" to "Dutch",
-        "pol" to "Polish",    "swe" to "Swedish",   "nor" to "Norwegian",
-        "dan" to "Danish",    "fin" to "Finnish",   "ces" to "Czech",
-        "slk" to "Slovak",    "hun" to "Hungarian", "ron" to "Romanian",
-        "bul" to "Bulgarian", "hrv" to "Croatian",  "srp" to "Serbian",
-        "ukr" to "Ukrainian", "vie" to "Vietnamese","tha" to "Thai",
-        "ind" to "Indonesian","msa" to "Malay",     "may" to "Malay",
-        "heb" to "Hebrew",    "fas" to "Persian",   "per" to "Persian",
-        "tam" to "Tamil",     "tel" to "Telugu",    "mal" to "Malayalam",
-        "kan" to "Kannada",   "ben" to "Bengali",   "mar" to "Marathi",
-        "pan" to "Punjabi",   "guj" to "Gujarati",  "urd" to "Urdu",
-        "cat" to "Catalan",   "glg" to "Galician",  "eus" to "Basque",
-        "lat" to "Latin",     "ell" to "Greek",     "bos" to "Bosnian",
-        "slv" to "Slovenian", "mkd" to "Macedonian","sqi" to "Albanian",
-        "lav" to "Latvian",   "lit" to "Lithuanian","est" to "Estonian",
-        "isl" to "Icelandic", "mlt" to "Maltese",   "afr" to "Afrikaans",
-        "swa" to "Swahili",   "zul" to "Zulu",      "xho" to "Xhosa"
+        "eng" to "English",
+        "en" to "English"
     )
 
     private fun expandLang(code: String): String {
-        if (code.length != 3) return code
         return iso639Map[code.lowercase()] ?: code
     }
 
@@ -152,14 +132,12 @@ class StreamHubProvider : MainAPI() {
             }
         } else {
             val validSeasons = details.seasons?.filter { (it.seasonNumber ?: 0) > 0 } ?: emptyList()
-            val lastSeason   = validSeasons.maxOfOrNull { it.seasonNumber ?: 0 } ?: 1
             val episodes     = mutableListOf<Episode>()
             validSeasons.forEach { season ->
                 val sNum    = season.seasonNumber ?: return@forEach
                 val epCount = season.episodeCount ?: 0
                 for (epNum in 1..epCount) {
-                    // Encode lastSeason into the URL so loadLinks can pass it to Kisskh
-                    val epUrl = "$mainUrl/tv/$tmdbId/$sNum/$epNum?imdb=$imdbId&ls=$lastSeason"
+                    val epUrl = "$mainUrl/tv/$tmdbId/$sNum/$epNum?imdb=$imdbId"
                     episodes.add(newEpisode(epUrl) {
                         this.name    = "Episode $epNum"
                         this.season  = sNum
@@ -191,15 +169,14 @@ class StreamHubProvider : MainAPI() {
         val season    = Regex("""/tv/\d+/(\d+)""").find(cleanData)?.groupValues?.get(1)?.toIntOrNull() ?: 1
         val episode   = Regex("""/tv/\d+/\d+/(\d+)""").find(cleanData)?.groupValues?.get(1)?.toIntOrNull() ?: 1
         val imdbId    = data.substringAfter("imdb=", "").substringBefore("&").takeIf { it.isNotBlank() && it != "null" }
-        val lastSeason = data.substringAfter("ls=", "").substringBefore("&").toIntOrNull()
         val embedData = "$mainUrl/${if (isMovie) "movie" else "tv"}/$tmdbId" + (if (!isMovie) "/$season/$episode" else "")
 
-        val metaUrl = if (isMovie) "$tmdbBase/movie/$tmdbId?api_key={API_KEY}" else "$tmdbBase/tv/$tmdbId?api_key={API_KEY}"
-        val details = fetchTmdb<TmdbDetails>(metaUrl) ?: return false
-        val cleanTitle = details.title ?: details.name ?: return false
-
+        // Dedicated wrapper mapped subtitle callback to filter only "English" subs from Extractors
         val mappedSubCallback = { sub: SubtitleFile ->
-            subtitleCallback.invoke(SubtitleFile(expandLang(sub.lang), sub.url))
+            val expandedLang = expandLang(sub.lang)
+            if (expandedLang.equals("English", ignoreCase = true)) {
+                subtitleCallback.invoke(SubtitleFile(expandedLang, sub.url))
+            }
         }
 
         return coroutineScope {
@@ -207,14 +184,7 @@ class StreamHubProvider : MainAPI() {
                 async { Movies111Extractor.getStream(embedData, callback) },
                 async { VidcoreExtractor.getStream(embedData, callback) },
                 async { VidlinkExtractor.getStream(embedData, callback) },
-                async { KisskhExtractor.getStream(
-                    title      = cleanTitle,
-                    season     = if (isMovie) null else season,
-                    episode    = if (isMovie) null else episode,
-                    lastSeason = lastSeason,
-                    subtitleCallback = mappedSubCallback,
-                    callback   = callback
-                ) }
+                async { KisskhExtractor.getStream(embedData, mappedSubCallback, callback) }
             )
 
             val subJobs = listOf(
@@ -228,7 +198,10 @@ class StreamHubProvider : MainAPI() {
                                     val sub = subs.getJSONObject(i)
                                     val url = sub.optString("url")
                                     val lang = expandLang(sub.optString("lang"))
-                                    if (url.isNotBlank() && lang.isNotBlank()) subtitleCallback.invoke(SubtitleFile(lang, url))
+                                    // Ensure only English subs are passed
+                                    if (url.isNotBlank() && lang.equals("English", ignoreCase = true)) {
+                                        subtitleCallback.invoke(SubtitleFile(lang, url))
+                                    }
                                 }
                             }
                         } catch (e: Exception) {}
@@ -244,7 +217,10 @@ class StreamHubProvider : MainAPI() {
                             val sub = array.getJSONObject(i)
                             val subUrl = sub.optString("url")
                             val lang = sub.optString("display").takeIf { it.isNotBlank() } ?: expandLang(sub.optString("language", "English"))
-                            if (subUrl.isNotBlank()) subtitleCallback.invoke(SubtitleFile(lang, subUrl))
+                            // Ensure only English subs are passed
+                            if (subUrl.isNotBlank() && lang.equals("English", ignoreCase = true)) {
+                                subtitleCallback.invoke(SubtitleFile(lang, subUrl))
+                            }
                         }
                     } catch (e: Exception) {}
                 }
