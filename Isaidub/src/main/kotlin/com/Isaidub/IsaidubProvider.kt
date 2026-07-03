@@ -94,8 +94,6 @@ class IsaidubProvider : MainAPI() {
         return null
     }
 
-    // Searches TMDB for a title (optionally scoped to a year) and returns the best match
-    // along with the resolved release year (falls back to the input year if TMDB has none).
     private suspend fun fetchTmdbTitle(title: String, year: String = ""): Pair<SimpleTmdbMovie?, String> {
         val encodedQuery = URLEncoder.encode(title, "UTF-8")
 
@@ -141,21 +139,19 @@ class IsaidubProvider : MainAPI() {
             var targetUrl = sectionUrl
             if (sectionUrl.contains("yearly")) {
                 val doc = scrapeSemaphore.withPermit { app.get(sectionUrl, headers = baseHeaders, timeout = 15).document }
-                var resolved = ""
-                val aTags = doc.select("a[href]")
-                for (a in aTags) {
-                    val href = a.attr("href")
-                    if (href.contains(Regex("tamil-\\d{4}-dubbed-movies"))) {
-                        resolved = if (href.startsWith("http")) href else "$mainUrl$href"
-                        break
-                    }
+                
+                // Targets body -> div.container -> very first div.f -> a
+                val firstAFolder = doc.selectFirst("div.container div.f a")
+                val hrefAttr = firstAFolder?.attr("href") ?: ""
+                
+                if (hrefAttr.isNotBlank()) {
+                    targetUrl = if (hrefAttr.startsWith("http")) hrefAttr else "$mainUrl${if (hrefAttr.startsWith("/")) "" else "/"}$hrefAttr"
                 }
-                if (resolved.isEmpty()) return newHomePageResponse(emptyList(), hasNext = false)
-                targetUrl = resolved
             }
 
             val yearMatch = Regex("\\d{4}").find(targetUrl)
             val year = yearMatch?.value ?: ""
+            
             val items = fetchSectionItems(targetUrl, year)
             if (items.isNotEmpty()) {
                 homePageLists.add(HomePageList(request.name, items, isHorizontalImages = false))
@@ -173,25 +169,24 @@ class IsaidubProvider : MainAPI() {
     ): List<SearchResponse> {
         val collected  = mutableListOf<SearchResponse>()
         var currentPage = 1
-        val maxPages   = 3
+        val maxPages   = 5 // Increased bounds to securely reach 8 movies per section
 
-        while (collected.size < 12 && currentPage <= maxPages) {
+        while (collected.size < 8 && currentPage <= maxPages) {
             val pageUrl = if (currentPage == 1) targetBaseUrl else "$targetBaseUrl?get-page=$currentPage"
             try {
                 val doc = scrapeSemaphore.withPermit { app.get(pageUrl, headers = baseHeaders, timeout = 15).document }
-
-                val candidates = mutableListOf<Pair<String, String>>()
+                val candidates = mutableListOf<Triple<String, String, String>>()
                 
-                // CLASS-AGNOSTIC EXTRACTION: Finds movies no matter how deeply they are wrapped in tables
-                doc.select("a[href]").forEach { a ->
+                // Targets body -> div.container -> div.folder -> a to parse full Media Name (Year)
+                doc.select("div.container div.folder a").forEach { a ->
                     val href = a.attr("href")
                     if (!href.contains("/movie/", ignoreCase = true)) return@forEach
                     
-                    val title = a.text().trim().ifBlank { a.attr("title").trim() }
-                    if (title.isBlank()) return@forEach
+                    val rawTitle = a.text().trim().ifBlank { a.attr("title").trim() }
+                    if (rawTitle.isBlank()) return@forEach
                     
-                    val low = title.lowercase()
-                    // Filters out TV content so only movie titles get sent to TMDB for posters/metadata
+                    val low = rawTitle.lowercase()
+                    // Filters out structural TV shows, web series, and samples
                     if (low.contains("web series") || low.contains("episode") || low.contains("season") ||
                         low.contains("sample") || low.contains("tvmedia") || low.contains("tvseries") ||
                         low.contains("tvshow") || low.contains("tv series") || low.contains("tv show") ||
@@ -199,8 +194,10 @@ class IsaidubProvider : MainAPI() {
                         return@forEach
                     }
                     
+                    // Isolate exact release year inside title string context if present
+                    val yearInTitle = Regex("\\b(19|20)\\d{2}\\b").find(rawTitle)?.value ?: sectionYear
                     val link = resolveUrl(mainUrl, href)
-                    candidates.add(Pair(title, link))
+                    candidates.add(Triple(rawTitle, link, yearInTitle))
                 }
 
                 if (candidates.isEmpty()) break
@@ -210,10 +207,18 @@ class IsaidubProvider : MainAPI() {
                     for (candidate in candidates) {
                         val rawTitle = candidate.first
                         val link = candidate.second
+                        val itemYear = candidate.third
+                        
                         val def = async {
-                            val cleanTitle = rawTitle.replace("isaiDub.me", "").replace(Regex("-"), " ").trim()
-                            val (tmdb, resolvedYear) = fetchTmdbTitle(cleanTitle, sectionYear)
-
+                            // Extract clear, high-matching tokens for stable TMDB execution
+                            var cleanTitle = rawTitle.replace("isaiDub.me", "", ignoreCase = true)
+                                .replace(Regex("-"), " ")
+                                .replace(Regex("\\((19|20)\\d{2}\\)"), "")
+                                .trim()
+                            
+                            cleanTitle = cleanTitle.replace(Regex("(?i)\\b(hd|mp4|sample|dvdrip|bdrip|webrip)\\b"), "").trim()
+                            
+                            val (tmdb, resolvedYear) = fetchTmdbTitle(cleanTitle, itemYear)
                             if (tmdb == null) return@async null
                             
                             val poster = "https://image.tmdb.org/t/p/w500${tmdb.posterPath}"
@@ -238,7 +243,7 @@ class IsaidubProvider : MainAPI() {
                 
                 val results = deferreds.awaitAll()
                 for (r in results) {
-                    if (r != null && !collected.any { it.name == r.name } && collected.size < 12) {
+                    if (r != null && !collected.any { it.name == r.name }) {
                         collected.add(r)
                     }
                 }
@@ -395,8 +400,6 @@ class IsaidubProvider : MainAPI() {
         val links = resolveAllLinks(moviePageUrl, depth = 0)
         if (links.isEmpty()) return false
 
-        // Dedup by resolution label so the same quality isn't offered multiple times
-        // (e.g. two different mirrors both labeled "720p")
         val seenResolutions = mutableSetOf<String>()
 
         for (linkItem in links) {
@@ -406,7 +409,6 @@ class IsaidubProvider : MainAPI() {
             if (!seenResolutions.add(label.lowercase())) continue
 
             val sourceName = "Isaidub ($label) \"$actualScrapedTitle\""
-
             val isM3u8 = finalUrl.contains(".m3u8")
 
             callback.invoke(
@@ -423,7 +425,6 @@ class IsaidubProvider : MainAPI() {
         return true
     }
 
-    // Navigates the tamil-{year}-dubbed-movies folder ignoring nested DOM tables
     private suspend fun findMoviePage(title: String, year: String): ScrapedMovie? {
         if (year.isBlank()) return null
         val yearUrl = "$mainUrl/tamil-$year-dubbed-movies/"
@@ -435,7 +436,6 @@ class IsaidubProvider : MainAPI() {
         var maxPage = 1
         try {
             val doc = scrapeSemaphore.withPermit { app.get(yearUrl, headers = baseHeaders, timeout = 10).document }
-            // Using a safer lookup just in case the wrapper class changes
             val maxPageStr = doc.selectFirst("span#totalPages")?.text()?.trim()
             if (maxPageStr != null) {
                 maxPage = maxPageStr.toIntOrNull() ?: 1
@@ -446,11 +446,8 @@ class IsaidubProvider : MainAPI() {
             try {
                 val pageDoc = scrapeSemaphore.withPermit { app.get(url, headers = baseHeaders, timeout = 10).document }
                 
-                // CLASS-AGNOSTIC EXTRACTION
-                pageDoc.select("a[href]").forEach { a ->
+                pageDoc.select("div.container div.folder a").forEach { a ->
                     val href = resolveUrl(mainUrl, a.attr("href"))
-                    
-                    // All valid movie targets on Isaidub exist under the /movie/ directory
                     if (!href.contains("/movie/", ignoreCase = true)) return@forEach
                     
                     val movieTitle = a.text().trim().ifBlank { a.attr("title").trim() }
@@ -471,14 +468,12 @@ class IsaidubProvider : MainAPI() {
             } catch (e: Exception) {}
         }
 
-        // Scan page 1
         scanPage(yearUrl)
 
         if (folderBestScore >= targetTokens.size && folderBestMovie != null) {
             return folderBestMovie
         }
 
-        // Scan pagination safely
         if (maxPage > 1) {
             val limit = if (maxPage > 15) 15 else maxPage
             coroutineScope {
@@ -501,7 +496,6 @@ class IsaidubProvider : MainAPI() {
         return tokens
     }
 
-    // Core Heuristic Web Crawler (Bypasses class rules entirely, acts like a human clicking words)
     private suspend fun resolveAllLinks(
         url: String, 
         depth: Int, 
@@ -533,7 +527,6 @@ class IsaidubProvider : MainAPI() {
         val doc = Jsoup.parse(html)
         val results = mutableListOf<Pair<String, String>>()
 
-        // Step 1: Follow Invisible Auto-Redirects
         val metaRefresh = doc.selectFirst("meta[http-equiv=refresh]")
         if (metaRefresh != null) {
             val content = metaRefresh.attr("content")
@@ -547,7 +540,6 @@ class IsaidubProvider : MainAPI() {
             }
         }
 
-        // Step 2: Grab links purely based on what humans would read on the buttons
         val linksToFollow = mutableSetOf<Pair<String, String>>()
         
         doc.select("a[href]").forEach { a ->
@@ -558,7 +550,6 @@ class IsaidubProvider : MainAPI() {
             val lowText = text.lowercase()
             val lowHref = href.lowercase()
             
-            // STRICT NEGATIVE FILTERS
             if (lowText.contains("sample") || lowHref.contains("sample")) return@forEach
             if (lowHref.contains("?get-page=") || lowHref.contains("/category/")) return@forEach
             
@@ -566,7 +557,6 @@ class IsaidubProvider : MainAPI() {
             val cleanFullUrl = fullUrl.lowercase().trimEnd('/')
             if (cleanFullUrl == responseUrl.lowercase().trimEnd('/')) return@forEach
             
-            // POSITIVE FILTERS
             val isFormat = lowText.contains("original") || lowText.contains("hdrip") || 
                            lowText.contains("bdrip") || lowText.contains("720p") || 
                            lowText.contains("1080p") || lowText.contains("360p") || 
@@ -587,7 +577,6 @@ class IsaidubProvider : MainAPI() {
             }
         }
 
-        // Step 3: Fallback regex to bypass DOM completely
         val regex = Regex("""https?://[^"'\s<>]*(?:dubpage|dubmv|uptodub|dubshare|download\.php|\.mp4|\.mkv)[^"'\s<>]*""", RegexOption.IGNORE_CASE)
         regex.findAll(html).forEach { match ->
             val fullUrl = match.value
@@ -596,7 +585,6 @@ class IsaidubProvider : MainAPI() {
             }
         }
 
-        // Optimization: Drill down into download servers natively before branching back to formats
         val serverOrFinalLinks = linksToFollow.filter { 
             it.first.lowercase().contains("download server") || 
             isFinalUrl(it.second) || 
