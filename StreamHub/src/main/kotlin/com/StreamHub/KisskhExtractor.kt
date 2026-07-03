@@ -124,7 +124,7 @@ object KisskhExtractor {
                 }
 
                 // Lock the strict year match first, otherwise drop back to title matching
-                val match = exactYearMatch ?: fallbackMatch ?: searchRes.find { it.title.equals(title, ignoreCase = true) }
+                val match = exactYearMatch ?: fallbackTitleMatch ?: searchRes.find { it.title.equals(title, ignoreCase = true) }
                 matchedId = match?.id
                 matchedTitle = match?.title
             }
