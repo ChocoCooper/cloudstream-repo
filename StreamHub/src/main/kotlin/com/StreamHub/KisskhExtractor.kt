@@ -83,7 +83,11 @@ object KisskhExtractor {
             val searchRes = tryParseJson<List<KisskhResults>>(searchResText) ?: return false
             if (searchRes.isEmpty()) return false
 
-            // 2. Match result (Hardened prioritizing year match over title short-circuiting)
+            // 2. Match result (scores every candidate across the FULL result set —
+            //    never short-circuits on the first loose title match — and weighs
+            //    year alignment heavily so remakes/re-releases sharing a base title,
+            //    e.g. "Love So Beautiful" 2017 vs 2024, aren't confused. title/year
+            //    here are the clean values TMDB (via the provider) already resolved.)
             var matchedId: Int? = null
             var matchedTitle: String? = null
 
@@ -91,40 +95,42 @@ object KisskhExtractor {
                 matchedId = searchRes.first().id
                 matchedTitle = searchRes.first().title
             } else {
-                var exactYearMatch: KisskhResults? = null
-                var fallbackTitleMatch: KisskhResults? = null
+                var bestMatch: KisskhResults? = null
+                var bestScore = Int.MIN_VALUE
 
                 for (item in searchRes) {
                     val actualTitle = item.title ?: continue
                     val tSlug = actualTitle.createSlug() ?: continue
-                    
-                    // Check if the base titles align
-                    val isBaseTitleMatch = tSlug == slug || tSlug.contains(slug) || slug.contains(tSlug)
 
-                    if (isBaseTitleMatch) {
-                        // 1. Highest Priority: If we have a year and this entry contains it, lock it immediately
-                        if (year != null && actualTitle.contains(year)) {
-                            exactYearMatch = item
-                            break
-                        }
+                    val exactSlugMatch = tSlug == slug
+                    val looseSlugMatch = !exactSlugMatch && (tSlug.contains(slug) || slug.contains(tSlug))
+                    if (!exactSlugMatch && !looseSlugMatch) continue // not even the same show, skip
 
-                        // 2. Secondary Priority: Season specific structural checks
-                        if (season == null) {
-                            if (fallbackTitleMatch == null) fallbackTitleMatch = item
-                        } else if (season == 1) {
-                            if (actualTitle.contains("season 1", ignoreCase = true) || fallbackTitleMatch == null) {
-                                fallbackTitleMatch = item
-                            }
-                        } else {
-                            if (actualTitle.contains("season $season", ignoreCase = true)) {
-                                fallbackTitleMatch = item
-                            }
-                        }
+                    var score = if (exactSlugMatch) 40 else 10
+
+                    // Strong signal: year match. Checked against both the raw title text
+                    // AND the normalized slug (which retains digits), since Kisskh formats
+                    // years inconsistently ("(2024)", "- 2024", or sometimes omits them).
+                    if (year != null && (actualTitle.contains(year) || tSlug.contains(year))) {
+                        score += 100
+                    }
+
+                    // Season-specific structural checks
+                    when {
+                        season == null -> Unit
+                        season == 1 -> if (actualTitle.contains("season 1", ignoreCase = true)) score += 20
+                        else -> if (actualTitle.contains("season $season", ignoreCase = true)) score += 20
+                    }
+
+                    if (score > bestScore) {
+                        bestScore = score
+                        bestMatch = item
                     }
                 }
 
-                // Lock the strict year match first, otherwise drop back to title matching
-                val match = exactYearMatch ?: fallbackTitleMatch ?: searchRes.find { it.title.equals(title, ignoreCase = true) }
+                // Only fall back to a raw exact-title equality check if nothing in the
+                // result set even loosely resembled the requested show.
+                val match = bestMatch ?: searchRes.find { it.title.equals(title, ignoreCase = true) }
                 matchedId = match?.id
                 matchedTitle = match?.title
             }
