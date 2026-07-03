@@ -28,6 +28,21 @@ object Movies111Extractor {
             val response      = app.get(embedUrl, interceptor = interceptor)
             val interceptedUrl = response.url
 
+            // WebViewResolver falls back to returning the last-loaded page URL when it
+            // never actually caught a network request matching catchAllRegex (player
+            // failed to init, site changed its streaming mechanism, request was too
+            // slow, etc). The blacklist below only screens out known junk domains — it
+            // does NOT guarantee the URL is a real media file — so without this check
+            // the raw embed page HTML can slip through as a "stream" and get handed to
+            // ExoPlayer, which then fails to demux it (CloudStream error 3003 /
+            // UnrecognizedInputFormatException, exactly as seen in the logs).
+            if (interceptedUrl.isBlank() ||
+                interceptedUrl == embedUrl ||
+                !catchAllRegex.matches(interceptedUrl)
+            ) {
+                return false
+            }
+
             val isClean = blacklist.none { interceptedUrl.lowercase().contains(it) }
             if (!isClean) return false
 
