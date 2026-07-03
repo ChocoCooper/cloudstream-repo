@@ -191,10 +191,10 @@ class IsaidubProvider : MainAPI() {
                     if (title.isBlank()) return@forEach
                     
                     val low = title.lowercase()
-                    // ADDED EXCLUSIONS FOR TVSHOWS, SERIES, ETC AS REQUESTED
-                    if (low.contains("web series") || low.contains("episode") || low.contains("season") || 
-                        low.contains("sample") || low.contains("tvmedia") || low.contains("tvseries") || 
-                        low.contains("tvshow") || low.contains("tv series") || low.contains("tv show") || 
+                    // Filters out TV content so only movie titles get sent to TMDB for posters/metadata
+                    if (low.contains("web series") || low.contains("episode") || low.contains("season") ||
+                        low.contains("sample") || low.contains("tvmedia") || low.contains("tvseries") ||
+                        low.contains("tvshow") || low.contains("tv series") || low.contains("tv show") ||
                         low.contains("tv media")) {
                         return@forEach
                     }
@@ -227,7 +227,7 @@ class IsaidubProvider : MainAPI() {
                             val st = URLEncoder.encode(rawTitle,     "UTF-8") 
                             val data = "$mainUrl/synthetic_meta?t=$t&y=$y&p=$p&url=$u&s=$s&st=$st"
 
-                            newMovieSearchResponse(cleanTitle, data, TvType.Movie) {
+                            newMovieSearchResponse(cleanTitle, data) {
                                 this.posterUrl = poster
                                 this.year      = resolvedYear.toIntOrNull()
                             }
@@ -290,7 +290,7 @@ class IsaidubProvider : MainAPI() {
                 val data = "$mainUrl/synthetic_meta?t=$t&y=$y&p=$p&url=&s=$s&st=$st"
                 
                 searchResults.add(
-                    newMovieSearchResponse(title, data, TvType.Movie) {
+                    newMovieSearchResponse(title, data) {
                         this.posterUrl = poster
                         this.year      = year.toIntOrNull()
                     }
@@ -395,9 +395,16 @@ class IsaidubProvider : MainAPI() {
         val links = resolveAllLinks(moviePageUrl, depth = 0)
         if (links.isEmpty()) return false
 
+        // Dedup by resolution label so the same quality isn't offered multiple times
+        // (e.g. two different mirrors both labeled "720p")
+        val seenResolutions = mutableSetOf<String>()
+
         for (linkItem in links) {
             val label = linkItem.first
             val finalUrl = linkItem.second
+
+            if (!seenResolutions.add(label.lowercase())) continue
+
             val sourceName = "Isaidub ($label) \"$actualScrapedTitle\""
 
             val isM3u8 = finalUrl.contains(".m3u8")
@@ -642,7 +649,7 @@ class IsaidubProvider : MainAPI() {
         val low = url.lowercase()
         return low.endsWith(".mp4") || low.endsWith(".mkv") || low.endsWith(".avi") ||
                low.endsWith(".mov") || low.endsWith(".webm") ||
-               low.contains("download.php") || low.contains("dl.php") || low.contains("uptodub.ch")
+               low.contains("download.php") || low.contains("dl.php")
     }
 
     private fun resolveUrl(base: String, href: String): String {
