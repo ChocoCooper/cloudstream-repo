@@ -196,7 +196,7 @@ class IsaidubProvider : MainAPI() {
                             val st = URLEncoder.encode(rawTitle,     "UTF-8") 
                             val data = "$mainUrl/synthetic_meta?t=$t&y=$y&p=$p&url=$u&s=$s&st=$st"
 
-                            newMovieSearchResponse(cleanTitle, data) {
+                            newMovieSearchResponse(cleanTitle, data, TvType.Movie) {
                                 this.posterUrl = poster
                                 this.year      = resolvedYear.toIntOrNull()
                             }
@@ -259,7 +259,7 @@ class IsaidubProvider : MainAPI() {
                 val data = "$mainUrl/synthetic_meta?t=$t&y=$y&p=$p&url=&s=$s&st=$st"
                 
                 searchResults.add(
-                    newMovieSearchResponse(title, data) {
+                    newMovieSearchResponse(title, data, TvType.Movie) {
                         this.posterUrl = poster
                         this.year      = year.toIntOrNull()
                     }
