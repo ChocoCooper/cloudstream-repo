@@ -35,10 +35,10 @@ class AnimeJokerProvider : MainAPI() {
         val a = item.selectFirst("a") ?: return null
         val href = a.attr("href")
         val img = item.selectFirst(".post-thumbnail img")
-        
+
         // Prioritize explicit title, fallback to 'title' attr, fallback to 'alt' attr
-        val title = item.selectFirst(".entry-title")?.text() 
-            ?: a.attr("title").ifEmpty { img?.attr("alt") } 
+        val title = item.selectFirst(".entry-title")?.text()
+            ?: a.attr("title").ifEmpty { img?.attr("alt") }
             ?: "No Title"
         val poster = img?.attr("src")
 
@@ -53,7 +53,7 @@ class AnimeJokerProvider : MainAPI() {
         var hasNext = true
 
         // Pagination loop: Caps at 5 pages to prevent accidental infinite looping
-        while (hasNext && page <= 5) { 
+        while (hasNext && page <= 5) {
             val url = if (page == 1) "$mainUrl/?s=$query" else "$mainUrl/page/$page/?s=$query"
             val doc = app.get(url).document
 
@@ -77,18 +77,22 @@ class AnimeJokerProvider : MainAPI() {
 
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url).document
-        
+
         // Grab title from standard entry-title class
         val title = doc.selectFirst("h1.entry-title, .title")?.text() ?: "No Title"
         val poster = doc.selectFirst(".post-thumbnail img")?.attr("src")
-        
+
         // Distinguish between Movies and Series via URL path
         val isMovie = url.contains("/movies/")
         val episodes = mutableListOf<Episode>()
 
         if (isMovie) {
             // Movies only have 1 item directly on the page
-            episodes.add(newEpisode(url, title))
+            episodes.add(
+                newEpisode(url) {
+                    this.name = title
+                }
+            )
         } else {
             // Series loops through the episode list
             doc.select("#episode_by_temp li").forEachIndexed { index, item ->
@@ -96,12 +100,11 @@ class AnimeJokerProvider : MainAPI() {
                 val href = a.attr("href")
                 val img = item.selectFirst(".post-thumbnail img")?.attr("src")
                 episodes.add(
-                    newEpisode(
-                        data = href,
-                        name = "Episode ${index + 1}",
-                        posterUrl = img,
-                        episode = index + 1
-                    )
+                    newEpisode(href) {
+                        this.name = "Episode ${index + 1}"
+                        this.posterUrl = img
+                        this.episode = index + 1
+                    }
                 )
             }
         }
@@ -136,10 +139,11 @@ class AnimeJokerProvider : MainAPI() {
                         source = "Embedseek",
                         name = "Embedseek",
                         url = directM3u8.replace("\\", ""),
-                        referer = iframeSrc,
-                        quality = Qualities.Unknown.value,
-                        isM3u8 = true
-                    )
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = iframeSrc
+                        this.quality = Qualities.Unknown.value
+                    }
                 )
                 return true
             }
@@ -149,7 +153,7 @@ class AnimeJokerProvider : MainAPI() {
             if (token != null) {
                 val apiUrl = "https://jkrowl.embedseek.online/api/v1/player?t=$token"
                 val apiResponse = app.get(
-                    apiUrl, 
+                    apiUrl,
                     headers = mapOf(
                         "Referer" to iframeSrc,
                         "Accept" to "*/*"
@@ -159,17 +163,18 @@ class AnimeJokerProvider : MainAPI() {
                 // Since it returns application/octet-stream, it could be Base64, JSON, or raw text.
                 // Regex tries to parse the .m3u8 link regardless of how it's wrapped.
                 val extractedM3u8 = Regex("""(https?://[^"']*?\.m3u8[^"']*?)["'\\]""").find(apiResponse)?.groupValues?.get(1)
-                
+
                 if (extractedM3u8 != null) {
                     callback(
                         newExtractorLink(
                             source = "Embedseek API",
                             name = "Embedseek (API)",
                             url = extractedM3u8.replace("\\", ""),
-                            referer = iframeSrc,
-                            quality = Qualities.Unknown.value,
-                            isM3u8 = true
-                        )
+                            type = ExtractorLinkType.M3U8
+                        ) {
+                            this.referer = iframeSrc
+                            this.quality = Qualities.Unknown.value
+                        }
                     )
                     return true
                 }
@@ -184,10 +189,11 @@ class AnimeJokerProvider : MainAPI() {
                     source = "AnimeJoker",
                     name = "AnimeJoker",
                     url = fallbackM3u8.replace("\\", ""),
-                    referer = mainUrl,
-                    quality = Qualities.Unknown.value,
-                    isM3u8 = true
-                )
+                    type = ExtractorLinkType.M3U8
+                ) {
+                    this.referer = mainUrl
+                    this.quality = Qualities.Unknown.value
+                }
             )
             return true
         }
