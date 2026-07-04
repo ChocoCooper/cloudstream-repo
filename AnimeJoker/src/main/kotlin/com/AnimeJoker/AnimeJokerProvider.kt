@@ -21,7 +21,7 @@ class AnimeJokerProvider : MainAPI() {
             home.add(HomePageList("Series", seriesElements.mapNotNull { toSearchResult(it) }))
         }
 
-        // 2. Fetch Movies (Using the corrected ID: -3-all, Limit 8)
+        // 2. Fetch Movies (Limit 8)
         val movieElements = doc.select("#widget_list_movies_series-3-all ul li").take(8)
         if (movieElements.isNotEmpty()) {
             home.add(HomePageList("Movies", movieElements.mapNotNull { toSearchResult(it) }))
@@ -122,82 +122,112 @@ class AnimeJokerProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val doc = app.get(data).document
-        val html = doc.html()
+        var foundLinks = false
+        val iframeLinks = mutableSetOf<String>()
 
-        // Locate the Embedseek iframe (either by element or regex search in raw HTML)
-        val iframeSrc = doc.select("iframe").map { it.attr("src") }.find { it.contains("embedseek") }
-            ?: Regex("""(https?://[^"']*?embedseek[^"']*?)["']""").find(html)?.groupValues?.get(1)
+        // 1. Direct iframes (If they are loaded natively without AJAX)
+        doc.select("iframe").forEach { iframe ->
+            iframe.attr("src").takeIf { it.isNotBlank() }?.let { iframeLinks.add(it) }
+        }
 
-        if (iframeSrc != null) {
-            val iframeDoc = app.get(iframeSrc, referer = "$mainUrl/").text
+        // 2. DooPlay AJAX Server Extraction
+        // This triggers the WP admin-ajax.php to retrieve the hidden server iframes
+        val servers = doc.select("[data-post][data-nume][data-type]")
+        for (server in servers) {
+            val post = server.attr("data-post")
+            val nume = server.attr("data-nume")
+            val type = server.attr("data-type")
 
-            // Attempt A: See if the m3u8 is exposed directly inside the iframe's text
-            val directM3u8 = Regex("""(https?://[^"']*?\.m3u8[^"']*?)["'\\]""").find(iframeDoc)?.groupValues?.get(1)
-            if (directM3u8 != null) {
-                callback(
-                    newExtractorLink(
-                        source = "Embedseek",
-                        name = "Embedseek",
-                        url = directM3u8.replace("\\", ""),
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        this.referer = iframeSrc
-                        this.quality = Qualities.Unknown.value
+            if (post.isNotBlank() && nume.isNotBlank() && type.isNotBlank()) {
+                try {
+                    val ajaxUrl = "$mainUrl/wp-admin/admin-ajax.php"
+                    val response = app.post(
+                        url = ajaxUrl,
+                        data = mapOf(
+                            "action" to "doo_player",
+                            "post" to post,
+                            "nume" to nume,
+                            "type" to type
+                        ),
+                        headers = mapOf(
+                            "X-Requested-With" to "XMLHttpRequest",
+                            "Referer" to data
+                        )
+                    ).text
+
+                    // The response is JSON containing {"embed_url": "<iframe src='...'>"}
+                    val embedUrlRegex = Regex(""""embed_url"\s*:\s*"([^"]+)"""").find(response)?.groupValues?.get(1)
+                    if (embedUrlRegex != null) {
+                        // Clean up escaped JSON slashes and quotes
+                        val cleanHtml = embedUrlRegex.replace("\\/", "/").replace("\\\"", "\"")
+                        val iframeSrc = Regex("""src=["']([^"']+)["']""").find(cleanHtml)?.groupValues?.get(1)
+                        
+                        if (iframeSrc != null) {
+                            iframeLinks.add(iframeSrc)
+                        } else if (cleanHtml.startsWith("http")) {
+                            iframeLinks.add(cleanHtml)
+                        }
                     }
-                )
-                return true
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
             }
+        }
 
-            // Attempt B: Extract the 't' token you found in DevTools and hit the API
-            val token = Regex("""t=([0-9a-fA-F]{30,})""").find(iframeDoc)?.groupValues?.get(1)
-            if (token != null) {
-                val apiUrl = "https://jkrowl.embedseek.online/api/v1/player?t=$token"
-                val apiResponse = app.get(
-                    apiUrl,
-                    headers = mapOf(
-                        "Referer" to iframeSrc,
-                        "Accept" to "*/*"
-                    )
-                ).text
+        // 3. Iterate over the found iframes and resolve the final .m3u8 token
+        for (iframeUrl in iframeLinks) {
+            val fixedUrl = if (iframeUrl.startsWith("//")) "https:$iframeUrl" else iframeUrl
 
-                // Since it returns application/octet-stream, it could be Base64, JSON, or raw text.
-                // Regex tries to parse the .m3u8 link regardless of how it's wrapped.
-                val extractedM3u8 = Regex("""(https?://[^"']*?\.m3u8[^"']*?)["'\\]""").find(apiResponse)?.groupValues?.get(1)
+            try {
+                val iframeDocText = app.get(fixedUrl, referer = data).text
 
-                if (extractedM3u8 != null) {
+                // Check if it's an Embedseek/jkrowl player
+                val token = Regex("""t=([0-9a-fA-F]{30,})""").find(iframeDocText)?.groupValues?.get(1)
+                
+                if (token != null) {
+                    // Extract domain dynamically in case embedseek changes subdomains (e.g., player2.embedseek.online)
+                    val domain = Regex("""(https?://[^/]+)""").find(fixedUrl)?.groupValues?.get(1) ?: "https://jkrowl.embedseek.online"
+                    
+                    // Since Embedseek's API returns the master M3U8 directly as an octet-stream, 
+                    // we can pass the API URL directly to ExoPlayer!
+                    val m3u8Url = "$domain/api/v1/player?t=$token"
+                    
                     callback(
                         newExtractorLink(
-                            source = "Embedseek API",
-                            name = "Embedseek (API)",
-                            url = extractedM3u8.replace("\\", ""),
+                            source = "Embedseek",
+                            name = "Embedseek HD",
+                            url = m3u8Url,
                             type = ExtractorLinkType.M3U8
                         ) {
-                            this.referer = iframeSrc
+                            this.referer = "$domain/" // Critical: The API requires the domain as the referer
                             this.quality = Qualities.Unknown.value
                         }
                     )
-                    return true
+                    foundLinks = true
+                    continue
                 }
+
+                // Generic Fallback: if there's a standard m3u8 directly in the iframe source
+                val m3u8 = Regex("""(https?://[^"']*?\.m3u8[^"']*?)["'\\]""").find(iframeDocText)?.groupValues?.get(1)
+                if (m3u8 != null) {
+                    callback(
+                        newExtractorLink(
+                            source = "Server",
+                            name = "Server HD",
+                            url = m3u8.replace("\\", ""),
+                            type = ExtractorLinkType.M3U8
+                        ) {
+                            this.referer = fixedUrl
+                            this.quality = Qualities.Unknown.value
+                        }
+                    )
+                    foundLinks = true
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
         }
 
-        // Final Fallback: If the .m3u8 was embedded directly in AnimeJoker's main HTML
-        val fallbackM3u8 = Regex("""(https?://[^"']*?\.m3u8[^"']*?)["'\\]""").find(html)?.groupValues?.get(1)
-        if (fallbackM3u8 != null) {
-            callback(
-                newExtractorLink(
-                    source = "AnimeJoker",
-                    name = "AnimeJoker",
-                    url = fallbackM3u8.replace("\\", ""),
-                    type = ExtractorLinkType.M3U8
-                ) {
-                    this.referer = mainUrl
-                    this.quality = Qualities.Unknown.value
-                }
-            )
-            return true
-        }
-
-        return false
+        return foundLinks
     }
 }
