@@ -135,11 +135,11 @@ class IsaidubProvider : MainAPI() {
     }
 
     override val mainPage = mainPageOf(
-        "$mainUrl/tamil-yearly-dubbed-movies/"  to "New Tamil Dubbed Movies",
-        "$mainUrl/tamil-action-dubbed-movies/"  to "Tamil Dubbed Action Movies",
-        "$mainUrl/tamil-thriller-dubbed-movies/"to "Tamil Dubbed Thriller Movies",
-        "$mainUrl/tamil-comedy-dubbed-movies/"  to "Tamil Dubbed Comedy Movies",
-        "$mainUrl/tamil-family-dubbed-movies/"  to "Tamil Dubbed Family Movies"
+        "$mainUrl/tamil-yearly-dubbed-movies/" to "New Tamil Dubbed Movies",
+        "$mainUrl/tamil-action-dubbed-movies/" to "Tamil Dubbed Action Movies",
+        "$mainUrl/tamil-thriller-dubbed-movies/" to "Tamil Dubbed Thriller Movies",
+        "$mainUrl/tamil-comedy-dubbed-movies/" to "Tamil Dubbed Comedy Movies",
+        "$mainUrl/tamil-family-dubbed-movies/" to "Tamil Dubbed Family Movies"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
