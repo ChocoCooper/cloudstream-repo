@@ -27,7 +27,7 @@ class AnimeJokerProvider : MainAPI() {
             home.add(HomePageList("Movies", movieElements.mapNotNull { toSearchResult(it) }))
         }
 
-        return HomePageResponse(home)
+        return newHomePageResponse(home)
     }
 
     // Helper function to keep parsing clean
@@ -88,7 +88,7 @@ class AnimeJokerProvider : MainAPI() {
 
         if (isMovie) {
             // Movies only have 1 item directly on the page
-            episodes.add(Episode(url, title))
+            episodes.add(newEpisode(url, title))
         } else {
             // Series loops through the episode list
             doc.select("#episode_by_temp li").forEachIndexed { index, item ->
@@ -96,7 +96,7 @@ class AnimeJokerProvider : MainAPI() {
                 val href = a.attr("href")
                 val img = item.selectFirst(".post-thumbnail img")?.attr("src")
                 episodes.add(
-                    Episode(
+                    newEpisode(
                         data = href,
                         name = "Episode ${index + 1}",
                         posterUrl = img,
@@ -132,7 +132,7 @@ class AnimeJokerProvider : MainAPI() {
             val directM3u8 = Regex("""(https?://[^"']*?\.m3u8[^"']*?)["'\\]""").find(iframeDoc)?.groupValues?.get(1)
             if (directM3u8 != null) {
                 callback(
-                    ExtractorLink(
+                    newExtractorLink(
                         source = "Embedseek",
                         name = "Embedseek",
                         url = directM3u8.replace("\\", ""),
@@ -162,7 +162,7 @@ class AnimeJokerProvider : MainAPI() {
                 
                 if (extractedM3u8 != null) {
                     callback(
-                        ExtractorLink(
+                        newExtractorLink(
                             source = "Embedseek API",
                             name = "Embedseek (API)",
                             url = extractedM3u8.replace("\\", ""),
@@ -180,7 +180,7 @@ class AnimeJokerProvider : MainAPI() {
         val fallbackM3u8 = Regex("""(https?://[^"']*?\.m3u8[^"']*?)["'\\]""").find(html)?.groupValues?.get(1)
         if (fallbackM3u8 != null) {
             callback(
-                ExtractorLink(
+                newExtractorLink(
                     source = "AnimeJoker",
                     name = "AnimeJoker",
                     url = fallbackM3u8.replace("\\", ""),
