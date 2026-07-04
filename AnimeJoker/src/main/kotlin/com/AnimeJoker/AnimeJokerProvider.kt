@@ -1,5 +1,6 @@
 package com.AnimeJoker
 
+import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
@@ -21,7 +22,7 @@ class AnimeJokerProvider : MainAPI() {
             home.add(HomePageList("Series", seriesElements.mapNotNull { toSearchResult(it) }))
         }
 
-        // 2. Fetch Movies (Limit 8)
+        // 2. Fetch Movies (Using the corrected ID: -3-all, Limit 8)
         val movieElements = doc.select("#widget_list_movies_series-3-all ul li").take(8)
         if (movieElements.isNotEmpty()) {
             home.add(HomePageList("Movies", movieElements.mapNotNull { toSearchResult(it) }))
@@ -115,6 +116,15 @@ class AnimeJokerProvider : MainAPI() {
         }
     }
 
+    // Safely decode Base64 strings if the site tries to hide URLs in them
+    private fun String.b64Decode(): String {
+        return try {
+            String(Base64.decode(this, Base64.DEFAULT))
+        } catch (e: Exception) {
+            this
+        }
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -122,84 +132,92 @@ class AnimeJokerProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val doc = app.get(data).document
+        val html = doc.html()
         var foundLinks = false
-        val iframeLinks = mutableSetOf<String>()
 
-        // 1. Direct iframes (If they are loaded natively without AJAX)
+        // We will build a queue of links/iframes to check so we can dig through redirects.
+        val toCheck = mutableListOf<String>()
+
+        // 1. Find all standard iframes
         doc.select("iframe").forEach { iframe ->
-            iframe.attr("src").takeIf { it.isNotBlank() }?.let { iframeLinks.add(it) }
+            val src = iframe.attr("src")
+            if (src.isNotBlank()) toCheck.add(src)
         }
 
-        // 2. DooPlay AJAX Server Extraction
-        // This triggers the WP admin-ajax.php to retrieve the hidden server iframes
-        val servers = doc.select("[data-post][data-nume][data-type]")
-        for (server in servers) {
-            val post = server.attr("data-post")
-            val nume = server.attr("data-nume")
-            val type = server.attr("data-type")
-
-            if (post.isNotBlank() && nume.isNotBlank() && type.isNotBlank()) {
-                try {
-                    val ajaxUrl = "$mainUrl/wp-admin/admin-ajax.php"
-                    val response = app.post(
-                        url = ajaxUrl,
-                        data = mapOf(
-                            "action" to "doo_player",
-                            "post" to post,
-                            "nume" to nume,
-                            "type" to type
-                        ),
-                        headers = mapOf(
-                            "X-Requested-With" to "XMLHttpRequest",
-                            "Referer" to data
-                        )
-                    ).text
-
-                    // The response is JSON containing {"embed_url": "<iframe src='...'>"}
-                    val embedUrlRegex = Regex(""""embed_url"\s*:\s*"([^"]+)"""").find(response)?.groupValues?.get(1)
-                    if (embedUrlRegex != null) {
-                        // Clean up escaped JSON slashes and quotes
-                        val cleanHtml = embedUrlRegex.replace("\\/", "/").replace("\\\"", "\"")
-                        val iframeSrc = Regex("""src=["']([^"']+)["']""").find(cleanHtml)?.groupValues?.get(1)
-                        
-                        if (iframeSrc != null) {
-                            iframeLinks.add(iframeSrc)
-                        } else if (cleanHtml.startsWith("http")) {
-                            iframeLinks.add(cleanHtml)
-                        }
-                    }
-                } catch (e: Exception) {
-                    e.printStackTrace()
+        // 2. Find hidden links in data attributes (often Base64 encoded in custom themes)
+        doc.select("[data-video], [data-src], [data-embed], [data-tplayerv]").forEach {
+            val src = it.attr("data-video").ifEmpty { it.attr("data-src") }.ifEmpty { it.attr("data-embed") }.ifEmpty { it.attr("data-tplayerv") }
+            if (src.isNotBlank()) {
+                if (src.startsWith("http") || src.startsWith("//")) {
+                    toCheck.add(src)
+                } else {
+                    val decoded = src.b64Decode()
+                    if (decoded.startsWith("http") || decoded.startsWith("//")) toCheck.add(decoded)
                 }
             }
         }
 
-        // 3. Iterate over the found iframes and resolve the final .m3u8 token
-        for (iframeUrl in iframeLinks) {
-            val fixedUrl = if (iframeUrl.startsWith("//")) "https:$iframeUrl" else iframeUrl
+        // 3. Find any embedseek URLs hiding as raw text/javascript variables
+        Regex("""(https?://(?:[^"'\s\\]+)?embedseek[^"'\s\\]*)""").findAll(html).forEach {
+            toCheck.add(it.value.replace("\\", ""))
+        }
+
+        // 4. Dooplay standard AJAX fetching
+        val servers = doc.select("[data-post][data-nume][data-type]")
+        if (servers.isNotEmpty()) {
+            val ajaxUrl = Regex("""['"]([^'"]+admin-ajax\.php)['"]""").find(html)?.groupValues?.get(1) ?: "$mainUrl/wp-admin/admin-ajax.php"
+            for (server in servers) {
+                val post = server.attr("data-post")
+                val nume = server.attr("data-nume")
+                val type = server.attr("data-type")
+
+                if (post.isNotBlank()) {
+                    try {
+                        val response = app.post(
+                            url = ajaxUrl,
+                            data = mapOf("action" to "doo_player", "post" to post, "nume" to nume, "type" to type),
+                            headers = mapOf("X-Requested-With" to "XMLHttpRequest", "Referer" to data)
+                        ).text
+
+                        val embedUrlRegex = Regex(""""embed_url"\s*:\s*"([^"]+)"""").find(response)?.groupValues?.get(1)
+                        if (embedUrlRegex != null) {
+                            val cleanHtml = embedUrlRegex.replace("\\/", "/").replace("\\\"", "\"")
+                            val iframeSrc = Regex("""src=["']([^"']+)["']""").find(cleanHtml)?.groupValues?.get(1)
+                            if (iframeSrc != null) toCheck.add(iframeSrc)
+                            else if (cleanHtml.startsWith("http")) toCheck.add(cleanHtml)
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
+            }
+        }
+
+        // Now process the queue. We will check each URL to see if it's the player token.
+        // We limit it to 15 iterations to prevent infinite looping on broken pages.
+        val checked = mutableSetOf<String>()
+        var iterations = 0
+
+        while (toCheck.isNotEmpty() && iterations < 15) {
+            iterations++
+            val currentUrl = toCheck.removeFirst()
+            if (currentUrl.isBlank() || checked.contains(currentUrl)) continue
+            checked.add(currentUrl)
+
+            val fixedUrl = if (currentUrl.startsWith("//")) "https:$currentUrl" else currentUrl
+            if (!fixedUrl.startsWith("http")) continue
 
             try {
-                val iframeDocText = app.get(fixedUrl, referer = data).text
-
-                // Check if it's an Embedseek/jkrowl player
-                val token = Regex("""t=([0-9a-fA-F]{30,})""").find(iframeDocText)?.groupValues?.get(1)
-                
-                if (token != null) {
-                    // Extract domain dynamically in case embedseek changes subdomains (e.g., player2.embedseek.online)
-                    val domain = Regex("""(https?://[^/]+)""").find(fixedUrl)?.groupValues?.get(1) ?: "https://jkrowl.embedseek.online"
-                    
-                    // Since Embedseek's API returns the master M3U8 directly as an octet-stream, 
-                    // we can pass the API URL directly to ExoPlayer!
-                    val m3u8Url = "$domain/api/v1/player?t=$token"
-                    
+                // If it's already a direct M3U8 link, return it immediately
+                if (fixedUrl.contains(".m3u8")) {
                     callback(
                         newExtractorLink(
-                            source = "Embedseek",
-                            name = "Embedseek HD",
-                            url = m3u8Url,
+                            source = "AnimeJoker",
+                            name = "Direct Server",
+                            url = fixedUrl,
                             type = ExtractorLinkType.M3U8
                         ) {
-                            this.referer = "$domain/" // Critical: The API requires the domain as the referer
+                            this.referer = mainUrl
                             this.quality = Qualities.Unknown.value
                         }
                     )
@@ -207,8 +225,32 @@ class AnimeJokerProvider : MainAPI() {
                     continue
                 }
 
-                // Generic Fallback: if there's a standard m3u8 directly in the iframe source
-                val m3u8 = Regex("""(https?://[^"']*?\.m3u8[^"']*?)["'\\]""").find(iframeDocText)?.groupValues?.get(1)
+                // Fetch the inner contents of the iframe/link
+                val responseText = app.get(fixedUrl, referer = data).text
+
+                // Check A: Embedseek Token Extraction
+                val token = Regex("""t=([0-9a-fA-F]{30,})""").find(responseText)?.groupValues?.get(1)
+                if (token != null) {
+                    val domain = Regex("""(https?://[^/]+)""").find(fixedUrl)?.groupValues?.get(1) ?: "https://jkrowl.embedseek.online"
+                    val m3u8Url = "$domain/api/v1/player?t=$token"
+
+                    callback(
+                        newExtractorLink(
+                            source = "Embedseek",
+                            name = "Embedseek HD",
+                            url = m3u8Url,
+                            type = ExtractorLinkType.M3U8
+                        ) {
+                            this.referer = "$domain/" // Critical for Cloudstream ExoPlayer authorization
+                            this.quality = Qualities.Unknown.value
+                        }
+                    )
+                    foundLinks = true
+                    continue
+                }
+
+                // Check B: Generic fallback if a server just exposed the .m3u8 link directly inside the iframe
+                val m3u8 = Regex("""(https?://[^"']*?\.m3u8[^"']*?)["'\\]""").find(responseText)?.groupValues?.get(1)
                 if (m3u8 != null) {
                     callback(
                         newExtractorLink(
@@ -222,9 +264,18 @@ class AnimeJokerProvider : MainAPI() {
                         }
                     )
                     foundLinks = true
+                    continue
                 }
+
+                // Check C: Nested Iframes (If the iframe just loaded another iframe, add it to our search queue)
+                Regex("""(?:<iframe[^>]*src=["']|atob\(\s*["']|base64,\s*["'])([^"']+)["']""").findAll(responseText).forEach { match ->
+                    val innerUrl = match.groupValues[1]
+                    val decodedUrl = if (innerUrl.startsWith("http") || innerUrl.startsWith("//")) innerUrl else innerUrl.b64Decode()
+                    if (!checked.contains(decodedUrl)) toCheck.add(decodedUrl)
+                }
+
             } catch (e: Exception) {
-                e.printStackTrace()
+                // Ignore network errors on bad ad iframes so the queue can continue
             }
         }
 
