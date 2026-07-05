@@ -3,6 +3,7 @@ package com.AnimeJoker
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.network.WebViewResolver
+import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.nodes.Element
 
 class AnimeJokerProvider : MainAPI() {
@@ -16,13 +17,11 @@ class AnimeJokerProvider : MainAPI() {
         val doc = app.get(mainUrl).document
         val home = mutableListOf<HomePageList>()
 
-        // 1. Fetch Series (Limit 8)
         val seriesElements = doc.select("#widget_list_movies_series-2-all ul li").take(8)
         if (seriesElements.isNotEmpty()) {
             home.add(HomePageList("Series", seriesElements.mapNotNull { toSearchResult(it) }))
         }
 
-        // 2. Fetch Movies (Using the corrected ID: -3-all, Limit 8)
         val movieElements = doc.select("#widget_list_movies_series-3-all ul li").take(8)
         if (movieElements.isNotEmpty()) {
             home.add(HomePageList("Movies", movieElements.mapNotNull { toSearchResult(it) }))
@@ -31,7 +30,6 @@ class AnimeJokerProvider : MainAPI() {
         return newHomePageResponse(home)
     }
 
-    // Helper function to keep parsing clean
     private fun toSearchResult(item: Element): SearchResponse? {
         val a = item.selectFirst("a") ?: return null
         val href = a.attr("href")
@@ -92,7 +90,6 @@ class AnimeJokerProvider : MainAPI() {
 
         val episodeElements = doc.select("#episode_by_temp li")
         
-        // Format as Movie if 0 or 1 episodes exist
         if (episodeElements.isEmpty() || episodeElements.size == 1) {
             val dataUrl = if (episodeElements.size == 1) {
                 episodeElements.first()?.selectFirst("a.lnk-blk")?.attr("href") ?: url
@@ -140,28 +137,51 @@ class AnimeJokerProvider : MainAPI() {
     ): Boolean {
         val doc = app.get(data).document
         var foundLinks = false
+        val collectedIframes = mutableSetOf<String>()
 
-        // Extract raw iframes (prioritizing lazy loaded data-src)
-        val initialIframes = doc.select("div.video iframe, iframe").mapNotNull {
-            it.attr("data-src").ifEmpty {
-                it.attr("data-lazy-src").ifEmpty {
-                    it.attr("src")
+        // 1. Gather Hardcoded Iframes (Torofilm Tab Lazy Loading)
+        doc.select("div.video iframe, iframe").forEach {
+            it.attr("data-src").ifEmpty { it.attr("data-lazy-src") }.ifEmpty { it.attr("src") }.let { src ->
+                if (src.isNotBlank()) collectedIframes.add(src)
+            }
+        }
+
+        // 2. Gather Hidden AJAX Iframes (DooPlay Standard)
+        doc.select("[data-post][data-nume][data-type]").forEach { server ->
+            val post = server.attr("data-post")
+            val nume = server.attr("data-nume")
+            val type = server.attr("data-type")
+
+            if (post.isNotBlank()) {
+                try {
+                    val ajaxUrl = "$mainUrl/wp-admin/admin-ajax.php"
+                    val res = app.post(
+                        url = ajaxUrl,
+                        data = mapOf("action" to "doo_player", "post" to post, "nume" to nume, "type" to type),
+                        headers = mapOf("X-Requested-With" to "XMLHttpRequest")
+                    ).text
+
+                    // Clean the returned JSON and extract the iframe src
+                    val cleanRes = res.replace("\\/", "/").replace("\\\"", "\"")
+                    Regex("""src=["']([^"']+)["']""").find(cleanRes)?.groupValues?.get(1)?.let {
+                        collectedIframes.add(it)
+                    }
+                } catch (e: Exception) {
+                    // Ignore individual failed AJAX pings
                 }
             }
-        }.filter { it.isNotBlank() }.toSet()
+        }
 
-        for (link in initialIframes) {
+        for (link in collectedIframes) {
             var targetUrl = if (link.startsWith("//")) "https:$link" else link
 
             // Step 1: Resolve internal ?trembed links
             if (targetUrl.contains("?trembed=")) {
                 try {
                     val res = app.get(targetUrl, referer = data)
-                    // Did it do a 301/302 Redirect directly to the server?
                     if (res.url != targetUrl && !res.url.contains("?trembed=")) {
                         targetUrl = res.url
                     } else {
-                        // Or did it load an HTML page with an iframe inside?
                         val innerIframe = res.document.selectFirst("iframe")?.let {
                             it.attr("data-src").ifEmpty { it.attr("src") }
                         }
@@ -179,53 +199,46 @@ class AnimeJokerProvider : MainAPI() {
                 continue
             }
 
-            // Step 3: Embedseek Direct API Hijack (Bypasses Ads & Timeouts)
+            // Step 3: Embedseek JSON API Hijack
             if (targetUrl.contains("embedseek")) {
                 try {
                     val domain = Regex("""(https?://[^/]+)""").find(targetUrl)?.value ?: "https://jkrowl.embedseek.online"
-                    
-                    // Extracts 'hw16q' from '.../#hw16q' or '.../e/hw16q'
                     val id = targetUrl.split("/", "#").last { it.isNotBlank() }
                     val infoUrl = "$domain/api/v1/info?id=$id"
                     
-                    // Fetch the API JSON. 
-                    // (If Cloudflare blocks the raw GET, we fallback to WebViewResolver just to read the JSON text)
+                    // Fetch the API JSON (Using WebView fallback if Cloudflare blocks raw GET)
                     val infoResponse = try {
                          app.get(infoUrl, referer = targetUrl).text
                     } catch (e: Exception) {
                          app.get(infoUrl, interceptor = WebViewResolver(Regex("""api/v1/info""")), referer = targetUrl).document.text()
                     }
                     
-                    // Extract the massive encrypted token payload
-                    val tokenMatches = Regex("""([a-fA-F0-9]{40,})""").findAll(infoResponse)
-                    val token = tokenMatches.maxByOrNull { it.value.length }?.value
-                    val m3u8 = Regex("""(https?://[^"'\s]*?\.m3u8[^"'\s]*)""").find(infoResponse)?.groupValues?.get(1)
+                    // First try to find a raw .m3u8 directly in the info response
+                    var finalM3u8 = Regex("""(https?://[^"'\s]*?\.m3u8[^"'\s]*)""").find(infoResponse)?.groupValues?.get(1)
+
+                    // If not found, extract the token, fetch the player payload, and grab the M3U8 from the JSON
+                    if (finalM3u8 == null) {
+                        val tokenMatches = Regex("""([a-fA-F0-9]{40,})""").findAll(infoResponse)
+                        val token = tokenMatches.maxByOrNull { it.value.length }?.value
+
+                        if (token != null) {
+                            val playerUrl = "$domain/api/v1/player?t=$token"
+                            val playerPayload = app.get(playerUrl, referer = "$domain/").text
+                            finalM3u8 = Regex("""(https?://[^"'\s]*?\.m3u8[^"'\s]*)""").find(playerPayload)?.groupValues?.get(1)
+                        }
+                    }
                     
-                    if (m3u8 != null) {
+                    // Pass the REAL M3U8 string to Cloudstream
+                    if (finalM3u8 != null) {
                         callback(
-                            newExtractorLink(
+                            ExtractorLink(
                                 source = "Embedseek",
                                 name = "Embedseek HD",
-                                url = m3u8.replace("\\", ""),
+                                url = finalM3u8.replace("\\", ""),
+                                referer = "$domain/",
+                                quality = Qualities.Unknown.value,
                                 type = ExtractorLinkType.M3U8
-                            ) {
-                                this.referer = "$domain/"
-                                this.quality = Qualities.Unknown.value
-                            }
-                        )
-                        foundLinks = true
-                    } else if (token != null) {
-                        val playerUrl = "$domain/api/v1/player?t=$token"
-                        callback(
-                            newExtractorLink(
-                                source = "Embedseek",
-                                name = "Embedseek HD",
-                                url = playerUrl,
-                                type = ExtractorLinkType.M3U8 
-                            ) {
-                                this.referer = "$domain/" // Critical authorization header
-                                this.quality = Qualities.Unknown.value
-                            }
+                            )
                         )
                         foundLinks = true
                     }
