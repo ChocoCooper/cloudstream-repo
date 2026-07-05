@@ -173,20 +173,23 @@ class AnimeJokerProvider : MainAPI() {
         for (link in collectedIframes) {
             var targetUrl = if (link.startsWith("//")) "https:$link" else link
 
-            // Step 1: Resolve the ?trembed= wrapper page to the actual server iframe
+            // Step 1: Force resolution of the ?trembed= URL via WebView to bypass silent Cloudflare 403 drops
             if (targetUrl.contains("?trembed=")) {
                 try {
-                    val res = app.get(targetUrl, referer = data)
-                    targetUrl = if (res.url != targetUrl && !res.url.contains("?trembed=")) {
-                        res.url
+                    val wvUrl = withTimeoutOrNull(15000L) {
+                        app.get(
+                            targetUrl,
+                            interceptor = WebViewResolver(Regex("""embedseek\.online|cdntamilbulb\.online|parking\.godaddy|wsimg\.com""")),
+                            referer = data
+                        ).url
+                    }
+                    if (wvUrl != null) {
+                        targetUrl = wvUrl
                     } else {
-                        val innerIframe = res.document.selectFirst("iframe")?.let {
-                            it.attr("data-src").ifEmpty { it.attr("src") }
-                        }
-                        if (!innerIframe.isNullOrBlank()) {
-                            if (innerIframe.startsWith("//")) "https:$innerIframe" else innerIframe
-                        } else {
-                            targetUrl
+                        // Fallback if WebView missed the redirect
+                        val res = app.get(targetUrl, referer = data)
+                        if (res.url != targetUrl && !res.url.contains("?trembed=")) {
+                            targetUrl = res.url
                         }
                     }
                 } catch (e: Exception) {
@@ -194,73 +197,52 @@ class AnimeJokerProvider : MainAPI() {
                 }
             }
 
-            // Drop dead ad/parking networks immediately
+            // Step 2: Instantly drop known ad/parking networks so they don't stall the app
             if (targetUrl.contains("cdntamilbulb.online") || targetUrl.contains("parking.godaddy") || targetUrl.contains("wsimg.com")) {
                 continue
             }
 
-            // Step 2: Embedseek API Token Hijack
+            // Step 3: Embedseek HTML Hijack
             if (targetUrl.contains("embedseek")) {
                 try {
                     val domain = Regex("""(https?://[^/]+)""").find(targetUrl)?.value ?: "https://jkrowl.embedseek.online"
-                    val id = targetUrl.substringBefore("?").split("/", "#").last { it.isNotBlank() }
-                    val infoUrl = "$domain/api/v1/info?id=$id"
-
-                    var infoResponse = ""
+                    
+                    var htmlResponse = ""
                     try {
-                        infoResponse = app.get(infoUrl, referer = targetUrl, headers = mapOf("Accept" to "application/json")).text
+                        htmlResponse = app.get(targetUrl, referer = "$mainUrl/").text
                     } catch (e: Exception) {}
 
-                    // If Cloudflare blocked the GET request (returns HTML), use WebView to clear the captcha.
-                    // We only wait for the `api/v1/info` request because it happens automatically (no play click required).
-                    if (infoResponse.isBlank() || infoResponse.trim().startsWith("<html", ignoreCase = true) || infoResponse.contains("Cloudflare")) {
+                    // If Cloudflare blocked the GET request, use WebView to clear the captcha.
+                    // We wait for `.vtt` or `.woff` because fonts and thumbnails load automatically (no Play button needed).
+                    if (htmlResponse.isBlank() || htmlResponse.contains("Cloudflare") || htmlResponse.contains("Just a moment")) {
                         try {
-                            withTimeoutOrNull(20000L) {
-                                app.get(targetUrl, interceptor = WebViewResolver(Regex("""api/v1/(info|player)""")), referer = data)
+                            withTimeoutOrNull(15000L) {
+                                app.get(targetUrl, interceptor = WebViewResolver(Regex("""\.(vtt|woff|woff2|png)""")), referer = "$mainUrl/")
                             }
-                            // Cloudflare should now be cleared, fetch the API properly
-                            infoResponse = app.get(infoUrl, referer = targetUrl, headers = mapOf("Accept" to "application/json")).text
+                            // Cloudflare is solved in the app session, fetch HTML properly
+                            htmlResponse = app.get(targetUrl, referer = "$mainUrl/").text
                         } catch (e: Exception) {}
                     }
 
-                    // Clean JSON escaping
-                    val cleanInfoResponse = infoResponse.replace("\\/", "/")
-                    
-                    // Look strictly for JSON keys (file, hls, url) to avoid false-positive Yandex analytics tracking links
-                    val mediaRegex = Regex(""""(?:file|hls|url)"\s*:\s*"([^"]+\.(?:m3u8|mp4)[^"]*)"""", RegexOption.IGNORE_CASE)
-                    var finalM3u8 = mediaRegex.find(cleanInfoResponse)?.groupValues?.get(1)
+                    // Extract the raw .m3u8 manifest directly from the HTML to entirely prevent Error 3002
+                    var finalM3u8 = Regex("""(https?://[^"'\s\\]+?\.m3u8[^"'\s\\]*)""", RegexOption.IGNORE_CASE).find(htmlResponse)?.groupValues?.get(1)
 
                     if (finalM3u8 == null) {
-                        // Extract token if direct link isn't provided
-                        val tokenMatches = Regex("""([a-fA-F0-9]{40,})""").findAll(cleanInfoResponse)
-                        val token = tokenMatches.maxByOrNull { it.value.length }?.value
-
-                        if (token != null) {
-                            val playerUrl = "$domain/api/v1/player?t=$token"
-                            val playerRes = app.get(playerUrl, referer = "$domain/", headers = mapOf("Accept" to "application/json")).text
-                            
-                            val cleanPlayerRes = playerRes.replace("\\/", "/")
-                            finalM3u8 = mediaRegex.find(cleanPlayerRes)?.groupValues?.get(1)
-                            
-                            if (finalM3u8 == null) {
-                                // If token data is Base64 encoded, decode it and search again
-                                val b64Regex = Regex("""([A-Za-z0-9+/=]{40,})""")
-                                for (match in b64Regex.findAll(cleanPlayerRes)) {
-                                    try {
-                                        val decoded = String(Base64.decode(match.value, Base64.DEFAULT))
-                                        val cleanDecoded = decoded.replace("\\/", "/")
-                                        val decodedM3u8 = mediaRegex.find(cleanDecoded)?.groupValues?.get(1)
-                                        if (decodedM3u8 != null) {
-                                            finalM3u8 = decodedM3u8
-                                            break
-                                        }
-                                    } catch (e: Exception) {}
+                        // If it's Base64 obfuscated inside the JS config, decode it and search again
+                        val b64Regex = Regex("""([A-Za-z0-9+/=]{40,})""")
+                        for (match in b64Regex.findAll(htmlResponse)) {
+                            try {
+                                val decoded = String(Base64.decode(match.value, Base64.DEFAULT))
+                                val cleanDecoded = decoded.replace("\\/", "/")
+                                val decodedM3u8 = Regex("""(https?://[^"'\s\\]+?\.m3u8[^"'\s\\]*)""", RegexOption.IGNORE_CASE).find(cleanDecoded)?.groupValues?.get(1)
+                                if (decodedM3u8 != null) {
+                                    finalM3u8 = decodedM3u8
+                                    break
                                 }
-                            }
+                            } catch (e: Exception) {}
                         }
                     }
 
-                    // Step 3: Pass ONLY the clean media string to Cloudstream, avoiding Error 3002
                     if (finalM3u8 != null) {
                         callback(
                             ExtractorLink(
@@ -269,7 +251,7 @@ class AnimeJokerProvider : MainAPI() {
                                 url = finalM3u8,
                                 referer = "$domain/",
                                 quality = Qualities.Unknown.value,
-                                type = if (finalM3u8.contains(".mp4")) ExtractorLinkType.VIDEO else ExtractorLinkType.M3U8
+                                type = ExtractorLinkType.M3U8
                             )
                         )
                         foundLinks = true
@@ -278,7 +260,7 @@ class AnimeJokerProvider : MainAPI() {
                     e.printStackTrace()
                 }
             } else {
-                // Step 4: Standard stream hosts
+                // Step 4: Any standard streaming servers get routed to built-in Cloudstream extractors
                 foundLinks = loadExtractor(targetUrl, data, subtitleCallback, callback) || foundLinks
             }
         }
