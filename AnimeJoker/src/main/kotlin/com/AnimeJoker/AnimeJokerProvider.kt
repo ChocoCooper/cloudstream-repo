@@ -137,14 +137,12 @@ class AnimeJokerProvider : MainAPI() {
         var foundLinks = false
         val collectedIframes = mutableSetOf<String>()
 
-        // 1. Gather hardcoded iframes
         doc.select("div.video iframe, iframe").forEach {
             it.attr("data-src").ifEmpty { it.attr("data-lazy-src") }.ifEmpty { it.attr("src") }.let { src ->
                 if (src.isNotBlank()) collectedIframes.add(src)
             }
         }
 
-        // 2. Gather hidden AJAX iframes
         doc.select("[data-post][data-nume][data-type]").forEach { server ->
             val post = server.attr("data-post")
             val nume = server.attr("data-nume")
@@ -170,7 +168,6 @@ class AnimeJokerProvider : MainAPI() {
         for (link in collectedIframes) {
             var targetUrl = if (link.startsWith("//")) "https:$link" else link
 
-            // Step 1: Resolve internal redirects (e.g. ?trembed=0)
             if (targetUrl.contains("?trembed=")) {
                 try {
                     val res = app.get(targetUrl, referer = data)
@@ -188,26 +185,60 @@ class AnimeJokerProvider : MainAPI() {
                 }
             }
 
-            // Step 2: Drop dead ad/parking networks immediately
             if (targetUrl.contains("cdntamilbulb.online") || targetUrl.contains("parking.godaddy") || targetUrl.contains("wsimg.com")) {
                 continue
             }
 
-            // Step 3: Embedseek URL Formatting
-            if (targetUrl.contains("embedseek")) {
-                val domain = Regex("""(https?://[^/]+)""").find(targetUrl)?.value ?: "https://jkrowl.embedseek.online"
-                
-                // Extract the media ID (e.g., hw16q)
-                val id = targetUrl.substringBefore("?").split("/", "#").lastOrNull { it.isNotBlank() }
-                
-                if (id != null) {
-                    // We rewrite the URL to the standard /e/ format so Cloudstream's native 
-                    // VidGuard/Embedseek decrypter extractor can automatically intercept and decode it!
-                    val cleanEmbedUrl = "$domain/e/$id"
-                    foundLinks = loadExtractor(cleanEmbedUrl, data, subtitleCallback, callback) || foundLinks
+            // ========================================================
+            // EMBEDSEEK / VIDGUARD BYPASS
+            // ========================================================
+            if (targetUrl.contains("embedseek") || targetUrl.contains("vidguard")) {
+                try {
+                    val domain = Regex("""(https?://[^/]+)""").find(targetUrl)?.value ?: "https://jkrowl.embedseek.online"
+                    val id = targetUrl.substringBefore("?").split("/", "#").lastOrNull { it.isNotBlank() }
+                    
+                    if (id != null) {
+                        // VidGuard/Embedseek has a raw, unencrypted fallback API for mobile clients
+                        val legacyApiUrl = "$domain/api/source/$id"
+                        
+                        val apiResponse = app.post(
+                            url = legacyApiUrl,
+                            headers = mapOf(
+                                "Referer" to targetUrl,
+                                "Origin" to domain,
+                                "Accept" to "application/json, text/plain, */*",
+                                "Content-Type" to "application/x-www-form-urlencoded"
+                            ),
+                            // Vidguard sometimes requires an empty body on POST for this endpoint
+                            data = emptyMap()
+                        ).text
+
+                        // Clean JSON escaping and grab raw file url
+                        val cleanJson = apiResponse.replace("\\/", "/")
+                        
+                        // Looks for "file": "https://...", "url": "...", or "src": "..."
+                        val m3u8Match = Regex(""""(?:file|url|src|data)"\s*:\s*"([^"]+\.(?:m3u8|mp4)[^"]*)"""", RegexOption.IGNORE_CASE).find(cleanJson)
+                        
+                        val finalUrl = m3u8Match?.groupValues?.get(1)
+
+                        if (finalUrl != null) {
+                            callback(
+                                ExtractorLink(
+                                    source = "Embedseek",
+                                    name = "Embedseek HD",
+                                    url = finalUrl,
+                                    referer = "$domain/",
+                                    quality = Qualities.Unknown.value,
+                                    type = if (finalUrl.contains(".mp4", ignoreCase = true)) ExtractorLinkType.VIDEO else ExtractorLinkType.M3U8
+                                )
+                            )
+                            foundLinks = true
+                        }
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
                 }
             } else {
-                // Step 4: Standard external extractors
                 foundLinks = loadExtractor(targetUrl, data, subtitleCallback, callback) || foundLinks
             }
         }
