@@ -1,5 +1,6 @@
 package com.AnimeJoker
 
+import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.network.WebViewResolver
@@ -172,9 +173,7 @@ class AnimeJokerProvider : MainAPI() {
         for (link in collectedIframes) {
             var targetUrl = if (link.startsWith("//")) "https:$link" else link
 
-            // Step 1: Resolve the ?trembed= wrapper page to the actual server iframe.
-            // Plain follow (no WebView yet) - this page itself isn't the protected one,
-            // it just points at the real embed host.
+            // Step 1: Resolve the ?trembed= wrapper page to the actual server iframe
             if (targetUrl.contains("?trembed=")) {
                 try {
                     val res = app.get(targetUrl, referer = data)
@@ -200,58 +199,78 @@ class AnimeJokerProvider : MainAPI() {
                 continue
             }
 
+            // Step 2: Embedseek API Token Hijack
             if (targetUrl.contains("embedseek")) {
                 try {
                     val domain = Regex("""(https?://[^/]+)""").find(targetUrl)?.value ?: "https://jkrowl.embedseek.online"
+                    val id = targetUrl.substringBefore("?").split("/", "#").last { it.isNotBlank() }
+                    val infoUrl = "$domain/api/v1/info?id=$id"
 
-                    // IMPORTANT: only match the real media manifest/file request, NOT the
-                    // api/v1/info or api/v1/player calls. Those endpoints return a token the
-                    // page's own JS decrypts client-side - matching on them (as done previously)
-                    // caused the WebView to be torn down the instant the API call fired, before
-                    // the page ever got to decrypt it and request the actual video. Letting the
-                    // page run to completion and only catching the final .m3u8/.mp4 request
-                    // sidesteps needing to reverse-engineer that encryption at all.
-                    // IMPORTANT: match the extension only when it's the actual last path
-                    // segment (immediately before "?" or end-of-string), not merely present
-                    // somewhere in the URL. Without the anchor, analytics/tracker beacons
-                    // (e.g. Yandex Metrika) that embed the movie's title - which itself ends
-                    // in ".mkv" - as a URL-encoded query value will falsely match, handing
-                    // ExoPlayer a tracking pixel URL instead of the real video.
-                    val mediaExtensionRegex = Regex("""^[^?]*\.(m3u8|mp4|mkv|webm|avi|mov)(\?|$)""", RegexOption.IGNORE_CASE)
+                    var infoResponse = ""
+                    try {
+                        infoResponse = app.get(infoUrl, referer = targetUrl, headers = mapOf("Accept" to "application/json")).text
+                    } catch (e: Exception) {}
 
-                    // Extra safety net: never treat known analytics/ad/tracker domains as the
-                    // media source, regardless of what their query string happens to contain.
-                    val blockedTrackerDomains = listOf(
-                        "yandex.ru", "google-analytics.com", "googletagmanager.com",
-                        "doubleclick.net", "googlesyndication.com", "cloudflareinsights.com",
-                        "googleapis.com"
-                    )
-
-                    val mediaResponse = withTimeoutOrNull(55000L) {
-                        app.get(
-                            targetUrl,
-                            interceptor = WebViewResolver(mediaExtensionRegex),
-                            referer = data
-                        )
+                    // If Cloudflare blocked the GET request (returns HTML), use WebView to clear the captcha.
+                    // We only wait for the `api/v1/info` request because it happens automatically (no play click required).
+                    if (infoResponse.isBlank() || infoResponse.trim().startsWith("<html", ignoreCase = true) || infoResponse.contains("Cloudflare")) {
+                        try {
+                            withTimeoutOrNull(20000L) {
+                                app.get(targetUrl, interceptor = WebViewResolver(Regex("""api/v1/(info|player)""")), referer = data)
+                            }
+                            // Cloudflare should now be cleared, fetch the API properly
+                            infoResponse = app.get(infoUrl, referer = targetUrl, headers = mapOf("Accept" to "application/json")).text
+                        } catch (e: Exception) {}
                     }
 
-                    val finalUrl = mediaResponse?.url
+                    // Clean JSON escaping
+                    val cleanInfoResponse = infoResponse.replace("\\/", "/")
+                    
+                    // Look strictly for JSON keys (file, hls, url) to avoid false-positive Yandex analytics tracking links
+                    val mediaRegex = Regex(""""(?:file|hls|url)"\s*:\s*"([^"]+\.(?:m3u8|mp4)[^"]*)"""", RegexOption.IGNORE_CASE)
+                    var finalM3u8 = mediaRegex.find(cleanInfoResponse)?.groupValues?.get(1)
 
-                    val isRealMedia = finalUrl != null &&
-                        mediaExtensionRegex.containsMatchIn(finalUrl) &&
-                        blockedTrackerDomains.none { finalUrl.contains(it) }
+                    if (finalM3u8 == null) {
+                        // Extract token if direct link isn't provided
+                        val tokenMatches = Regex("""([a-fA-F0-9]{40,})""").findAll(cleanInfoResponse)
+                        val token = tokenMatches.maxByOrNull { it.value.length }?.value
 
-                    if (isRealMedia && finalUrl != null) {
+                        if (token != null) {
+                            val playerUrl = "$domain/api/v1/player?t=$token"
+                            val playerRes = app.get(playerUrl, referer = "$domain/", headers = mapOf("Accept" to "application/json")).text
+                            
+                            val cleanPlayerRes = playerRes.replace("\\/", "/")
+                            finalM3u8 = mediaRegex.find(cleanPlayerRes)?.groupValues?.get(1)
+                            
+                            if (finalM3u8 == null) {
+                                // If token data is Base64 encoded, decode it and search again
+                                val b64Regex = Regex("""([A-Za-z0-9+/=]{40,})""")
+                                for (match in b64Regex.findAll(cleanPlayerRes)) {
+                                    try {
+                                        val decoded = String(Base64.decode(match.value, Base64.DEFAULT))
+                                        val cleanDecoded = decoded.replace("\\/", "/")
+                                        val decodedM3u8 = mediaRegex.find(cleanDecoded)?.groupValues?.get(1)
+                                        if (decodedM3u8 != null) {
+                                            finalM3u8 = decodedM3u8
+                                            break
+                                        }
+                                    } catch (e: Exception) {}
+                                }
+                            }
+                        }
+                    }
+
+                    // Step 3: Pass ONLY the clean media string to Cloudstream, avoiding Error 3002
+                    if (finalM3u8 != null) {
                         callback(
-                            newExtractorLink(
+                            ExtractorLink(
                                 source = "Embedseek",
                                 name = "Embedseek HD",
-                                url = finalUrl,
-                                type = if (finalUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                            ) {
-                                this.referer = "$domain/"
-                                this.quality = Qualities.Unknown.value
-                            }
+                                url = finalM3u8,
+                                referer = "$domain/",
+                                quality = Qualities.Unknown.value,
+                                type = if (finalM3u8.contains(".mp4")) ExtractorLinkType.VIDEO else ExtractorLinkType.M3U8
+                            )
                         )
                         foundLinks = true
                     }
@@ -259,6 +278,7 @@ class AnimeJokerProvider : MainAPI() {
                     e.printStackTrace()
                 }
             } else {
+                // Step 4: Standard stream hosts
                 foundLinks = loadExtractor(targetUrl, data, subtitleCallback, callback) || foundLinks
             }
         }
