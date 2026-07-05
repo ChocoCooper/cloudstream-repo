@@ -1,9 +1,9 @@
 package com.AnimeJoker
 
+import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.network.WebViewResolver
-import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.nodes.Element
 
 class AnimeJokerProvider : MainAPI() {
@@ -90,6 +90,7 @@ class AnimeJokerProvider : MainAPI() {
 
         val episodeElements = doc.select("#episode_by_temp li")
         
+        // Format as Movie if 0 or 1 episodes exist
         if (episodeElements.isEmpty() || episodeElements.size == 1) {
             val dataUrl = if (episodeElements.size == 1) {
                 episodeElements.first()?.selectFirst("a.lnk-blk")?.attr("href") ?: url
@@ -146,7 +147,7 @@ class AnimeJokerProvider : MainAPI() {
             }
         }
 
-        // 2. Gather Hidden AJAX Iframes (DooPlay Standard)
+        // 2. Gather Hidden AJAX Iframes (DooPlay/Toroplay Standard)
         doc.select("[data-post][data-nume][data-type]").forEach { server ->
             val post = server.attr("data-post")
             val nume = server.attr("data-nume")
@@ -161,7 +162,6 @@ class AnimeJokerProvider : MainAPI() {
                         headers = mapOf("X-Requested-With" to "XMLHttpRequest")
                     ).text
 
-                    // Clean the returned JSON and extract the iframe src
                     val cleanRes = res.replace("\\/", "/").replace("\\\"", "\"")
                     Regex("""src=["']([^"']+)["']""").find(cleanRes)?.groupValues?.get(1)?.let {
                         collectedIframes.add(it)
@@ -199,7 +199,7 @@ class AnimeJokerProvider : MainAPI() {
                 continue
             }
 
-            // Step 3: Embedseek JSON API Hijack
+            // Step 3: Embedseek JSON API Hijack & 3002 M3U8 Fix
             if (targetUrl.contains("embedseek")) {
                 try {
                     val domain = Regex("""(https?://[^/]+)""").find(targetUrl)?.value ?: "https://jkrowl.embedseek.online"
@@ -213,22 +213,37 @@ class AnimeJokerProvider : MainAPI() {
                          app.get(infoUrl, interceptor = WebViewResolver(Regex("""api/v1/info""")), referer = targetUrl).document.text()
                     }
                     
-                    // First try to find a raw .m3u8 directly in the info response
-                    var finalM3u8 = Regex("""(https?://[^"'\s]*?\.m3u8[^"'\s]*)""").find(infoResponse)?.groupValues?.get(1)
+                    var finalM3u8 = Regex("""(https?://[^"'\s\\]+?\.m3u8[^"'\s\\]*)""").find(infoResponse)?.groupValues?.get(1)
 
-                    // If not found, extract the token, fetch the player payload, and grab the M3U8 from the JSON
                     if (finalM3u8 == null) {
                         val tokenMatches = Regex("""([a-fA-F0-9]{40,})""").findAll(infoResponse)
                         val token = tokenMatches.maxByOrNull { it.value.length }?.value
 
                         if (token != null) {
                             val playerUrl = "$domain/api/v1/player?t=$token"
-                            val playerPayload = app.get(playerUrl, referer = "$domain/").text
-                            finalM3u8 = Regex("""(https?://[^"'\s]*?\.m3u8[^"'\s]*)""").find(playerPayload)?.groupValues?.get(1)
+                            val playerRes = app.get(playerUrl, referer = "$domain/").text
+                            
+                            // 1. Try to find the M3U8 url directly inside the JSON text
+                            finalM3u8 = Regex("""(https?://[^"'\s\\]+?\.m3u8[^"'\s\\]*)""").find(playerRes)?.groupValues?.get(1)
+                            
+                            // 2. If it's heavily obfuscated, decode base64 strings and search again
+                            if (finalM3u8 == null) {
+                                val b64Regex = Regex("""([A-Za-z0-9+/=]{40,})""")
+                                for (match in b64Regex.findAll(playerRes)) {
+                                    try {
+                                        val decoded = String(Base64.decode(match.value, Base64.DEFAULT))
+                                        val decodedM3u8 = Regex("""(https?://[^"'\s\\]+?\.m3u8[^"'\s\\]*)""").find(decoded)?.groupValues?.get(1)
+                                        if (decodedM3u8 != null) {
+                                            finalM3u8 = decodedM3u8
+                                            break
+                                        }
+                                    } catch (e: Exception) {}
+                                }
+                            }
                         }
                     }
                     
-                    // Pass the REAL M3U8 string to Cloudstream
+                    // Step 4: Send the REAL M3U8 string to Cloudstream, avoiding Error 3002
                     if (finalM3u8 != null) {
                         callback(
                             ExtractorLink(
@@ -246,7 +261,7 @@ class AnimeJokerProvider : MainAPI() {
                     e.printStackTrace()
                 }
             } else {
-                // Step 4: Any standard streaming servers get routed to built-in Cloudstream extractors
+                // Step 5: Any standard streaming servers get routed to built-in Cloudstream extractors
                 foundLinks = loadExtractor(targetUrl, data, subtitleCallback, callback) || foundLinks
             }
         }
