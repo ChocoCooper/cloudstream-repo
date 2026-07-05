@@ -81,7 +81,7 @@ class AnimeJokerProvider : MainAPI() {
         val doc = app.get(url).document
 
         val title = doc.selectFirst("h1.entry-title, .title, .post-title")?.text() ?: "No Title"
-        
+
         val posterImg = doc.selectFirst(".post-thumbnail img")
         val poster = posterImg?.attr("data-src")?.ifEmpty {
             posterImg.attr("data-lazy-src")
@@ -90,14 +90,14 @@ class AnimeJokerProvider : MainAPI() {
         }
 
         val episodeElements = doc.select("#episode_by_temp li")
-        
+
         if (episodeElements.isEmpty() || episodeElements.size == 1) {
             val dataUrl = if (episodeElements.size == 1) {
                 episodeElements.first()?.selectFirst("a.lnk-blk")?.attr("href") ?: url
             } else {
                 url
             }
-            
+
             return newMovieLoadResponse(title, url, TvType.AnimeMovie, dataUrl) {
                 this.posterUrl = poster
             }
@@ -106,14 +106,14 @@ class AnimeJokerProvider : MainAPI() {
             episodeElements.forEachIndexed { index, item ->
                 val a = item.selectFirst("a.lnk-blk") ?: return@forEachIndexed
                 val href = a.attr("href")
-                
+
                 val img = item.selectFirst(".post-thumbnail img")
                 val epPoster = img?.attr("data-src")?.ifEmpty {
                     img.attr("data-lazy-src")
                 }?.ifEmpty {
                     img.attr("src")
                 }
-                
+
                 episodes.add(
                     newEpisode(href) {
                         this.name = "Episode ${index + 1}"
@@ -140,14 +140,14 @@ class AnimeJokerProvider : MainAPI() {
         var foundLinks = false
         val collectedIframes = mutableSetOf<String>()
 
-        // 1. Gather Hardcoded Iframes
+        // 1. Gather hardcoded iframes
         doc.select("div.video iframe, iframe").forEach {
             it.attr("data-src").ifEmpty { it.attr("data-lazy-src") }.ifEmpty { it.attr("src") }.let { src ->
                 if (src.isNotBlank()) collectedIframes.add(src)
             }
         }
 
-        // 2. Gather Hidden AJAX Iframes
+        // 2. Gather hidden AJAX iframes
         doc.select("[data-post][data-nume][data-type]").forEach { server ->
             val post = server.attr("data-post")
             val nume = server.attr("data-nume")
@@ -173,20 +173,25 @@ class AnimeJokerProvider : MainAPI() {
         for (link in collectedIframes) {
             var targetUrl = if (link.startsWith("//")) "https:$link" else link
 
-            // Step 1: Push internal redirects to WebView instantly to bypass Cloudflare 403 drops
+            // Body captured directly from the WebView-resolved request. embedseek sits behind
+            // Cloudflare, so a plain follow-up app.get() to the same URL gets blocked - reuse
+            // the response the WebView already fetched instead of re-requesting it.
+            var resolvedBody: String? = null
+
             if (targetUrl.contains("?trembed=")) {
                 try {
-                    val wvUrl = withTimeoutOrNull(15000L) {
+                    val wvResponse = withTimeoutOrNull(20000L) {
                         app.get(
                             targetUrl,
                             interceptor = WebViewResolver(Regex("""api/v1/info\?id=|cdntamilbulb\.online|parking\.godaddy|wsimg\.com""")),
                             referer = data
-                        ).url
+                        )
                     }
-                    
-                    // If WebView caught the info API or a dead domain, use it. Otherwise, standard fallback.
+
+                    val wvUrl = wvResponse?.url
                     if (wvUrl != null && (wvUrl.contains("api/v1/info") || wvUrl.contains("cdntamilbulb") || wvUrl.contains("godaddy") || wvUrl.contains("wsimg"))) {
                         targetUrl = wvUrl
+                        resolvedBody = wvResponse.text
                     } else {
                         val res = app.get(targetUrl, referer = data)
                         if (res.url != targetUrl && !res.url.contains("?trembed=")) {
@@ -201,32 +206,35 @@ class AnimeJokerProvider : MainAPI() {
                         }
                     }
                 } catch (e: Exception) {
-                    continue 
+                    continue
                 }
             }
 
-            // Step 2: Drop dead ad networks immediately
+            // Drop dead ad/parking networks immediately
             if (targetUrl.contains("cdntamilbulb.online") || targetUrl.contains("parking.godaddy") || targetUrl.contains("wsimg.com")) {
                 continue
             }
 
-            // Step 3: Embedseek API Hijack (Eliminates Error 3002)
             if (targetUrl.contains("embedseek")) {
                 try {
                     val domain = Regex("""(https?://[^/]+)""").find(targetUrl)?.value ?: "https://jkrowl.embedseek.online"
-                    
-                    // If targetUrl is already the intercepted API link, use it!
+
                     val infoUrl = if (targetUrl.contains("api/v1/info")) {
                         targetUrl
                     } else {
                         val id = targetUrl.substringBefore("?").split("/", "#").last { it.isNotBlank() }
                         "$domain/api/v1/info?id=$id"
                     }
-                    
-                    // Fetch API (Cloudflare is already cleared by WebViewResolver at this point)
-                    val infoResponse = app.get(infoUrl, referer = "$domain/", headers = mapOf("Accept" to "application/json")).text
+
+                    // Reuse the WebView-captured body when we have it (already past Cloudflare);
+                    // only fall back to a plain fetch if this iframe never went through the trembed/WebView step.
+                    val infoResponse = resolvedBody ?: app.get(
+                        infoUrl,
+                        referer = "$domain/",
+                        headers = mapOf("Accept" to "application/json")
+                    ).text
                     val cleanInfoResponse = infoResponse.replace("\\/", "/")
-                    
+
                     var finalM3u8 = Regex("""(https?://[^"'\s]+?\.m3u8[^"'\s]*)""").find(cleanInfoResponse)?.groupValues?.get(1)
 
                     if (finalM3u8 == null) {
@@ -235,11 +243,20 @@ class AnimeJokerProvider : MainAPI() {
 
                         if (token != null) {
                             val playerUrl = "$domain/api/v1/player?t=$token"
-                            val playerRes = app.get(playerUrl, referer = "$domain/", headers = mapOf("Accept" to "application/json")).text
-                            
-                            val cleanPlayerRes = playerRes.replace("\\/", "/")
+
+                            // This second endpoint is behind the same Cloudflare check, so it
+                            // needs the WebView too - a plain app.get() here will fail silently.
+                            val playerWvResponse = withTimeoutOrNull(20000L) {
+                                app.get(
+                                    playerUrl,
+                                    interceptor = WebViewResolver(Regex("""\.m3u8|api/v1/player""")),
+                                    referer = "$domain/"
+                                )
+                            }
+                            val cleanPlayerRes = (playerWvResponse?.text ?: "").replace("\\/", "/")
+
                             finalM3u8 = Regex("""(https?://[^"'\s]+?\.m3u8[^"'\s]*)""").find(cleanPlayerRes)?.groupValues?.get(1)
-                            
+
                             if (finalM3u8 == null) {
                                 val b64Regex = Regex("""([A-Za-z0-9+/=]{40,})""")
                                 for (match in b64Regex.findAll(cleanPlayerRes)) {
@@ -256,17 +273,18 @@ class AnimeJokerProvider : MainAPI() {
                             }
                         }
                     }
-                    
+
                     if (finalM3u8 != null) {
                         callback(
-                            ExtractorLink(
+                            newExtractorLink(
                                 source = "Embedseek",
                                 name = "Embedseek HD",
                                 url = finalM3u8.replace("\\", ""),
-                                referer = "$domain/",
-                                quality = Qualities.Unknown.value,
                                 type = ExtractorLinkType.M3U8
-                            )
+                            ) {
+                                this.referer = "$domain/"
+                                this.quality = Qualities.Unknown.value
+                            }
                         )
                         foundLinks = true
                     }
@@ -277,7 +295,7 @@ class AnimeJokerProvider : MainAPI() {
                 foundLinks = loadExtractor(targetUrl, data, subtitleCallback, callback) || foundLinks
             }
         }
-        
+
         return foundLinks
     }
 }
