@@ -2,9 +2,6 @@ package com.AnimeJoker
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.network.WebViewResolver
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.nodes.Element
 
 class AnimeJokerProvider : MainAPI() {
@@ -140,12 +137,14 @@ class AnimeJokerProvider : MainAPI() {
         var foundLinks = false
         val collectedIframes = mutableSetOf<String>()
 
+        // 1. Gather hardcoded iframes
         doc.select("div.video iframe, iframe").forEach {
             it.attr("data-src").ifEmpty { it.attr("data-lazy-src") }.ifEmpty { it.attr("src") }.let { src ->
                 if (src.isNotBlank()) collectedIframes.add(src)
             }
         }
 
+        // 2. Gather hidden AJAX iframes
         doc.select("[data-post][data-nume][data-type]").forEach { server ->
             val post = server.attr("data-post")
             val nume = server.attr("data-nume")
@@ -171,95 +170,44 @@ class AnimeJokerProvider : MainAPI() {
         for (link in collectedIframes) {
             var targetUrl = if (link.startsWith("//")) "https:$link" else link
 
+            // Step 1: Resolve internal redirects (e.g. ?trembed=0)
             if (targetUrl.contains("?trembed=")) {
                 try {
                     val res = app.get(targetUrl, referer = data)
-                    targetUrl = if (res.url != targetUrl && !res.url.contains("?trembed=")) {
-                        res.url
-                    } else {
-                        val innerIframe = res.document.selectFirst("iframe")?.let {
-                            it.attr("data-src").ifEmpty { it.attr("src") }
-                        }
-                        if (!innerIframe.isNullOrBlank()) {
-                            if (innerIframe.startsWith("//")) "https:$innerIframe" else innerIframe
-                        } else {
-                            targetUrl
-                        }
+                    val innerIframe = res.document.selectFirst("iframe")?.let {
+                        it.attr("data-src").ifEmpty { it.attr("src") }
+                    } ?: Regex("""(https?://[^"'\s]*?embedseek[^"'\s]*)""").find(res.text)?.value
+
+                    if (!innerIframe.isNullOrBlank()) {
+                        targetUrl = if (innerIframe.startsWith("//")) "https:$innerIframe" else innerIframe
+                    } else if (res.url != targetUrl && !res.url.contains("?trembed=")) {
+                        targetUrl = res.url
                     }
                 } catch (e: Exception) {
                     continue
                 }
             }
 
+            // Step 2: Drop dead ad/parking networks immediately
             if (targetUrl.contains("cdntamilbulb.online") || targetUrl.contains("parking.godaddy") || targetUrl.contains("wsimg.com")) {
                 continue
             }
 
+            // Step 3: Embedseek URL Formatting
             if (targetUrl.contains("embedseek")) {
-                try {
-                    val domain = Regex("""(https?://[^/]+)""").find(targetUrl)?.value ?: "https://jkrowl.embedseek.online"
-
-                    // The ultimate regex to catch the raw TikTok CDN stream, while ignoring trackers.
-                    val mediaRegex = Regex("""^[^?]+\.(m3u8|mp4)(?:\?|$)""", RegexOption.IGNORE_CASE)
-
-                    val blockedTrackerDomains = listOf(
-                        "yandex.ru", "google-analytics.com", "googletagmanager.com",
-                        "doubleclick.net", "googlesyndication.com", "cloudflareinsights.com",
-                        "googleapis.com"
-                    )
-
-                    // JAVASCRIPT INJECTION:
-                    // This script runs continuously in the WebView. It brutally attacks any play button
-                    // it finds (Vidstack, plyr, JWPlayer, or standard HTML5 video) and forces the player 
-                    // to click it, bypassing the autoplay block.
-                    val jsClicker = """
-                        setInterval(function() {
-                            try {
-                                document.querySelector('video')?.play();
-                                document.querySelector('[aria-label="Play"], .vds-play-button, button, .plyr__control--overlaid, .vjs-big-play-button')?.click();
-                            } catch(e) {}
-                        }, 1000);
-                    """.trimIndent()
-
-                    // We use Cloudstream's 'evaluateJavascript' extension if it's supported, 
-                    // otherwise WebViewResolver naturally intercepts the stream once the JS clicks the button.
-                    val mediaResponse = withTimeoutOrNull(45000L) {
-                        app.get(
-                            targetUrl,
-                            interceptor = object : WebViewResolver(mediaRegex) {
-                                override fun onPageFinished(url: String) {
-                                    super.onPageFinished(url)
-                                    // Inject our JS sniper right after Cloudflare is bypassed!
-                                    webView?.evaluateJavascript(jsClicker, null)
-                                }
-                            },
-                            referer = data
-                        )
-                    }
-
-                    val finalUrl = mediaResponse?.url
-
-                    val isRealMedia = finalUrl != null &&
-                        mediaRegex.containsMatchIn(finalUrl) &&
-                        blockedTrackerDomains.none { finalUrl.contains(it) }
-
-                    if (isRealMedia && finalUrl != null) {
-                        callback(
-                            ExtractorLink(
-                                source = "Embedseek",
-                                name = "Embedseek HD",
-                                url = finalUrl,
-                                referer = "$domain/",
-                                quality = Qualities.Unknown.value,
-                                type = if (finalUrl.contains(".mp4", ignoreCase = true)) ExtractorLinkType.VIDEO else ExtractorLinkType.M3U8
-                            )
-                        )
-                        foundLinks = true
-                    }
-                } catch (e: Exception) {
-                    e.printStackTrace()
+                val domain = Regex("""(https?://[^/]+)""").find(targetUrl)?.value ?: "https://jkrowl.embedseek.online"
+                
+                // Extract the media ID (e.g., hw16q)
+                val id = targetUrl.substringBefore("?").split("/", "#").lastOrNull { it.isNotBlank() }
+                
+                if (id != null) {
+                    // We rewrite the URL to the standard /e/ format so Cloudstream's native 
+                    // VidGuard/Embedseek decrypter extractor can automatically intercept and decode it!
+                    val cleanEmbedUrl = "$domain/e/$id"
+                    foundLinks = loadExtractor(cleanEmbedUrl, data, subtitleCallback, callback) || foundLinks
                 }
             } else {
+                // Step 4: Standard external extractors
                 foundLinks = loadExtractor(targetUrl, data, subtitleCallback, callback) || foundLinks
             }
         }
