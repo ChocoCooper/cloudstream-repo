@@ -192,7 +192,7 @@ class AnimeJokerProvider : MainAPI() {
                 }
             }
 
-            // Step 2: Instantly drop dead/parked domains to avoid hanging
+            // Step 2: Instantly drop dead/parked domain ads
             if (targetUrl.contains("cdntamilbulb.online") || targetUrl.contains("parking.godaddy") || targetUrl.contains("wsimg.com")) {
                 continue
             }
@@ -255,8 +255,6 @@ class AnimeJokerProvider : MainAPI() {
                     
                     // Step 4: Send the REAL M3U8 string to Cloudstream, avoiding Error 3002 entirely
                     if (finalM3u8 != null) {
-                        val cfCookies = app.cookies(domain).entries.joinToString("; ") { "${it.key}=${it.value}" }
-                        
                         callback(
                             ExtractorLink(
                                 source = "Embedseek",
@@ -265,10 +263,7 @@ class AnimeJokerProvider : MainAPI() {
                                 referer = "$domain/",
                                 quality = Qualities.Unknown.value,
                                 type = ExtractorLinkType.M3U8,
-                                headers = mapOf(
-                                    "Cookie" to cfCookies,
-                                    "Accept" to "*/*"
-                                )
+                                headers = mapOf("Accept" to "*/*")
                             )
                         )
                         foundLinks = true
