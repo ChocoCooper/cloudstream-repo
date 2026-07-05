@@ -211,23 +211,27 @@ class AnimeJokerProvider : MainAPI() {
                     // the page ever got to decrypt it and request the actual video. Letting the
                     // page run to completion and only catching the final .m3u8/.mp4 request
                     // sidesteps needing to reverse-engineer that encryption at all.
-                    val mediaResponse = withTimeoutOrNull(45000L) {
+                    // This host serves the real file as a direct progressive-download video
+                    // (observed via its own analytics beacon reporting a ".mkv" filename),
+                    // not an HLS stream - so watch for common raw video extensions too,
+                    // not just .m3u8/.mp4.
+                    val mediaResponse = withTimeoutOrNull(55000L) {
                         app.get(
                             targetUrl,
-                            interceptor = WebViewResolver(Regex("""\.m3u8|\.mp4""")),
+                            interceptor = WebViewResolver(Regex("""\.m3u8|\.mp4|\.mkv|\.webm|\.avi|\.mov""")),
                             referer = data
                         )
                     }
 
                     val finalUrl = mediaResponse?.url
 
-                    if (finalUrl != null && (finalUrl.contains(".m3u8") || finalUrl.contains(".mp4"))) {
+                    if (finalUrl != null && Regex("""\.m3u8|\.mp4|\.mkv|\.webm|\.avi|\.mov""").containsMatchIn(finalUrl)) {
                         callback(
                             newExtractorLink(
                                 source = "Embedseek",
                                 name = "Embedseek HD",
                                 url = finalUrl,
-                                type = if (finalUrl.contains(".mp4")) ExtractorLinkType.VIDEO else ExtractorLinkType.M3U8
+                                type = if (finalUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                             ) {
                                 this.referer = "$domain/"
                                 this.quality = Qualities.Unknown.value
