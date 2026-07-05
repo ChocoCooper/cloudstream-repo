@@ -193,10 +193,11 @@ class AnimeJokerProvider : MainAPI() {
                             source = if (targetUrl.contains("embedseek")) "Embedseek" else "Server",
                             name = if (targetUrl.contains("embedseek")) "Embedseek HD" else "Server HD",
                             url = resolvedUrl,
-                            referer = targetUrl, // Keep the server domain as referer to avoid 403 Forbidden
-                            quality = Qualities.Unknown.value,
-                            isM3u8 = resolvedUrl.contains(".m3u8") || resolvedUrl.contains("player?t=")
-                        )
+                            type = if (resolvedUrl.contains(".mp4")) ExtractorLinkType.VIDEO else ExtractorLinkType.M3U8
+                        ) {
+                            this.referer = targetUrl
+                            this.quality = Qualities.Unknown.value
+                        }
                     )
                     foundLinks = true
                 }
