@@ -4,6 +4,7 @@ import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.network.WebViewResolver
+import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.nodes.Element
 
 class AnimeJokerProvider : MainAPI() {
@@ -90,7 +91,6 @@ class AnimeJokerProvider : MainAPI() {
 
         val episodeElements = doc.select("#episode_by_temp li")
         
-        // Format as Movie if 0 or 1 episodes exist
         if (episodeElements.isEmpty() || episodeElements.size == 1) {
             val dataUrl = if (episodeElements.size == 1) {
                 episodeElements.first()?.selectFirst("a.lnk-blk")?.attr("href") ?: url
@@ -166,9 +166,7 @@ class AnimeJokerProvider : MainAPI() {
                     Regex("""src=["']([^"']+)["']""").find(cleanRes)?.groupValues?.get(1)?.let {
                         collectedIframes.add(it)
                     }
-                } catch (e: Exception) {
-                    // Ignore individual failed AJAX pings
-                }
+                } catch (e: Exception) {}
             }
         }
 
@@ -194,39 +192,51 @@ class AnimeJokerProvider : MainAPI() {
                 }
             }
 
-            // Step 2: Instantly drop dead/parked domain ads
+            // Step 2: Instantly drop dead/parked domains to avoid hanging
             if (targetUrl.contains("cdntamilbulb.online") || targetUrl.contains("parking.godaddy") || targetUrl.contains("wsimg.com")) {
                 continue
             }
 
-            // Step 3: Embedseek JSON API Hijack & 3002 M3U8 Fix
+            // Step 3: Embedseek JSON API Hijack & Error 3002 Fix
             if (targetUrl.contains("embedseek")) {
                 try {
                     val domain = Regex("""(https?://[^/]+)""").find(targetUrl)?.value ?: "https://jkrowl.embedseek.online"
                     val id = targetUrl.split("/", "#").last { it.isNotBlank() }
                     val infoUrl = "$domain/api/v1/info?id=$id"
                     
-                    // Fetch the API JSON (Using WebView fallback if Cloudflare blocks raw GET)
-                    val infoResponse = try {
-                         app.get(infoUrl, referer = targetUrl).text
-                    } catch (e: Exception) {
-                         app.get(infoUrl, interceptor = WebViewResolver(Regex("""api/v1/info""")), referer = targetUrl).document.text()
+                    var infoResponse = ""
+                    try {
+                        infoResponse = app.get(infoUrl, referer = targetUrl, headers = mapOf("Accept" to "application/json")).text
+                    } catch (e: Exception) {}
+                    
+                    // If Cloudflare blocked the GET request (it returns a 403 HTML page, not an exception),
+                    // we MUST run the player page through WebViewResolver to solve the captcha.
+                    if (infoResponse.isBlank() || infoResponse.trim().startsWith("<html", ignoreCase = true) || infoResponse.contains("Cloudflare")) {
+                        try {
+                            withTimeoutOrNull(15000L) {
+                                // We wait for the 'api/v1/info' request inside the webview as proof that CF is solved
+                                app.get(targetUrl, interceptor = WebViewResolver(Regex("""api/v1/info""")), referer = data)
+                            }
+                            // Now that Cloudflare is cleared, fetch the API properly
+                            infoResponse = app.get(infoUrl, referer = targetUrl, headers = mapOf("Accept" to "application/json")).text
+                        } catch (e: Exception) {}
                     }
                     
                     var finalM3u8 = Regex("""(https?://[^"'\s\\]+?\.m3u8[^"'\s\\]*)""").find(infoResponse)?.groupValues?.get(1)
 
+                    // If the .m3u8 wasn't in the info, fetch the token and parse the player payload
                     if (finalM3u8 == null) {
                         val tokenMatches = Regex("""([a-fA-F0-9]{40,})""").findAll(infoResponse)
                         val token = tokenMatches.maxByOrNull { it.value.length }?.value
 
                         if (token != null) {
                             val playerUrl = "$domain/api/v1/player?t=$token"
-                            val playerRes = app.get(playerUrl, referer = "$domain/").text
+                            val playerRes = app.get(playerUrl, referer = "$domain/", headers = mapOf("Accept" to "application/json")).text
                             
-                            // 1. Try to find the M3U8 url directly inside the JSON text
+                            // 1. Check for raw M3U8 string
                             finalM3u8 = Regex("""(https?://[^"'\s\\]+?\.m3u8[^"'\s\\]*)""").find(playerRes)?.groupValues?.get(1)
                             
-                            // 2. If it's heavily obfuscated, decode base64 strings and search again
+                            // 2. If it's heavily obfuscated inside the JSON, decode base64 strings and search again
                             if (finalM3u8 == null) {
                                 val b64Regex = Regex("""([A-Za-z0-9+/=]{40,})""")
                                 for (match in b64Regex.findAll(playerRes)) {
@@ -243,8 +253,10 @@ class AnimeJokerProvider : MainAPI() {
                         }
                     }
                     
-                    // Step 4: Send the REAL M3U8 string to Cloudstream, avoiding Error 3002
+                    // Step 4: Send the REAL M3U8 string to Cloudstream, avoiding Error 3002 entirely
                     if (finalM3u8 != null) {
+                        val cfCookies = app.cookies(domain).entries.joinToString("; ") { "${it.key}=${it.value}" }
+                        
                         callback(
                             ExtractorLink(
                                 source = "Embedseek",
@@ -252,7 +264,11 @@ class AnimeJokerProvider : MainAPI() {
                                 url = finalM3u8.replace("\\", ""),
                                 referer = "$domain/",
                                 quality = Qualities.Unknown.value,
-                                type = ExtractorLinkType.M3U8
+                                type = ExtractorLinkType.M3U8,
+                                headers = mapOf(
+                                    "Cookie" to cfCookies,
+                                    "Accept" to "*/*"
+                                )
                             )
                         )
                         foundLinks = true
