@@ -2,6 +2,7 @@ package com.AnimeJoker
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.network.WebViewResolver
 import org.jsoup.nodes.Element
 
 class AnimeJokerProvider : MainAPI() {
