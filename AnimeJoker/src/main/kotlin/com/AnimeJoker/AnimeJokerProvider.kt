@@ -1,6 +1,5 @@
 package com.AnimeJoker
 
-import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.network.WebViewResolver
@@ -173,36 +172,22 @@ class AnimeJokerProvider : MainAPI() {
         for (link in collectedIframes) {
             var targetUrl = if (link.startsWith("//")) "https:$link" else link
 
-            // Body captured directly from the WebView-resolved request. embedseek sits behind
-            // Cloudflare, so a plain follow-up app.get() to the same URL gets blocked - reuse
-            // the response the WebView already fetched instead of re-requesting it.
-            var resolvedBody: String? = null
-
+            // Step 1: Resolve the ?trembed= wrapper page to the actual server iframe.
+            // Plain follow (no WebView yet) - this page itself isn't the protected one,
+            // it just points at the real embed host.
             if (targetUrl.contains("?trembed=")) {
                 try {
-                    val wvResponse = withTimeoutOrNull(20000L) {
-                        app.get(
-                            targetUrl,
-                            interceptor = WebViewResolver(Regex("""api/v1/info\?id=|cdntamilbulb\.online|parking\.godaddy|wsimg\.com""")),
-                            referer = data
-                        )
-                    }
-
-                    val wvUrl = wvResponse?.url
-                    if (wvUrl != null && (wvUrl.contains("api/v1/info") || wvUrl.contains("cdntamilbulb") || wvUrl.contains("godaddy") || wvUrl.contains("wsimg"))) {
-                        targetUrl = wvUrl
-                        resolvedBody = wvResponse.text
+                    val res = app.get(targetUrl, referer = data)
+                    targetUrl = if (res.url != targetUrl && !res.url.contains("?trembed=")) {
+                        res.url
                     } else {
-                        val res = app.get(targetUrl, referer = data)
-                        if (res.url != targetUrl && !res.url.contains("?trembed=")) {
-                            targetUrl = res.url
+                        val innerIframe = res.document.selectFirst("iframe")?.let {
+                            it.attr("data-src").ifEmpty { it.attr("src") }
+                        }
+                        if (!innerIframe.isNullOrBlank()) {
+                            if (innerIframe.startsWith("//")) "https:$innerIframe" else innerIframe
                         } else {
-                            val innerIframe = res.document.selectFirst("iframe")?.let {
-                                it.attr("data-src").ifEmpty { it.attr("src") }
-                            }
-                            if (!innerIframe.isNullOrBlank()) {
-                                targetUrl = if (innerIframe.startsWith("//")) "https:$innerIframe" else innerIframe
-                            }
+                            targetUrl
                         }
                     }
                 } catch (e: Exception) {
@@ -219,68 +204,30 @@ class AnimeJokerProvider : MainAPI() {
                 try {
                     val domain = Regex("""(https?://[^/]+)""").find(targetUrl)?.value ?: "https://jkrowl.embedseek.online"
 
-                    val infoUrl = if (targetUrl.contains("api/v1/info")) {
-                        targetUrl
-                    } else {
-                        val id = targetUrl.substringBefore("?").split("/", "#").last { it.isNotBlank() }
-                        "$domain/api/v1/info?id=$id"
+                    // IMPORTANT: only match the real media manifest/file request, NOT the
+                    // api/v1/info or api/v1/player calls. Those endpoints return a token the
+                    // page's own JS decrypts client-side - matching on them (as done previously)
+                    // caused the WebView to be torn down the instant the API call fired, before
+                    // the page ever got to decrypt it and request the actual video. Letting the
+                    // page run to completion and only catching the final .m3u8/.mp4 request
+                    // sidesteps needing to reverse-engineer that encryption at all.
+                    val mediaResponse = withTimeoutOrNull(45000L) {
+                        app.get(
+                            targetUrl,
+                            interceptor = WebViewResolver(Regex("""\.m3u8|\.mp4""")),
+                            referer = data
+                        )
                     }
 
-                    // Reuse the WebView-captured body when we have it (already past Cloudflare);
-                    // only fall back to a plain fetch if this iframe never went through the trembed/WebView step.
-                    val infoResponse = resolvedBody ?: app.get(
-                        infoUrl,
-                        referer = "$domain/",
-                        headers = mapOf("Accept" to "application/json")
-                    ).text
-                    val cleanInfoResponse = infoResponse.replace("\\/", "/")
+                    val finalUrl = mediaResponse?.url
 
-                    var finalM3u8 = Regex("""(https?://[^"'\s]+?\.m3u8[^"'\s]*)""").find(cleanInfoResponse)?.groupValues?.get(1)
-
-                    if (finalM3u8 == null) {
-                        val tokenMatches = Regex("""([a-fA-F0-9]{40,})""").findAll(cleanInfoResponse)
-                        val token = tokenMatches.maxByOrNull { it.value.length }?.value
-
-                        if (token != null) {
-                            val playerUrl = "$domain/api/v1/player?t=$token"
-
-                            // This second endpoint is behind the same Cloudflare check, so it
-                            // needs the WebView too - a plain app.get() here will fail silently.
-                            val playerWvResponse = withTimeoutOrNull(20000L) {
-                                app.get(
-                                    playerUrl,
-                                    interceptor = WebViewResolver(Regex("""\.m3u8|api/v1/player""")),
-                                    referer = "$domain/"
-                                )
-                            }
-                            val cleanPlayerRes = (playerWvResponse?.text ?: "").replace("\\/", "/")
-
-                            finalM3u8 = Regex("""(https?://[^"'\s]+?\.m3u8[^"'\s]*)""").find(cleanPlayerRes)?.groupValues?.get(1)
-
-                            if (finalM3u8 == null) {
-                                val b64Regex = Regex("""([A-Za-z0-9+/=]{40,})""")
-                                for (match in b64Regex.findAll(cleanPlayerRes)) {
-                                    try {
-                                        val decoded = String(Base64.decode(match.value, Base64.DEFAULT))
-                                        val cleanDecoded = decoded.replace("\\/", "/")
-                                        val decodedM3u8 = Regex("""(https?://[^"'\s]+?\.m3u8[^"'\s]*)""").find(cleanDecoded)?.groupValues?.get(1)
-                                        if (decodedM3u8 != null) {
-                                            finalM3u8 = decodedM3u8
-                                            break
-                                        }
-                                    } catch (e: Exception) {}
-                                }
-                            }
-                        }
-                    }
-
-                    if (finalM3u8 != null) {
+                    if (finalUrl != null && (finalUrl.contains(".m3u8") || finalUrl.contains(".mp4"))) {
                         callback(
                             newExtractorLink(
                                 source = "Embedseek",
                                 name = "Embedseek HD",
-                                url = finalM3u8.replace("\\", ""),
-                                type = ExtractorLinkType.M3U8
+                                url = finalUrl,
+                                type = if (finalUrl.contains(".mp4")) ExtractorLinkType.VIDEO else ExtractorLinkType.M3U8
                             ) {
                                 this.referer = "$domain/"
                                 this.quality = Qualities.Unknown.value
