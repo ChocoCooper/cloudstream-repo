@@ -146,7 +146,7 @@ class AnimeJokerProvider : MainAPI() {
             }
         }
 
-        // 2. Gather hidden AJAX iframes
+        // 2. Gather hidden AJAX iframes (DooPlay/Toroplay logic)
         doc.select("[data-post][data-nume][data-type]").forEach { server ->
             val post = server.attr("data-post")
             val nume = server.attr("data-nume")
@@ -172,67 +172,65 @@ class AnimeJokerProvider : MainAPI() {
         for (link in collectedIframes) {
             var targetUrl = if (link.startsWith("//")) "https:$link" else link
 
-            // Step 1: Resolve the ?trembed= wrapper page to the actual server iframe
+            // Step 1: Resolve internal redirects (e.g. ?trembed=0)
             if (targetUrl.contains("?trembed=")) {
                 try {
                     val res = app.get(targetUrl, referer = data)
                     
+                    // Look for iframe inside the redirect page
                     val innerIframe = res.document.selectFirst("iframe")?.let {
                         it.attr("data-src").ifEmpty { it.attr("src") }
-                    } ?: Regex("""(https?://[^"'\s]*?embedseek[^"'\s]*)""").find(res.text)?.value
-
+                    }
+                    
                     if (!innerIframe.isNullOrBlank()) {
                         targetUrl = if (innerIframe.startsWith("//")) "https:$innerIframe" else innerIframe
                     } else if (res.url != targetUrl && !res.url.contains("?trembed=")) {
                         targetUrl = res.url
+                    } else if (res.text.contains("Cloudflare") || res.text.contains("Just a moment")) {
+                        // If Cloudflare blocks the redirect, push it to WebView to solve the captcha
+                        val wvUrl = withTimeoutOrNull(15000L) {
+                            app.get(targetUrl, interceptor = WebViewResolver(Regex("""embedseek|cdntamilbulb""")), referer = data).url
+                        }
+                        if (wvUrl != null) targetUrl = wvUrl
                     }
                 } catch (e: Exception) {
-                    // Fallback to WebView if Cloudflare 403 blocks the trembed request
-                    try {
-                        val wvRes = app.get(targetUrl, interceptor = WebViewResolver(Regex("""embedseek|cdntamilbulb""")), referer = data)
-                        targetUrl = wvRes.url
-                    } catch (e2: Exception) {}
+                    continue
                 }
             }
 
-            // Drop dead ad/parking networks immediately to avoid hanging
+            // Step 2: Drop dead ad/parking networks immediately to prevent 60-second timeouts
             if (targetUrl.contains("cdntamilbulb.online") || targetUrl.contains("parking.godaddy") || targetUrl.contains("wsimg.com")) {
                 continue
             }
 
-            // Step 2: Embedseek AutoPlay Hijack
-            if (targetUrl.contains("embedseek")) {
+            // Step 3: Pass the resolved, clean server URL directly to Cloudstream's native Extractor engine
+            val isExtracted = loadExtractor(targetUrl, data, subtitleCallback, callback)
+            
+            if (isExtracted) {
+                foundLinks = true
+            } else if (targetUrl.contains("embedseek")) {
+                // Step 4: Fallback if the user's Cloudstream fork does not have an Embedseek extractor installed yet
                 try {
-                    val domain = Regex("""(https?://[^/]+)""").find(targetUrl)?.value ?: "https://jkrowl.embedseek.online"
-
-                    // Force Vidstack to load eagerly and autoplay. This bypasses the "Click to Play" requirement
-                    // and forces the site's JS to decrypt the AES payload and request the master.m3u8 instantly!
                     val base = targetUrl.substringBefore("#")
                     val hash = if (targetUrl.contains("#")) "#" + targetUrl.substringAfter("#") else ""
-                    val separator = if (base.contains("?")) "&" else "?"
-                    val autoPlayUrl = "${base}${separator}autoplay=1&autoPlay=true&muted=true&preload=auto&load=eager$hash"
+                    val sep = if (base.contains("?")) "&" else "?"
+                    val autoPlayUrl = "${base}${sep}autoplay=1&autoPlay=true&muted=true&preload=auto&load=eager$hash"
 
-                    // Strict Regex: Requires .m3u8 or .mp4 to be the ACTUAL file extension, NOT a query parameter.
-                    // This perfectly ignores Yandex/Google tracking beacons.
+                    // Strict regex guarantees we only catch the video, not Yandex analytics tracking beacons
                     val mediaRegex = Regex("""^[^?]+\.(m3u8|mp4)(?:\?|$)""", RegexOption.IGNORE_CASE)
-
-                    val mediaResponse = withTimeoutOrNull(25000L) {
-                        app.get(
-                            autoPlayUrl,
-                            interceptor = WebViewResolver(mediaRegex),
-                            referer = data
-                        )
+                    
+                    val wvRes = withTimeoutOrNull(20000L) {
+                        app.get(autoPlayUrl, interceptor = WebViewResolver(mediaRegex), referer = data)
                     }
-
-                    val finalUrl = mediaResponse?.url
-
+                    
+                    val finalUrl = wvRes?.url
                     if (finalUrl != null && mediaRegex.containsMatchIn(finalUrl)) {
                         callback(
                             ExtractorLink(
                                 source = "Embedseek",
                                 name = "Embedseek HD",
                                 url = finalUrl,
-                                referer = "$domain/",
+                                referer = targetUrl,
                                 quality = Qualities.Unknown.value,
                                 type = if (finalUrl.contains(".mp4", ignoreCase = true)) ExtractorLinkType.VIDEO else ExtractorLinkType.M3U8
                             )
@@ -242,9 +240,6 @@ class AnimeJokerProvider : MainAPI() {
                 } catch (e: Exception) {
                     e.printStackTrace()
                 }
-            } else {
-                // Step 3: Standard external extractors
-                foundLinks = loadExtractor(targetUrl, data, subtitleCallback, callback) || foundLinks
             }
         }
 
