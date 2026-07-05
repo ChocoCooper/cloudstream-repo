@@ -1,9 +1,7 @@
 name: Build
-
 concurrency: 
   group: "build"
   cancel-in-progress: true
-
 on:
   push:
     branches:
@@ -11,7 +9,6 @@ on:
       - main
     paths-ignore:
       - '*.md'
-
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -20,35 +17,54 @@ jobs:
         uses: actions/checkout@v4.2.2
         with:
           path: "src"
-
       - name: Checkout builds
         uses: actions/checkout@v4.2.2
         with:
           ref: "builds"
           path: "builds"
-
       - name: Clean old builds
         run: rm -rf $GITHUB_WORKSPACE/builds/*.cs3
-
       - name: Setup JDK 17
         uses: actions/setup-java@v4.6.0
         with:
           distribution: "adopt"
           java-version: 17
-
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3.2.2
-
       - name: Build Plugins
+        id: build
         run: |
           cd $GITHUB_WORKSPACE/src
           chmod +x gradlew
-          # ADDED: --no-daemon (prevents worker deadlocks), --parallel (controlled parallelism), and --max-workers (restricts thread count)
-          ./gradlew clean make makePluginsJson --no-daemon --parallel --max-workers=2 --stacktrace --info 2>&1 | tee build_log.txt
-          
+          # --no-daemon (prevents worker deadlocks), --parallel (controlled parallelism), and --max-workers (restricts thread count)
+          # NOTE: --info was removed - it drowns real compiler errors in dependency-resolution noise.
+          # --stacktrace is kept since it's useful for Gradle-level (non-Kotlin) failures.
+          set -o pipefail
+          ./gradlew clean make makePluginsJson --no-daemon --parallel --max-workers=2 --stacktrace 2>&1 | tee build_log.txt
+
           mkdir -p $GITHUB_WORKSPACE/builds
           cp **/build/*.cs3 $GITHUB_WORKSPACE/builds || true
           cp build/plugins.json $GITHUB_WORKSPACE/builds || true
+
+      - name: Extract compiler errors
+        if: failure() && steps.build.outcome == 'failure'
+        run: |
+          cd $GITHUB_WORKSPACE/src
+          echo "### Kotlin compiler errors" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          if grep -E "^e: " build_log.txt > kotlin_errors.txt; then
+            cat kotlin_errors.txt >> $GITHUB_STEP_SUMMARY
+          else
+            echo "No 'e: ' compiler lines found — this may be a Gradle/dependency failure, check the full log artifact." >> $GITHUB_STEP_SUMMARY
+            tail -n 60 build_log.txt >> $GITHUB_STEP_SUMMARY
+          fi
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+          if [ -s kotlin_errors.txt ]; then
+            while IFS= read -r line; do
+              echo "::error::${line#e: }"
+            done < kotlin_errors.txt
+          fi
 
       - name: Upload Build Log Artifact
         uses: actions/upload-artifact@v4
@@ -58,6 +74,7 @@ jobs:
           path: src/build_log.txt
 
       - name: Push builds
+        if: success()
         run: |
           cd $GITHUB_WORKSPACE/builds
           git config --local user.email "actions@github.com"
