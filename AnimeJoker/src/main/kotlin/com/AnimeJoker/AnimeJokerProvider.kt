@@ -3,6 +3,7 @@ package com.AnimeJoker
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.network.WebViewResolver
+import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.nodes.Element
 
 class AnimeJokerProvider : MainAPI() {
@@ -37,12 +38,10 @@ class AnimeJokerProvider : MainAPI() {
         val href = a.attr("href")
         val img = item.selectFirst(".post-thumbnail img, img")
 
-        // Prioritize explicit title, fallback to 'title' attr, fallback to 'alt' attr
         val title = item.selectFirst(".entry-title")?.text()
             ?: a.attr("title").ifEmpty { img?.attr("alt") }
             ?: "No Title"
 
-        // Torofilm frequently uses data-src for lazy loading images
         val poster = img?.attr("data-src")?.ifEmpty {
             img.attr("data-lazy-src")
         }?.ifEmpty {
@@ -59,7 +58,6 @@ class AnimeJokerProvider : MainAPI() {
         var page = 1
         var hasNext = true
 
-        // Pagination loop: Caps at 5 pages to prevent accidental infinite looping
         while (hasNext && page <= 5) {
             val url = if (page == 1) "$mainUrl/?s=$query" else "$mainUrl/page/$page/?s=$query"
             val doc = app.get(url).document
@@ -71,7 +69,6 @@ class AnimeJokerProvider : MainAPI() {
                 toSearchResult(item)?.let { searchResponse.add(it) }
             }
 
-            // Check if there is a 'NEXT' button in the pagination nav
             val nextLink = doc.select(".nav-links a").find { it.text().contains("NEXT", ignoreCase = true) }
             if (nextLink != null) {
                 page++
@@ -85,7 +82,6 @@ class AnimeJokerProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url).document
 
-        // Grab title from standard entry-title class
         val title = doc.selectFirst("h1.entry-title, .title, .post-title")?.text() ?: "No Title"
         
         val posterImg = doc.selectFirst(".post-thumbnail img")
@@ -97,8 +93,7 @@ class AnimeJokerProvider : MainAPI() {
 
         val episodeElements = doc.select("#episode_by_temp li")
         
-        // Movie vs Series Logic:
-        // If there are 0 or 1 episodes in the list, format it as a Movie.
+        // Format as Movie if 0 or 1 episodes exist
         if (episodeElements.isEmpty() || episodeElements.size == 1) {
             val dataUrl = if (episodeElements.size == 1) {
                 episodeElements.first()?.selectFirst("a.lnk-blk")?.attr("href") ?: url
@@ -110,7 +105,6 @@ class AnimeJokerProvider : MainAPI() {
                 this.posterUrl = poster
             }
         } else {
-            // It's a Series
             val episodes = mutableListOf<Episode>()
             episodeElements.forEachIndexed { index, item ->
                 val a = item.selectFirst("a.lnk-blk") ?: return@forEachIndexed
@@ -148,7 +142,7 @@ class AnimeJokerProvider : MainAPI() {
         val doc = app.get(data).document
         var foundLinks = false
 
-        // 1. Extract all iframes. Torofilm heavily uses data-src for lazy loading in tabs (#options-0)
+        // Extract raw iframes
         val initialIframes = doc.select("div.video iframe, iframe").mapNotNull {
             it.attr("data-src").ifEmpty {
                 it.attr("data-lazy-src").ifEmpty {
@@ -160,7 +154,7 @@ class AnimeJokerProvider : MainAPI() {
         for (link in initialIframes) {
             var targetUrl = if (link.startsWith("//")) "https:$link" else link
 
-            // Step 1: Trace internal ?trembed links to find the REAL server iframe
+            // Step 1: Resolve internal ?trembed links
             if (targetUrl.contains("?trembed=")) {
                 try {
                     val embedDoc = app.get(targetUrl, referer = data).document
@@ -171,39 +165,47 @@ class AnimeJokerProvider : MainAPI() {
                         targetUrl = if (innerIframe.startsWith("//")) "https:$innerIframe" else innerIframe
                     }
                 } catch (e: Exception) {
-                    continue // Skip if network fails on this specific tab
+                    continue 
                 }
             }
 
-            // At this point, targetUrl should be the actual server (e.g., https://jkrowl.embedseek.online/...)
+            // Step 2: Immediately drop known dead/parked domains to prevent WebView stalls
+            if (targetUrl.contains("cdntamilbulb.online") || targetUrl.contains("parking.godaddy")) {
+                continue
+            }
 
-            // Step 2: Push the real server URL through the WebViewResolver
-            try {
-                // The resolver will wait in the background until the player executes its CF check
-                // and requests the master m3u8 or the API token.
-                val resolvedUrl = app.get(
-                    targetUrl,
-                    interceptor = WebViewResolver(Regex("""(api/v1/player\?t=|master\.m3u8|\.m3u8|\.mp4)""")),
-                    referer = data
-                ).url
+            // Step 3: Extract Links safely
+            if (targetUrl.contains("embedseek")) {
+                try {
+                    // Limit the WebViewResolver to 15 seconds so dead players don't crash the queue
+                    val resolvedUrl = withTimeoutOrNull(15000L) {
+                        app.get(
+                            targetUrl,
+                            interceptor = WebViewResolver(Regex("""(api/v1/player\?t=|master\.m3u8|\.m3u8|\.mp4)""")),
+                            referer = data
+                        ).url
+                    }
 
-                if (resolvedUrl.contains("player?t=") || resolvedUrl.contains(".m3u8") || resolvedUrl.contains(".mp4")) {
-                    callback(
-                        newExtractorLink(
-                            source = if (targetUrl.contains("embedseek")) "Embedseek" else "Server",
-                            name = if (targetUrl.contains("embedseek")) "Embedseek HD" else "Server HD",
-                            url = resolvedUrl,
-                            type = if (resolvedUrl.contains(".mp4")) ExtractorLinkType.VIDEO else ExtractorLinkType.M3U8
-                        ) {
-                            this.referer = targetUrl
-                            this.quality = Qualities.Unknown.value
-                        }
-                    )
-                    foundLinks = true
+                    if (resolvedUrl != null && (resolvedUrl.contains("player?t=") || resolvedUrl.contains(".m3u8") || resolvedUrl.contains(".mp4"))) {
+                        callback(
+                            ExtractorLink(
+                                source = "Embedseek",
+                                name = "Embedseek HD",
+                                url = resolvedUrl,
+                                referer = targetUrl,
+                                quality = Qualities.Unknown.value,
+                                type = if (resolvedUrl.contains(".mp4")) ExtractorLinkType.VIDEO else ExtractorLinkType.M3U8
+                            )
+                        )
+                        foundLinks = true
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
                 }
-            } catch (e: Exception) {
-                // WebViewResolver throws an exception if it times out (e.g., if a click is strictly required and not automated).
-                e.printStackTrace()
+            } else {
+                // If it's a standard server (like streamtape, voe, mixdrop, etc.)
+                // route it directly to Cloudstream's incredibly fast built-in extractors.
+                foundLinks = loadExtractor(targetUrl, data, subtitleCallback, callback) || foundLinks
             }
         }
         
