@@ -3,7 +3,6 @@ package com.AnimeJoker
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.network.WebViewResolver
-import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.nodes.Element
 
 class AnimeJokerProvider : MainAPI() {
@@ -142,7 +141,7 @@ class AnimeJokerProvider : MainAPI() {
         val doc = app.get(data).document
         var foundLinks = false
 
-        // Extract raw iframes
+        // Extract raw iframes (prioritizing lazy loaded data-src)
         val initialIframes = doc.select("div.video iframe, iframe").mapNotNull {
             it.attr("data-src").ifEmpty {
                 it.attr("data-lazy-src").ifEmpty {
@@ -157,45 +156,76 @@ class AnimeJokerProvider : MainAPI() {
             // Step 1: Resolve internal ?trembed links
             if (targetUrl.contains("?trembed=")) {
                 try {
-                    val embedDoc = app.get(targetUrl, referer = data).document
-                    val innerIframe = embedDoc.selectFirst("iframe")?.let {
-                        it.attr("data-src").ifEmpty { it.attr("src") }
-                    }
-                    if (!innerIframe.isNullOrBlank()) {
-                        targetUrl = if (innerIframe.startsWith("//")) "https:$innerIframe" else innerIframe
+                    val res = app.get(targetUrl, referer = data)
+                    // Did it do a 301/302 Redirect directly to the server?
+                    if (res.url != targetUrl && !res.url.contains("?trembed=")) {
+                        targetUrl = res.url
+                    } else {
+                        // Or did it load an HTML page with an iframe inside?
+                        val innerIframe = res.document.selectFirst("iframe")?.let {
+                            it.attr("data-src").ifEmpty { it.attr("src") }
+                        }
+                        if (!innerIframe.isNullOrBlank()) {
+                            targetUrl = if (innerIframe.startsWith("//")) "https:$innerIframe" else innerIframe
+                        }
                     }
                 } catch (e: Exception) {
                     continue 
                 }
             }
 
-            // Step 2: Immediately drop known dead/parked domains to prevent WebView stalls
-            if (targetUrl.contains("cdntamilbulb.online") || targetUrl.contains("parking.godaddy")) {
+            // Step 2: Instantly drop dead/parked domain ads
+            if (targetUrl.contains("cdntamilbulb.online") || targetUrl.contains("parking.godaddy") || targetUrl.contains("wsimg.com")) {
                 continue
             }
 
-            // Step 3: Extract Links safely
+            // Step 3: Embedseek Direct API Hijack (Bypasses Ads & Timeouts)
             if (targetUrl.contains("embedseek")) {
                 try {
-                    // Limit the WebViewResolver to 15 seconds so dead players don't crash the queue
-                    val resolvedUrl = withTimeoutOrNull(15000L) {
-                        app.get(
-                            targetUrl,
-                            interceptor = WebViewResolver(Regex("""(api/v1/player\?t=|master\.m3u8|\.m3u8|\.mp4)""")),
-                            referer = data
-                        ).url
+                    val domain = Regex("""(https?://[^/]+)""").find(targetUrl)?.value ?: "https://jkrowl.embedseek.online"
+                    
+                    // Extracts 'hw16q' from '.../#hw16q' or '.../e/hw16q'
+                    val id = targetUrl.split("/", "#").last { it.isNotBlank() }
+                    val infoUrl = "$domain/api/v1/info?id=$id"
+                    
+                    // Fetch the API JSON. 
+                    // (If Cloudflare blocks the raw GET, we fallback to WebViewResolver just to read the JSON text)
+                    val infoResponse = try {
+                         app.get(infoUrl, referer = targetUrl).text
+                    } catch (e: Exception) {
+                         app.get(infoUrl, interceptor = WebViewResolver(Regex("""api/v1/info""")), referer = targetUrl).document.text()
                     }
-
-                    if (resolvedUrl != null && (resolvedUrl.contains("player?t=") || resolvedUrl.contains(".m3u8") || resolvedUrl.contains(".mp4"))) {
+                    
+                    // Extract the massive encrypted token payload
+                    val tokenMatches = Regex("""([a-fA-F0-9]{40,})""").findAll(infoResponse)
+                    val token = tokenMatches.maxByOrNull { it.value.length }?.value
+                    val m3u8 = Regex("""(https?://[^"'\s]*?\.m3u8[^"'\s]*)""").find(infoResponse)?.groupValues?.get(1)
+                    
+                    if (m3u8 != null) {
                         callback(
-                            ExtractorLink(
+                            newExtractorLink(
                                 source = "Embedseek",
                                 name = "Embedseek HD",
-                                url = resolvedUrl,
-                                referer = targetUrl,
-                                quality = Qualities.Unknown.value,
-                                type = if (resolvedUrl.contains(".mp4")) ExtractorLinkType.VIDEO else ExtractorLinkType.M3U8
-                            )
+                                url = m3u8.replace("\\", ""),
+                                type = ExtractorLinkType.M3U8
+                            ) {
+                                this.referer = "$domain/"
+                                this.quality = Qualities.Unknown.value
+                            }
+                        )
+                        foundLinks = true
+                    } else if (token != null) {
+                        val playerUrl = "$domain/api/v1/player?t=$token"
+                        callback(
+                            newExtractorLink(
+                                source = "Embedseek",
+                                name = "Embedseek HD",
+                                url = playerUrl,
+                                type = ExtractorLinkType.M3U8 
+                            ) {
+                                this.referer = "$domain/" // Critical authorization header
+                                this.quality = Qualities.Unknown.value
+                            }
                         )
                         foundLinks = true
                     }
@@ -203,8 +233,7 @@ class AnimeJokerProvider : MainAPI() {
                     e.printStackTrace()
                 }
             } else {
-                // If it's a standard server (like streamtape, voe, mixdrop, etc.)
-                // route it directly to Cloudstream's incredibly fast built-in extractors.
+                // Step 4: Any standard streaming servers get routed to built-in Cloudstream extractors
                 foundLinks = loadExtractor(targetUrl, data, subtitleCallback, callback) || foundLinks
             }
         }
