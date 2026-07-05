@@ -211,21 +211,37 @@ class AnimeJokerProvider : MainAPI() {
                     // the page ever got to decrypt it and request the actual video. Letting the
                     // page run to completion and only catching the final .m3u8/.mp4 request
                     // sidesteps needing to reverse-engineer that encryption at all.
-                    // This host serves the real file as a direct progressive-download video
-                    // (observed via its own analytics beacon reporting a ".mkv" filename),
-                    // not an HLS stream - so watch for common raw video extensions too,
-                    // not just .m3u8/.mp4.
+                    // IMPORTANT: match the extension only when it's the actual last path
+                    // segment (immediately before "?" or end-of-string), not merely present
+                    // somewhere in the URL. Without the anchor, analytics/tracker beacons
+                    // (e.g. Yandex Metrika) that embed the movie's title - which itself ends
+                    // in ".mkv" - as a URL-encoded query value will falsely match, handing
+                    // ExoPlayer a tracking pixel URL instead of the real video.
+                    val mediaExtensionRegex = Regex("""^[^?]*\.(m3u8|mp4|mkv|webm|avi|mov)(\?|$)""", RegexOption.IGNORE_CASE)
+
+                    // Extra safety net: never treat known analytics/ad/tracker domains as the
+                    // media source, regardless of what their query string happens to contain.
+                    val blockedTrackerDomains = listOf(
+                        "yandex.ru", "google-analytics.com", "googletagmanager.com",
+                        "doubleclick.net", "googlesyndication.com", "cloudflareinsights.com",
+                        "googleapis.com"
+                    )
+
                     val mediaResponse = withTimeoutOrNull(55000L) {
                         app.get(
                             targetUrl,
-                            interceptor = WebViewResolver(Regex("""\.m3u8|\.mp4|\.mkv|\.webm|\.avi|\.mov""")),
+                            interceptor = WebViewResolver(mediaExtensionRegex),
                             referer = data
                         )
                     }
 
                     val finalUrl = mediaResponse?.url
 
-                    if (finalUrl != null && Regex("""\.m3u8|\.mp4|\.mkv|\.webm|\.avi|\.mov""").containsMatchIn(finalUrl)) {
+                    val isRealMedia = finalUrl != null &&
+                        mediaExtensionRegex.containsMatchIn(finalUrl) &&
+                        blockedTrackerDomains.none { finalUrl.contains(it) }
+
+                    if (isRealMedia && finalUrl != null) {
                         callback(
                             newExtractorLink(
                                 source = "Embedseek",
