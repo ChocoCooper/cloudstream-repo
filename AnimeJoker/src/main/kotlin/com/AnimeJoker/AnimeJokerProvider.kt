@@ -1,6 +1,5 @@
 package com.AnimeJoker
 
-import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.network.WebViewResolver
@@ -173,85 +172,69 @@ class AnimeJokerProvider : MainAPI() {
         for (link in collectedIframes) {
             var targetUrl = if (link.startsWith("//")) "https:$link" else link
 
-            // Step 1: Force resolution of the ?trembed= URL via WebView to bypass silent Cloudflare 403 drops
+            // Step 1: Resolve the ?trembed= wrapper page to the actual server iframe
             if (targetUrl.contains("?trembed=")) {
                 try {
-                    val wvUrl = withTimeoutOrNull(15000L) {
-                        app.get(
-                            targetUrl,
-                            interceptor = WebViewResolver(Regex("""embedseek\.online|cdntamilbulb\.online|parking\.godaddy|wsimg\.com""")),
-                            referer = data
-                        ).url
-                    }
-                    if (wvUrl != null) {
-                        targetUrl = wvUrl
-                    } else {
-                        // Fallback if WebView missed the redirect
-                        val res = app.get(targetUrl, referer = data)
-                        if (res.url != targetUrl && !res.url.contains("?trembed=")) {
-                            targetUrl = res.url
-                        }
+                    val res = app.get(targetUrl, referer = data)
+                    
+                    val innerIframe = res.document.selectFirst("iframe")?.let {
+                        it.attr("data-src").ifEmpty { it.attr("src") }
+                    } ?: Regex("""(https?://[^"'\s]*?embedseek[^"'\s]*)""").find(res.text)?.value
+
+                    if (!innerIframe.isNullOrBlank()) {
+                        targetUrl = if (innerIframe.startsWith("//")) "https:$innerIframe" else innerIframe
+                    } else if (res.url != targetUrl && !res.url.contains("?trembed=")) {
+                        targetUrl = res.url
                     }
                 } catch (e: Exception) {
-                    continue
+                    // Fallback to WebView if Cloudflare 403 blocks the trembed request
+                    try {
+                        val wvRes = app.get(targetUrl, interceptor = WebViewResolver(Regex("""embedseek|cdntamilbulb""")), referer = data)
+                        targetUrl = wvRes.url
+                    } catch (e2: Exception) {}
                 }
             }
 
-            // Step 2: Instantly drop known ad/parking networks so they don't stall the app
+            // Drop dead ad/parking networks immediately to avoid hanging
             if (targetUrl.contains("cdntamilbulb.online") || targetUrl.contains("parking.godaddy") || targetUrl.contains("wsimg.com")) {
                 continue
             }
 
-            // Step 3: Embedseek HTML Hijack
+            // Step 2: Embedseek AutoPlay Hijack
             if (targetUrl.contains("embedseek")) {
                 try {
                     val domain = Regex("""(https?://[^/]+)""").find(targetUrl)?.value ?: "https://jkrowl.embedseek.online"
-                    
-                    var htmlResponse = ""
-                    try {
-                        htmlResponse = app.get(targetUrl, referer = "$mainUrl/").text
-                    } catch (e: Exception) {}
 
-                    // If Cloudflare blocked the GET request, use WebView to clear the captcha.
-                    // We wait for `.vtt` or `.woff` because fonts and thumbnails load automatically (no Play button needed).
-                    if (htmlResponse.isBlank() || htmlResponse.contains("Cloudflare") || htmlResponse.contains("Just a moment")) {
-                        try {
-                            withTimeoutOrNull(15000L) {
-                                app.get(targetUrl, interceptor = WebViewResolver(Regex("""\.(vtt|woff|woff2|png)""")), referer = "$mainUrl/")
-                            }
-                            // Cloudflare is solved in the app session, fetch HTML properly
-                            htmlResponse = app.get(targetUrl, referer = "$mainUrl/").text
-                        } catch (e: Exception) {}
+                    // Force Vidstack to load eagerly and autoplay. This bypasses the "Click to Play" requirement
+                    // and forces the site's JS to decrypt the AES payload and request the master.m3u8 instantly!
+                    val base = targetUrl.substringBefore("#")
+                    val hash = if (targetUrl.contains("#")) "#" + targetUrl.substringAfter("#") else ""
+                    val separator = if (base.contains("?")) "&" else "?"
+                    val autoPlayUrl = "${base}${separator}autoplay=1&autoPlay=true&muted=true&preload=auto&load=eager$hash"
+
+                    // Strict Regex: Requires .m3u8 or .mp4 to be the ACTUAL file extension, NOT a query parameter.
+                    // This perfectly ignores Yandex/Google tracking beacons.
+                    val mediaRegex = Regex("""^[^?]+\.(m3u8|mp4)(?:\?|$)""", RegexOption.IGNORE_CASE)
+
+                    val mediaResponse = withTimeoutOrNull(25000L) {
+                        app.get(
+                            autoPlayUrl,
+                            interceptor = WebViewResolver(mediaRegex),
+                            referer = data
+                        )
                     }
 
-                    // Extract the raw .m3u8 manifest directly from the HTML to entirely prevent Error 3002
-                    var finalM3u8 = Regex("""(https?://[^"'\s\\]+?\.m3u8[^"'\s\\]*)""", RegexOption.IGNORE_CASE).find(htmlResponse)?.groupValues?.get(1)
+                    val finalUrl = mediaResponse?.url
 
-                    if (finalM3u8 == null) {
-                        // If it's Base64 obfuscated inside the JS config, decode it and search again
-                        val b64Regex = Regex("""([A-Za-z0-9+/=]{40,})""")
-                        for (match in b64Regex.findAll(htmlResponse)) {
-                            try {
-                                val decoded = String(Base64.decode(match.value, Base64.DEFAULT))
-                                val cleanDecoded = decoded.replace("\\/", "/")
-                                val decodedM3u8 = Regex("""(https?://[^"'\s\\]+?\.m3u8[^"'\s\\]*)""", RegexOption.IGNORE_CASE).find(cleanDecoded)?.groupValues?.get(1)
-                                if (decodedM3u8 != null) {
-                                    finalM3u8 = decodedM3u8
-                                    break
-                                }
-                            } catch (e: Exception) {}
-                        }
-                    }
-
-                    if (finalM3u8 != null) {
+                    if (finalUrl != null && mediaRegex.containsMatchIn(finalUrl)) {
                         callback(
                             ExtractorLink(
                                 source = "Embedseek",
                                 name = "Embedseek HD",
-                                url = finalM3u8,
+                                url = finalUrl,
                                 referer = "$domain/",
                                 quality = Qualities.Unknown.value,
-                                type = ExtractorLinkType.M3U8
+                                type = if (finalUrl.contains(".mp4", ignoreCase = true)) ExtractorLinkType.VIDEO else ExtractorLinkType.M3U8
                             )
                         )
                         foundLinks = true
@@ -260,7 +243,7 @@ class AnimeJokerProvider : MainAPI() {
                     e.printStackTrace()
                 }
             } else {
-                // Step 4: Any standard streaming servers get routed to built-in Cloudstream extractors
+                // Step 3: Standard external extractors
                 foundLinks = loadExtractor(targetUrl, data, subtitleCallback, callback) || foundLinks
             }
         }
