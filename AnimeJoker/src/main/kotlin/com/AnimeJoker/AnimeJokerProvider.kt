@@ -201,7 +201,7 @@ class AnimeJokerProvider : MainAPI() {
             if (targetUrl.contains("embedseek")) {
                 try {
                     val domain = Regex("""(https?://[^/]+)""").find(targetUrl)?.value ?: "https://jkrowl.embedseek.online"
-                    val id = targetUrl.split("/", "#").last { it.isNotBlank() }
+                    val id = targetUrl.substringBefore("?").split("/", "#").last { it.isNotBlank() }
                     val infoUrl = "$domain/api/v1/info?id=$id"
                     
                     var infoResponse = ""
@@ -209,40 +209,42 @@ class AnimeJokerProvider : MainAPI() {
                         infoResponse = app.get(infoUrl, referer = targetUrl, headers = mapOf("Accept" to "application/json")).text
                     } catch (e: Exception) {}
                     
-                    // If Cloudflare blocked the GET request (it returns a 403 HTML page, not an exception),
-                    // we MUST run the player page through WebViewResolver to solve the captcha.
+                    // If Cloudflare blocked the GET request (it returns a 403 HTML page),
+                    // run the player page through WebViewResolver to solve the captcha/bot check.
                     if (infoResponse.isBlank() || infoResponse.trim().startsWith("<html", ignoreCase = true) || infoResponse.contains("Cloudflare")) {
                         try {
                             withTimeoutOrNull(15000L) {
-                                // We wait for the 'api/v1/info' request inside the webview as proof that CF is solved
                                 app.get(targetUrl, interceptor = WebViewResolver(Regex("""api/v1/info""")), referer = data)
                             }
-                            // Now that Cloudflare is cleared, fetch the API properly
                             infoResponse = app.get(infoUrl, referer = targetUrl, headers = mapOf("Accept" to "application/json")).text
                         } catch (e: Exception) {}
                     }
                     
-                    var finalM3u8 = Regex("""(https?://[^"'\s\\]+?\.m3u8[^"'\s\\]*)""").find(infoResponse)?.groupValues?.get(1)
+                    val cleanInfoResponse = infoResponse.replace("\\/", "/")
+                    var finalM3u8 = Regex("""(https?://[^"'\s]+?\.m3u8[^"'\s]*)""").find(cleanInfoResponse)?.groupValues?.get(1)
 
-                    // If the .m3u8 wasn't in the info, fetch the token and parse the player payload
                     if (finalM3u8 == null) {
-                        val tokenMatches = Regex("""([a-fA-F0-9]{40,})""").findAll(infoResponse)
+                        val tokenMatches = Regex("""([a-fA-F0-9]{40,})""").findAll(cleanInfoResponse)
                         val token = tokenMatches.maxByOrNull { it.value.length }?.value
 
                         if (token != null) {
                             val playerUrl = "$domain/api/v1/player?t=$token"
                             val playerRes = app.get(playerUrl, referer = "$domain/", headers = mapOf("Accept" to "application/json")).text
                             
+                            // Un-escape JSON forward slashes
+                            val cleanPlayerRes = playerRes.replace("\\/", "/")
+                            
                             // 1. Check for raw M3U8 string
-                            finalM3u8 = Regex("""(https?://[^"'\s\\]+?\.m3u8[^"'\s\\]*)""").find(playerRes)?.groupValues?.get(1)
+                            finalM3u8 = Regex("""(https?://[^"'\s]+?\.m3u8[^"'\s]*)""").find(cleanPlayerRes)?.groupValues?.get(1)
                             
                             // 2. If it's heavily obfuscated inside the JSON, decode base64 strings and search again
                             if (finalM3u8 == null) {
                                 val b64Regex = Regex("""([A-Za-z0-9+/=]{40,})""")
-                                for (match in b64Regex.findAll(playerRes)) {
+                                for (match in b64Regex.findAll(cleanPlayerRes)) {
                                     try {
                                         val decoded = String(Base64.decode(match.value, Base64.DEFAULT))
-                                        val decodedM3u8 = Regex("""(https?://[^"'\s\\]+?\.m3u8[^"'\s\\]*)""").find(decoded)?.groupValues?.get(1)
+                                        val cleanDecoded = decoded.replace("\\/", "/")
+                                        val decodedM3u8 = Regex("""(https?://[^"'\s]+?\.m3u8[^"'\s]*)""").find(cleanDecoded)?.groupValues?.get(1)
                                         if (decodedM3u8 != null) {
                                             finalM3u8 = decodedM3u8
                                             break
@@ -253,7 +255,7 @@ class AnimeJokerProvider : MainAPI() {
                         }
                     }
                     
-                    // Step 4: Send the REAL M3U8 string to Cloudstream, avoiding Error 3002 entirely
+                    // Step 4: Send ONLY the clean M3U8 string to Cloudstream, avoiding Error 3002 entirely
                     if (finalM3u8 != null) {
                         callback(
                             ExtractorLink(
@@ -262,8 +264,7 @@ class AnimeJokerProvider : MainAPI() {
                                 url = finalM3u8.replace("\\", ""),
                                 referer = "$domain/",
                                 quality = Qualities.Unknown.value,
-                                type = ExtractorLinkType.M3U8,
-                                headers = mapOf("Accept" to "*/*")
+                                type = ExtractorLinkType.M3U8
                             )
                         )
                         foundLinks = true
