@@ -2,6 +2,8 @@ package com.AnimeJoker
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.network.WebViewResolver
+import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.nodes.Element
 
 class AnimeJokerProvider : MainAPI() {
@@ -137,12 +139,14 @@ class AnimeJokerProvider : MainAPI() {
         var foundLinks = false
         val collectedIframes = mutableSetOf<String>()
 
+        // 1. Gather hardcoded iframes
         doc.select("div.video iframe, iframe").forEach {
             it.attr("data-src").ifEmpty { it.attr("data-lazy-src") }.ifEmpty { it.attr("src") }.let { src ->
                 if (src.isNotBlank()) collectedIframes.add(src)
             }
         }
 
+        // 2. Gather hidden AJAX iframes
         doc.select("[data-post][data-nume][data-type]").forEach { server ->
             val post = server.attr("data-post")
             val nume = server.attr("data-nume")
@@ -168,6 +172,7 @@ class AnimeJokerProvider : MainAPI() {
         for (link in collectedIframes) {
             var targetUrl = if (link.startsWith("//")) "https:$link" else link
 
+            // Step 1: Resolve internal redirects (e.g. ?trembed=0)
             if (targetUrl.contains("?trembed=")) {
                 try {
                     val res = app.get(targetUrl, referer = data)
@@ -185,6 +190,7 @@ class AnimeJokerProvider : MainAPI() {
                 }
             }
 
+            // Step 2: Drop dead ad/parking networks immediately
             if (targetUrl.contains("cdntamilbulb.online") || targetUrl.contains("parking.godaddy") || targetUrl.contains("wsimg.com")) {
                 continue
             }
@@ -198,7 +204,20 @@ class AnimeJokerProvider : MainAPI() {
                     val id = targetUrl.substringBefore("?").split("/", "#").lastOrNull { it.isNotBlank() }
                     
                     if (id != null) {
-                        // VidGuard/Embedseek has a raw, unencrypted fallback API for mobile clients
+                        // 1. Force WebView to visit the player and clear Cloudflare.
+                        // We use `withTimeoutOrNull` because we don't care if the player times out waiting for
+                        // the user to hit "Play", we only care that Cloudflare generates the `cf_clearance` cookie!
+                        try {
+                            withTimeoutOrNull(15000L) {
+                                app.get(
+                                    targetUrl, 
+                                    interceptor = WebViewResolver(Regex("""api/v1/(info|player)""")), 
+                                    referer = data
+                                )
+                            }
+                        } catch (e: Exception) {}
+
+                        // 2. Now that Cloudflare is cleared in the background, we hit the internal JSON API
                         val legacyApiUrl = "$domain/api/source/$id"
                         
                         val apiResponse = app.post(
@@ -209,16 +228,11 @@ class AnimeJokerProvider : MainAPI() {
                                 "Accept" to "application/json, text/plain, */*",
                                 "Content-Type" to "application/x-www-form-urlencoded"
                             ),
-                            // Vidguard sometimes requires an empty body on POST for this endpoint
                             data = emptyMap()
                         ).text
 
-                        // Clean JSON escaping and grab raw file url
                         val cleanJson = apiResponse.replace("\\/", "/")
-                        
-                        // Looks for "file": "https://...", "url": "...", or "src": "..."
                         val m3u8Match = Regex(""""(?:file|url|src|data)"\s*:\s*"([^"]+\.(?:m3u8|mp4)[^"]*)"""", RegexOption.IGNORE_CASE).find(cleanJson)
-                        
                         val finalUrl = m3u8Match?.groupValues?.get(1)
 
                         if (finalUrl != null) {
