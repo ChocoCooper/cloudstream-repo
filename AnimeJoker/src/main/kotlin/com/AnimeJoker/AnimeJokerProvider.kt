@@ -146,11 +146,10 @@ class AnimeJokerProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val doc = app.get(data).document
-        val html = doc.html()
         var foundLinks = false
 
         // 1. Extract all iframes. Torofilm heavily uses data-src for lazy loading in tabs (#options-0)
-        val iframes = doc.select("iframe").mapNotNull {
+        val initialIframes = doc.select("div.video iframe, iframe").mapNotNull {
             it.attr("data-src").ifEmpty {
                 it.attr("data-lazy-src").ifEmpty {
                     it.attr("src")
@@ -158,78 +157,55 @@ class AnimeJokerProvider : MainAPI() {
             }
         }.filter { it.isNotBlank() }.toSet()
 
-        // 2. Fallback: Sometimes Torofilm dumps the raw iframe URL into global javascript
-        val regexLinks = Regex("""(https?://[^"'\s]*?embedseek[^"'\s]*)""").findAll(html).map { it.groupValues[1] }.toSet()
+        for (link in initialIframes) {
+            var targetUrl = if (link.startsWith("//")) "https:$link" else link
 
-        val allLinks = (iframes + regexLinks).filter { it.contains("embedseek") || it.contains(".m3u8") }.toSet()
-
-        for (link in allLinks) {
-            val url = if (link.startsWith("//")) "https:$link" else link
-
-            if (url.contains("embedseek")) {
+            // Step 1: Trace internal ?trembed links to find the REAL server iframe
+            if (targetUrl.contains("?trembed=")) {
                 try {
-                    // Because Embedseek has human verification (Cloudflare), standard requests will fail.
-                    // We use WebViewResolver to open a hidden browser, solve the verification, and intercept the API request.
-                    val resolvedUrl = app.get(
-                        url,
-                        interceptor = WebViewResolver(Regex("""api/v1/player\?t=|master\.m3u8|\.m3u8"""))
-                    ).url
-
-                    if (resolvedUrl.contains("api/v1/player") || resolvedUrl.contains(".m3u8")) {
-                        callback(
-                            newExtractorLink(
-                                source = "Embedseek",
-                                name = "Embedseek HD",
-                                url = resolvedUrl,
-                                type = ExtractorLinkType.M3U8
-                            ) {
-                                this.referer = url
-                                this.quality = Qualities.Unknown.value
-                            }
-                        )
-                        foundLinks = true
+                    val embedDoc = app.get(targetUrl, referer = data).document
+                    val innerIframe = embedDoc.selectFirst("iframe")?.let {
+                        it.attr("data-src").ifEmpty { it.attr("src") }
+                    }
+                    if (!innerIframe.isNullOrBlank()) {
+                        targetUrl = if (innerIframe.startsWith("//")) "https:$innerIframe" else innerIframe
                     }
                 } catch (e: Exception) {
-                    // Fallback to standard HTTP GET if WebViewResolver times out (less likely to work due to verification)
-                    try {
-                        val res = app.get(url, referer = "$mainUrl/").text
-                        val token = Regex("""t=([0-9a-fA-F]{30,})""").find(res)?.groupValues?.get(1)
-                        if (token != null) {
-                            val domain = Regex("""(https?://[^/]+)""").find(url)?.groupValues?.get(1) ?: "https://jkrowl.embedseek.online"
-                            val apiUrl = "$domain/api/v1/player?t=$token"
-                            callback(
-                                newExtractorLink(
-                                    source = "Embedseek API",
-                                    name = "Embedseek API",
-                                    url = apiUrl,
-                                    type = ExtractorLinkType.M3U8
-                                ) {
-                                    this.referer = "$domain/"
-                                    this.quality = Qualities.Unknown.value
-                                }
-                            )
-                            foundLinks = true
-                        }
-                    } catch (e2: Exception) {
-                        e2.printStackTrace()
-                    }
+                    continue // Skip if network fails on this specific tab
                 }
-            } else if (url.contains(".m3u8")) {
-                // Generic server catch-all
-                callback(
-                    newExtractorLink(
-                        source = "Server",
-                        name = "Server HD",
-                        url = url,
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        this.referer = "$mainUrl/"
-                        this.quality = Qualities.Unknown.value
-                    }
-                )
-                foundLinks = true
+            }
+
+            // At this point, targetUrl should be the actual server (e.g., https://jkrowl.embedseek.online/...)
+
+            // Step 2: Push the real server URL through the WebViewResolver
+            try {
+                // The resolver will wait in the background until the player executes its CF check
+                // and requests the master m3u8 or the API token.
+                val resolvedUrl = app.get(
+                    targetUrl,
+                    interceptor = WebViewResolver(Regex("""(api/v1/player\?t=|master\.m3u8|\.m3u8|\.mp4)""")),
+                    referer = data
+                ).url
+
+                if (resolvedUrl.contains("player?t=") || resolvedUrl.contains(".m3u8") || resolvedUrl.contains(".mp4")) {
+                    callback(
+                        newExtractorLink(
+                            source = if (targetUrl.contains("embedseek")) "Embedseek" else "Server",
+                            name = if (targetUrl.contains("embedseek")) "Embedseek HD" else "Server HD",
+                            url = resolvedUrl,
+                            referer = targetUrl, // Keep the server domain as referer to avoid 403 Forbidden
+                            quality = Qualities.Unknown.value,
+                            isM3u8 = resolvedUrl.contains(".m3u8") || resolvedUrl.contains("player?t=")
+                        )
+                    )
+                    foundLinks = true
+                }
+            } catch (e: Exception) {
+                // WebViewResolver throws an exception if it times out (e.g., if a click is strictly required and not automated).
+                e.printStackTrace()
             }
         }
+        
         return foundLinks
     }
 }
