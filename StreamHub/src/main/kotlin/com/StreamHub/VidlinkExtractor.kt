@@ -5,7 +5,6 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.AppUtils
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
-import com.lagradost.cloudstream3.utils.newExtractorLink
 
 object VidlinkExtractor {
     private const val ENC_API = "https://enc-dec.app/api"
@@ -23,6 +22,7 @@ object VidlinkExtractor {
         @JsonProperty("error") val error: String?
     )
 
+    @Suppress("DEPRECATION")
     suspend fun getStream(url: String, callback: (ExtractorLink) -> Unit): Boolean {
         // url format passed from StreamHubProvider:
         // Movie: https://streamhub.app/movie/{tmdbId}
@@ -75,7 +75,7 @@ object VidlinkExtractor {
             // Unescape backward slashes commonly found in JSON encoded URLs
             val link = match.groupValues[1].replace("\\/", "/")
             callback.invoke(
-                newExtractorLink(
+                ExtractorLink(
                     source = "Vidlink",
                     name = "Vidlink",
                     url = link,
@@ -93,7 +93,7 @@ object VidlinkExtractor {
             mp4Regex.findAll(responseText).forEach { match ->
                 val link = match.groupValues[1].replace("\\/", "/")
                 callback.invoke(
-                    newExtractorLink(
+                    ExtractorLink(
                         source = "Vidlink",
                         name = "Vidlink",
                         url = link,
