@@ -1,7 +1,7 @@
 package com.StreamHub
 
 import com.fasterxml.jackson.annotation.JsonProperty
-import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.*
 
 object VidcoreExtractor : ExtractorApi() {
@@ -9,7 +9,7 @@ object VidcoreExtractor : ExtractorApi() {
     override val mainUrl = "https://vidcore.net"
     override val requiresReferer = false
 
-    // Required override to fulfill ExtractorApi interface requirements securely
+    // Required override to fulfill ExtractorApi interface requirements
     override suspend fun getUrl(url: String, referer: String?): List<ExtractorLink>? = null
 
     private const val ENC_API = "https://enc-dec.app/api"
@@ -44,6 +44,7 @@ object VidcoreExtractor : ExtractorApi() {
         @JsonProperty("error") val error: String?
     )
 
+    @Suppress("DEPRECATION")
     suspend fun getStream(url: String, callback: (ExtractorLink) -> Unit): Boolean {
         val isMovie = url.contains("/movie/")
         val parts = url.split("/")
@@ -117,16 +118,17 @@ object VidcoreExtractor : ExtractorApi() {
             m3u8Regex.findAll(decryptedJsonStr).forEach { match ->
                 val link = match.groupValues[1].replace("\\/", "/")
                 callback.invoke(
-                    newExtractorLink(
+                    ExtractorLink(
                         source = "Vidcore",
                         name = "Vidcore - $serverName",
                         url = link,
                         referer = "https://vidcore.net/",
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        this.quality = Qualities.Unknown.value
-                        this.headers = mapOf("Referer" to "https://vidcore.net/")
-                    }
+                        quality = Qualities.Unknown.value,
+                        headers = mapOf("Referer" to "https://vidcore.net/"),
+                        extractorData = null,
+                        type = ExtractorLinkType.M3U8,
+                        audioTracks = emptyList() // Forces compiler to use the warning-level constructor safely
+                    )
                 )
                 foundStream = true
             }
@@ -137,16 +139,17 @@ object VidcoreExtractor : ExtractorApi() {
                 mp4Regex.findAll(decryptedJsonStr).forEach { match ->
                     val link = match.groupValues[1].replace("\\/", "/")
                     callback.invoke(
-                        newExtractorLink(
+                        ExtractorLink(
                             source = "Vidcore",
                             name = "Vidcore - $serverName",
                             url = link,
                             referer = "https://vidcore.net/",
-                            type = ExtractorLinkType.VIDEO
-                        ) {
-                            this.quality = Qualities.Unknown.value
-                            this.headers = mapOf("Referer" to "https://vidcore.net/")
-                        }
+                            quality = Qualities.Unknown.value,
+                            headers = mapOf("Referer" to "https://vidcore.net/"),
+                            extractorData = null,
+                            type = ExtractorLinkType.VIDEO,
+                            audioTracks = emptyList() // Forces compiler to use the warning-level constructor safely
+                        )
                     )
                     foundStream = true
                 }
