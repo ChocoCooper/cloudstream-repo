@@ -2,10 +2,10 @@ package com.StreamHub
 
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.utils.AppUtils.parsedSafe
-import com.lagradost.cloudstream3.utils.AppUtils.toJson
+import com.lagradost.cloudstream3.utils.AppUtils
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.newExtractorLink
 
 object VidcoreExtractor {
     private const val ENC_API = "https://enc-dec.app/api"
@@ -40,12 +40,6 @@ object VidcoreExtractor {
         @JsonProperty("error") val error: String?
     )
 
-    private data class DecStreamResponse(
-        @JsonProperty("status") val status: Int?,
-        @JsonProperty("result") val result: Any?,
-        @JsonProperty("error") val error: String?
-    )
-
     suspend fun getStream(url: String, callback: (ExtractorLink) -> Unit): Boolean {
         // url format passed from StreamHubProvider:
         // Movie: https://streamhub.app/movie/{tmdbId}
@@ -74,7 +68,8 @@ object VidcoreExtractor {
 
         // 3. Get API URLs and Token from enc-dec app
         val encUrl = "$ENC_API/enc-vidcore?text=$text"
-        val encResponse = app.get(encUrl).parsedSafe<EncVidcoreResponse>()
+        val encResponseText = app.get(encUrl).text
+        val encResponse = AppUtils.tryParseJson<EncVidcoreResponse>(encResponseText)
         
         if (encResponse?.status != 200 || encResponse.result == null) {
             return false
@@ -94,10 +89,11 @@ object VidcoreExtractor {
         
         // 5. Decrypt servers
         val decServersUrl = "$ENC_API/dec-vidcore"
-        val decServersResponse = app.post(
+        val decServersResponseText = app.post(
             decServersUrl, 
             json = mapOf("text" to serversEncryptedText)
-        ).parsedSafe<DecServersResponse>()
+        ).text
+        val decServersResponse = AppUtils.tryParseJson<DecServersResponse>(decServersResponseText)
 
         val servers = decServersResponse?.result ?: emptyList()
         var foundStream = false
@@ -111,20 +107,17 @@ object VidcoreExtractor {
             val streamUrl = "$streamBaseUrl/$serverData"
             val streamEncryptedText = app.post(streamUrl, headers = authHeaders).text
             
-            // Decrypt the node payload
-            val decStreamResponse = app.post(
-                decServersUrl, // same API endpoint as server decryption
+            // Decrypt the node payload directly as a raw JSON string to bypass object mapping
+            val decryptedJsonStr = app.post(
+                decServersUrl,
                 json = mapOf("text" to streamEncryptedText)
-            ).parsedSafe<DecStreamResponse>()
-
-            // Safely parse the object to a String to extract manifest files
-            val decryptedJsonStr = toJson(decStreamResponse?.result)
+            ).text
             
             val m3u8Regex = Regex("""(https?://[^"]+\.m3u8[^"]*)""")
             m3u8Regex.findAll(decryptedJsonStr).forEach { match ->
                 val link = match.groupValues[1].replace("\\/", "/")
                 callback.invoke(
-                    ExtractorLink(
+                    newExtractorLink(
                         source = "Vidcore",
                         name = "Vidcore - $serverName",
                         url = link,
@@ -142,7 +135,7 @@ object VidcoreExtractor {
                 mp4Regex.findAll(decryptedJsonStr).forEach { match ->
                     val link = match.groupValues[1].replace("\\/", "/")
                     callback.invoke(
-                        ExtractorLink(
+                        newExtractorLink(
                             source = "Vidcore",
                             name = "Vidcore - $serverName",
                             url = link,
