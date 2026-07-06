@@ -3,11 +3,18 @@ package com.StreamHub
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.AppUtils
+import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.INFER_TYPE
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 
-object VidlinkExtractor {
+object VidlinkExtractor : ExtractorApi() {
+    override val name = "Vidlink"
+    override val mainUrl = "https://vidlink.pro"
+    override val requiresReferer = false
+
+    override suspend fun getUrl(url: String, referer: String?): List<ExtractorLink>? = null
+
     private const val ENC_API = "https://enc-dec.app/api"
     
     // Headers mapped directly from vidlink.py
@@ -71,13 +78,12 @@ object VidlinkExtractor {
             // Unescape backward slashes commonly found in JSON encoded URLs
             val link = match.groupValues[1].replace("\\/", "/")
             callback.invoke(
-                ExtractorLink(
-                    source = "Vidlink",
+                newExtractorLink(
                     name = "Vidlink",
                     url = link,
-                    referer = "https://vidlink.pro/",
                     quality = Qualities.Unknown.value,
-                    type = INFER_TYPE
+                    type = ExtractorLinkType.M3U8,
+                    headers = mapOf("Referer" to "https://vidlink.pro/")
                 )
             )
             foundStream = true
@@ -89,13 +95,12 @@ object VidlinkExtractor {
             mp4Regex.findAll(responseText).forEach { match ->
                 val link = match.groupValues[1].replace("\\/", "/")
                 callback.invoke(
-                    ExtractorLink(
-                        source = "Vidlink",
+                    newExtractorLink(
                         name = "Vidlink",
                         url = link,
-                        referer = "https://vidlink.pro/",
                         quality = Qualities.Unknown.value,
-                        type = INFER_TYPE
+                        type = ExtractorLinkType.VIDEO,
+                        headers = mapOf("Referer" to "https://vidlink.pro/")
                     )
                 )
                 foundStream = true
