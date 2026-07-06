@@ -5,7 +5,6 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.AppUtils
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
-import com.lagradost.cloudstream3.utils.newExtractorLink
 
 object VidcoreExtractor {
     private const val ENC_API = "https://enc-dec.app/api"
@@ -40,6 +39,7 @@ object VidcoreExtractor {
         @JsonProperty("error") val error: String?
     )
 
+    @Suppress("DEPRECATION")
     suspend fun getStream(url: String, callback: (ExtractorLink) -> Unit): Boolean {
         // url format passed from StreamHubProvider:
         // Movie: https://streamhub.app/movie/{tmdbId}
@@ -117,7 +117,7 @@ object VidcoreExtractor {
             m3u8Regex.findAll(decryptedJsonStr).forEach { match ->
                 val link = match.groupValues[1].replace("\\/", "/")
                 callback.invoke(
-                    newExtractorLink(
+                    ExtractorLink(
                         source = "Vidcore",
                         name = "Vidcore - $serverName",
                         url = link,
@@ -135,7 +135,7 @@ object VidcoreExtractor {
                 mp4Regex.findAll(decryptedJsonStr).forEach { match ->
                     val link = match.groupValues[1].replace("\\/", "/")
                     callback.invoke(
-                        newExtractorLink(
+                        ExtractorLink(
                             source = "Vidcore",
                             name = "Vidcore - $serverName",
                             url = link,
