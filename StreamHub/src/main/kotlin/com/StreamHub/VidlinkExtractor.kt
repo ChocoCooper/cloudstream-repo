@@ -13,8 +13,9 @@ object VidlinkExtractor : ExtractorApi() {
 
     private const val ENC_API = "https://enc-dec.app/api"
     
-    // Omit User-Agent here as well to inherit the exact UA ExoPlayer will use
-    private val reqHeaders = mapOf(
+    // Maintain strict headers for both app requests AND ExoPlayer to guarantee playback without 403 Errors
+    private val videoHeaders = mapOf(
+        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
         "Origin" to "https://vidlink.pro",
         "Referer" to "https://vidlink.pro/"
     )
@@ -50,47 +51,72 @@ object VidlinkExtractor : ExtractorApi() {
             "https://vidlink.pro/api/b/tv/$encryptedId/$season/$episode"
         }
 
-        val responseText = app.get(vidlinkApiUrl, headers = reqHeaders).text
+        val responseText = app.get(vidlinkApiUrl, headers = videoHeaders).text
+        
+        var foundStream = false
+        val foundUrls = mutableSetOf<String>()
         
         val m3u8Regex = Regex("""(https?://[^"]+\.m3u8[^"]*)""")
-        m3u8Regex.find(responseText)?.let { match ->
+        m3u8Regex.findAll(responseText).forEach { match ->
             val link = match.groupValues[1].replace("\\/", "/").replace("\\u0026", "&")
-            callback.invoke(
-                ExtractorLink(
-                    source = "Vidlink",
-                    name = "Vidlink",
-                    url = link,
-                    referer = "https://vidlink.pro/",
-                    quality = Qualities.Unknown.value,
-                    headers = reqHeaders,
-                    extractorData = null,
-                    type = ExtractorLinkType.M3U8,
-                    audioTracks = emptyList()
+            // HashSet ensures exact duplicate links are dropped, keeping only unique resolutions
+            if (foundUrls.add(link)) {
+                val qualityInfo = getQualityFromName(link)
+
+                callback.invoke(
+                    ExtractorLink(
+                        source = "Vidlink",
+                        name = qualityInfo.second,
+                        url = link,
+                        referer = videoHeaders["Referer"] ?: "",
+                        quality = qualityInfo.first,
+                        headers = videoHeaders,
+                        extractorData = null,
+                        type = ExtractorLinkType.M3U8,
+                        audioTracks = emptyList()
+                    )
                 )
-            )
-            // Immediately return after finding the master playlist to prevent duplicate logs
-            return true
+                foundStream = true
+            }
         }
         
-        val mp4Regex = Regex("""(https?://[^"]+\.mp4[^"]*)""")
-        mp4Regex.find(responseText)?.let { match ->
-            val link = match.groupValues[1].replace("\\/", "/").replace("\\u0026", "&")
-            callback.invoke(
-                ExtractorLink(
-                    source = "Vidlink",
-                    name = "Vidlink",
-                    url = link,
-                    referer = "https://vidlink.pro/",
-                    quality = Qualities.Unknown.value,
-                    headers = reqHeaders,
-                    extractorData = null,
-                    type = ExtractorLinkType.VIDEO,
-                    audioTracks = emptyList()
-                )
-            )
-            return true
+        if (!foundStream) {
+            val mp4Regex = Regex("""(https?://[^"]+\.mp4[^"]*)""")
+            mp4Regex.findAll(responseText).forEach { match ->
+                val link = match.groupValues[1].replace("\\/", "/").replace("\\u0026", "&")
+                if (foundUrls.add(link)) {
+                    val qualityInfo = getQualityFromName(link)
+
+                    callback.invoke(
+                        ExtractorLink(
+                            source = "Vidlink",
+                            name = qualityInfo.second,
+                            url = link,
+                            referer = videoHeaders["Referer"] ?: "",
+                            quality = qualityInfo.first,
+                            headers = videoHeaders,
+                            extractorData = null,
+                            type = ExtractorLinkType.VIDEO,
+                            audioTracks = emptyList()
+                        )
+                    )
+                    foundStream = true
+                }
+            }
         }
 
-        return false
+        return foundStream
+    }
+
+    private fun getQualityFromName(url: String): Pair<Int, String> {
+        val baseName = "Vidlink"
+        return when {
+            url.contains("2160") || url.contains("4k", ignoreCase = true) -> Pair(Qualities.P2160.value, "$baseName - 4K")
+            url.contains("1080") -> Pair(Qualities.P1080.value, "$baseName - 1080p")
+            url.contains("720") -> Pair(Qualities.P720.value, "$baseName - 720p")
+            url.contains("480") -> Pair(Qualities.P480.value, "$baseName - 480p")
+            url.contains("360") -> Pair(Qualities.P360.value, "$baseName - 360p")
+            else -> Pair(Qualities.Unknown.value, baseName)
+        }
     }
 }
