@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.AppUtils
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.INFER_TYPE
 import com.lagradost.cloudstream3.utils.Qualities
 
 object VidcoreExtractor {
@@ -39,12 +40,7 @@ object VidcoreExtractor {
         @JsonProperty("error") val error: String?
     )
 
-    @Suppress("DEPRECATION")
     suspend fun getStream(url: String, callback: (ExtractorLink) -> Unit): Boolean {
-        // url format passed from StreamHubProvider:
-        // Movie: https://streamhub.app/movie/{tmdbId}
-        // TV: https://streamhub.app/tv/{tmdbId}/{season}/{episode}
-        
         val isMovie = url.contains("/movie/")
         val parts = url.split("/")
         
@@ -123,7 +119,7 @@ object VidcoreExtractor {
                         url = link,
                         referer = "https://vidcore.net/",
                         quality = Qualities.Unknown.value,
-                        isM3u8 = true
+                        type = INFER_TYPE
                     )
                 )
                 foundStream = true
@@ -141,7 +137,7 @@ object VidcoreExtractor {
                             url = link,
                             referer = "https://vidcore.net/",
                             quality = Qualities.Unknown.value,
-                            isM3u8 = false
+                            type = INFER_TYPE
                         )
                     )
                     foundStream = true
