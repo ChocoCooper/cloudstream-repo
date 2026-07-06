@@ -2,7 +2,11 @@ package com.StreamHub
 
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.utils.AppUtils
+import com.lagradost.cloudstream3.utils.ExtractorApi
+import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.Qualities
 
 object VidcoreExtractor : ExtractorApi() {
     override val name = "Vidcore"
@@ -24,6 +28,7 @@ object VidcoreExtractor : ExtractorApi() {
     // Without this, ExoPlayer uses its default UA, causing the CDN WAF to instantly return a 403 (Error 2004).
     private val videoHeaders = mapOf(
         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+        "Origin" to "https://vidcore.net",
         "Referer" to "https://vidcore.net/"
     )
 
@@ -124,7 +129,7 @@ object VidcoreExtractor : ExtractorApi() {
                             headers = videoHeaders,
                             extractorData = null,
                             type = ExtractorLinkType.M3U8,
-                            audioTracks = emptyList()
+                            audioTracks = emptyList() // Bypasses the compiler ERROR
                         )
                     )
                     foundStream = true
@@ -148,7 +153,7 @@ object VidcoreExtractor : ExtractorApi() {
                                 headers = videoHeaders,
                                 extractorData = null,
                                 type = ExtractorLinkType.VIDEO,
-                                audioTracks = emptyList()
+                                audioTracks = emptyList() // Bypasses the compiler ERROR
                             )
                         )
                         foundStream = true
@@ -162,6 +167,7 @@ object VidcoreExtractor : ExtractorApi() {
 
     private fun getQualityFromName(url: String, baseName: String): Pair<Int, String> {
         return when {
+            url.contains("2160") || url.contains("4k", ignoreCase = true) -> Pair(Qualities.P2160.value, "$baseName - 4K")
             url.contains("1080") -> Pair(Qualities.P1080.value, "$baseName - 1080p")
             url.contains("720") -> Pair(Qualities.P720.value, "$baseName - 720p")
             url.contains("480") -> Pair(Qualities.P480.value, "$baseName - 480p")
