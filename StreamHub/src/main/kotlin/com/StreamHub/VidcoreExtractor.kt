@@ -2,11 +2,7 @@ package com.StreamHub
 
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.utils.AppUtils
-import com.lagradost.cloudstream3.utils.ExtractorApi
-import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.ExtractorLinkType
-import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.*
 
 object VidcoreExtractor : ExtractorApi() {
     override val name = "Vidcore"
@@ -126,7 +122,7 @@ object VidcoreExtractor : ExtractorApi() {
                         url = link,
                         quality = Qualities.Unknown.value,
                         type = ExtractorLinkType.M3U8,
-                        headers = mapOf("Referer" to "https://vidcore.net/") // Inject referer directly via headers
+                        headers = mapOf("Referer" to "https://vidcore.net/") // Explicitly inject referer here
                     )
                 )
                 foundStream = true
