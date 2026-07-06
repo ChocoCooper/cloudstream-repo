@@ -2,9 +2,10 @@ package com.StreamHub
 
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.utils.AppUtils.parsedSafe
+import com.lagradost.cloudstream3.utils.AppUtils
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.newExtractorLink
 
 object VidlinkExtractor {
     private const val ENC_API = "https://enc-dec.app/api"
@@ -47,7 +48,8 @@ object VidlinkExtractor {
 
         // 1. Get encrypted TMDB ID using the decryption API
         val encUrl = "$ENC_API/enc-vidlink?text=$tmdbId"
-        val encResponse = app.get(encUrl).parsedSafe<EncDecResponse>()
+        val encResponseText = app.get(encUrl).text
+        val encResponse = AppUtils.tryParseJson<EncDecResponse>(encResponseText)
         
         if (encResponse?.status != 200 || encResponse.result.isNullOrEmpty()) {
             return false
@@ -73,7 +75,7 @@ object VidlinkExtractor {
             // Unescape backward slashes commonly found in JSON encoded URLs
             val link = match.groupValues[1].replace("\\/", "/")
             callback.invoke(
-                ExtractorLink(
+                newExtractorLink(
                     source = "Vidlink",
                     name = "Vidlink",
                     url = link,
@@ -91,7 +93,7 @@ object VidlinkExtractor {
             mp4Regex.findAll(responseText).forEach { match ->
                 val link = match.groupValues[1].replace("\\/", "/")
                 callback.invoke(
-                    ExtractorLink(
+                    newExtractorLink(
                         source = "Vidlink",
                         name = "Vidlink",
                         url = link,
