@@ -3,11 +3,19 @@ package com.StreamHub
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.AppUtils
+import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.INFER_TYPE
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 
-object VidcoreExtractor {
+object VidcoreExtractor : ExtractorApi() {
+    override val name = "Vidcore"
+    override val mainUrl = "https://vidcore.net"
+    override val requiresReferer = false
+
+    // Required override to fulfill ExtractorApi interface requirements securely
+    override suspend fun getUrl(url: String, referer: String?): List<ExtractorLink>? = null
+
     private const val ENC_API = "https://enc-dec.app/api"
     
     // Headers mapped directly from vidcore.py
@@ -113,13 +121,12 @@ object VidcoreExtractor {
             m3u8Regex.findAll(decryptedJsonStr).forEach { match ->
                 val link = match.groupValues[1].replace("\\/", "/")
                 callback.invoke(
-                    ExtractorLink(
-                        source = "Vidcore",
+                    newExtractorLink(
                         name = "Vidcore - $serverName",
                         url = link,
-                        referer = "https://vidcore.net/",
                         quality = Qualities.Unknown.value,
-                        type = INFER_TYPE
+                        type = ExtractorLinkType.M3U8,
+                        headers = mapOf("Referer" to "https://vidcore.net/") // Inject referer directly via headers
                     )
                 )
                 foundStream = true
@@ -131,13 +138,12 @@ object VidcoreExtractor {
                 mp4Regex.findAll(decryptedJsonStr).forEach { match ->
                     val link = match.groupValues[1].replace("\\/", "/")
                     callback.invoke(
-                        ExtractorLink(
-                            source = "Vidcore",
+                        newExtractorLink(
                             name = "Vidcore - $serverName",
                             url = link,
-                            referer = "https://vidcore.net/",
                             quality = Qualities.Unknown.value,
-                            type = INFER_TYPE
+                            type = ExtractorLinkType.VIDEO,
+                            headers = mapOf("Referer" to "https://vidcore.net/")
                         )
                     )
                     foundStream = true
