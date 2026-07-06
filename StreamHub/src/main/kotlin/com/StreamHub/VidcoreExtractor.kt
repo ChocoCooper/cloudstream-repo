@@ -13,15 +13,17 @@ object VidcoreExtractor : ExtractorApi() {
 
     private const val ENC_API = "https://enc-dec.app/api"
     
-    // By omitting the User-Agent here, we force OkHttp to use CloudStream's default User-Agent.
-    // This ensures the CDN token generated matches the UA ExoPlayer natively uses, fixing 403 errors!
+    // Headers mapped directly from vidcore.py for API requests
     private val baseHeaders = mapOf(
+        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
         "Referer" to "https://vidcore.net/",
         "X-Requested-With" to "XMLHttpRequest"
     )
     
+    // CRITICAL: We MUST explicitly pass the Chrome User-Agent into the ExoPlayer video request. 
+    // Without this, ExoPlayer uses its default UA, causing the CDN WAF to instantly return a 403 (Error 2004).
     private val videoHeaders = mapOf(
-        "Origin" to "https://vidcore.net",
+        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
         "Referer" to "https://vidcore.net/"
     )
 
@@ -92,6 +94,7 @@ object VidcoreExtractor : ExtractorApi() {
 
         val servers = decServersResponse?.result ?: emptyList()
         var foundStream = false
+        val foundUrls = mutableSetOf<String>()
 
         servers.forEach { server ->
             val serverData = server.data ?: return@forEach
@@ -106,47 +109,64 @@ object VidcoreExtractor : ExtractorApi() {
             ).text
             
             val m3u8Regex = Regex("""(https?://[^"]+\.m3u8[^"]*)""")
-            val m3u8Match = m3u8Regex.find(decryptedJsonStr)
-            
-            if (m3u8Match != null) {
-                // Replacing \\u0026 unescapes unicode '&' characters often breaking CDN token URLs in JSON
-                val link = m3u8Match.groupValues[1].replace("\\/", "/").replace("\\u0026", "&")
-                callback.invoke(
-                    ExtractorLink(
-                        source = "Vidcore",
-                        name = "Vidcore - $serverName",
-                        url = link,
-                        referer = "https://vidcore.net/",
-                        quality = Qualities.Unknown.value,
-                        headers = videoHeaders,
-                        extractorData = null,
-                        type = ExtractorLinkType.M3U8,
-                        audioTracks = emptyList()
-                    )
-                )
-                foundStream = true
-            } else {
-                val mp4Regex = Regex("""(https?://[^"]+\.mp4[^"]*)""")
-                mp4Regex.find(decryptedJsonStr)?.let { match ->
-                    val link = match.groupValues[1].replace("\\/", "/").replace("\\u0026", "&")
+            m3u8Regex.findAll(decryptedJsonStr).forEach { match ->
+                val link = match.groupValues[1].replace("\\/", "/").replace("\\u0026", "&")
+                if (foundUrls.add(link)) {
+                    val qualityInfo = getQualityFromName(link, "Vidcore - $serverName")
+                    
                     callback.invoke(
                         ExtractorLink(
                             source = "Vidcore",
-                            name = "Vidcore - $serverName",
+                            name = qualityInfo.second,
                             url = link,
-                            referer = "https://vidcore.net/",
-                            quality = Qualities.Unknown.value,
+                            referer = videoHeaders["Referer"] ?: "",
+                            quality = qualityInfo.first,
                             headers = videoHeaders,
                             extractorData = null,
-                            type = ExtractorLinkType.VIDEO,
+                            type = ExtractorLinkType.M3U8,
                             audioTracks = emptyList()
                         )
                     )
                     foundStream = true
                 }
             }
+
+            if (!foundStream) {
+                val mp4Regex = Regex("""(https?://[^"]+\.mp4[^"]*)""")
+                mp4Regex.findAll(decryptedJsonStr).forEach { match ->
+                    val link = match.groupValues[1].replace("\\/", "/").replace("\\u0026", "&")
+                    if (foundUrls.add(link)) {
+                        val qualityInfo = getQualityFromName(link, "Vidcore - $serverName")
+
+                        callback.invoke(
+                            ExtractorLink(
+                                source = "Vidcore",
+                                name = qualityInfo.second,
+                                url = link,
+                                referer = videoHeaders["Referer"] ?: "",
+                                quality = qualityInfo.first,
+                                headers = videoHeaders,
+                                extractorData = null,
+                                type = ExtractorLinkType.VIDEO,
+                                audioTracks = emptyList()
+                            )
+                        )
+                        foundStream = true
+                    }
+                }
+            }
         }
 
         return foundStream
+    }
+
+    private fun getQualityFromName(url: String, baseName: String): Pair<Int, String> {
+        return when {
+            url.contains("1080") -> Pair(Qualities.P1080.value, "$baseName - 1080p")
+            url.contains("720") -> Pair(Qualities.P720.value, "$baseName - 720p")
+            url.contains("480") -> Pair(Qualities.P480.value, "$baseName - 480p")
+            url.contains("360") -> Pair(Qualities.P360.value, "$baseName - 360p")
+            else -> Pair(Qualities.Unknown.value, baseName)
+        }
     }
 }
