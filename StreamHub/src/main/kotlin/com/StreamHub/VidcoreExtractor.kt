@@ -13,18 +13,18 @@ object VidcoreExtractor : ExtractorApi() {
 
     private const val ENC_API = "https://enc-dec.app/api"
     
-    // API headers exactly matching python script
+    // API headers exactly matching the python script
     private val baseHeaders = mapOf(
         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
         "Referer" to "https://vidcore.net/",
         "X-Requested-With" to "XMLHttpRequest"
     )
     
-    // Strict video headers mimicking a real browser <video> tag fetch
-    // Notice we REMOVED 'Origin' because passing it cross-origin triggers the Shadowlemon 403 WAF blocks
+    // Strict video headers mimicking a real browser <video> tag fetch to bypass the CDN 403 WAF blocks
     private val videoHeaders = mapOf(
         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
         "Referer" to "https://vidcore.net/",
+        "Origin" to "https://vidcore.net",
         "Accept" to "*/*",
         "Accept-Language" to "en-US,en;q=0.5"
     )
@@ -111,64 +111,75 @@ object VidcoreExtractor : ExtractorApi() {
             ).text
             
             val m3u8Regex = Regex("""(https?://[^"]+\.m3u8[^"]*)""")
-            val m3u8Match = m3u8Regex.find(decryptedJsonStr)
-            
-            if (m3u8Match != null) {
-                // By using .find() instead of .findAll(), we ONLY grab the master playlist once per server!
-                // Cloudstream will parse this Master M3U8 and generate the resolutions (1080p, 720p) in the player.
-                val link = m3u8Match.groupValues[1].replace("\\/", "/").replace("\\u0026", "&")
-                callback.invoke(
-                    ExtractorLink(
-                        source = "Vidcore",
-                        name = "Vidcore - $serverName",
-                        url = link,
-                        referer = videoHeaders["Referer"] ?: "",
-                        quality = Qualities.Unknown.value,
-                        headers = videoHeaders,
-                        extractorData = null,
-                        type = ExtractorLinkType.M3U8,
-                        audioTracks = emptyList()
-                    )
-                )
-                foundStream = true
-            } else {
-                // If it falls back to raw MP4s, we iterate through them and name them dynamically by resolution.
-                val mp4Regex = Regex("""(https?://[^"]+\.mp4[^"]*)""")
-                mp4Regex.findAll(decryptedJsonStr).forEach { match ->
-                    val link = match.groupValues[1].replace("\\/", "/").replace("\\u0026", "&")
-                    if (foundUrls.add(link)) {
-                        val qualityInfo = getQualityFromName(link, "Vidcore - $serverName")
-
+            m3u8Regex.findAll(decryptedJsonStr).forEach { match ->
+                val link = match.groupValues[1].replace("\\/", "/").replace("\\u0026", "&")
+                if (foundUrls.add(link)) {
+                    try {
+                        // Let Cloudstream natively parse the Master Playlist to fix resolutions automatically
+                        val extractedLinks = M3u8Helper.generateM3u8(
+                            source = "Vidcore - $serverName",
+                            streamUrl = link,
+                            referer = "https://vidcore.net/",
+                            headers = videoHeaders
+                        )
+                        if (extractedLinks.isNotEmpty()) {
+                            extractedLinks.forEach { callback.invoke(it) }
+                            foundStream = true
+                        } else {
+                            // Fallback if playlist is single-track
+                            callback.invoke(
+                                ExtractorLink(
+                                    source = "Vidcore",
+                                    name = "Vidcore - $serverName",
+                                    url = link,
+                                    referer = "https://vidcore.net/",
+                                    quality = Qualities.Unknown.value,
+                                    type = ExtractorLinkType.M3U8,
+                                    headers = videoHeaders,
+                                    extractorData = null
+                                )
+                            )
+                            foundStream = true
+                        }
+                    } catch (e: Exception) {
                         callback.invoke(
                             ExtractorLink(
                                 source = "Vidcore",
-                                name = qualityInfo.second,
+                                name = "Vidcore - $serverName",
                                 url = link,
-                                referer = videoHeaders["Referer"] ?: "",
-                                quality = qualityInfo.first,
+                                referer = "https://vidcore.net/",
+                                quality = Qualities.Unknown.value,
+                                type = ExtractorLinkType.M3U8,
                                 headers = videoHeaders,
-                                extractorData = null,
-                                type = ExtractorLinkType.VIDEO,
-                                audioTracks = emptyList()
+                                extractorData = null
                             )
                         )
                         foundStream = true
                     }
                 }
             }
+
+            val mp4Regex = Regex("""(https?://[^"]+\.mp4[^"]*)""")
+            mp4Regex.findAll(decryptedJsonStr).forEach { match ->
+                val link = match.groupValues[1].replace("\\/", "/").replace("\\u0026", "&")
+                if (foundUrls.add(link)) {
+                    callback.invoke(
+                        ExtractorLink(
+                            source = "Vidcore",
+                            name = "Vidcore - $serverName",
+                            url = link,
+                            referer = "https://vidcore.net/",
+                            quality = Qualities.Unknown.value,
+                            type = ExtractorLinkType.VIDEO,
+                            headers = videoHeaders,
+                            extractorData = null
+                        )
+                    )
+                    foundStream = true
+                }
+            }
         }
 
         return foundStream
-    }
-
-    private fun getQualityFromName(url: String, baseName: String): Pair<Int, String> {
-        return when {
-            url.contains("2160") || url.contains("4k", ignoreCase = true) -> Pair(Qualities.P2160.value, "$baseName - 4K")
-            url.contains("1080") -> Pair(Qualities.P1080.value, "$baseName - 1080p")
-            url.contains("720") -> Pair(Qualities.P720.value, "$baseName - 720p")
-            url.contains("480") -> Pair(Qualities.P480.value, "$baseName - 480p")
-            url.contains("360") -> Pair(Qualities.P360.value, "$baseName - 360p")
-            else -> Pair(Qualities.Unknown.value, baseName)
-        }
     }
 }
