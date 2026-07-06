@@ -1,7 +1,7 @@
 package com.StreamHub
 
 import com.fasterxml.jackson.annotation.JsonProperty
-import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 
 object VidlinkExtractor : ExtractorApi() {
@@ -75,12 +75,15 @@ object VidlinkExtractor : ExtractorApi() {
             val link = match.groupValues[1].replace("\\/", "/")
             callback.invoke(
                 newExtractorLink(
+                    source = "Vidlink",
                     name = "Vidlink",
                     url = link,
-                    quality = Qualities.Unknown.value,
-                    type = ExtractorLinkType.M3U8,
-                    headers = mapOf("Referer" to "https://vidlink.pro/")
-                )
+                    referer = "https://vidlink.pro/",
+                    type = ExtractorLinkType.M3U8
+                ) {
+                    this.quality = Qualities.Unknown.value
+                    this.headers = headers
+                }
             )
             foundStream = true
         }
@@ -92,12 +95,15 @@ object VidlinkExtractor : ExtractorApi() {
                 val link = match.groupValues[1].replace("\\/", "/")
                 callback.invoke(
                     newExtractorLink(
+                        source = "Vidlink",
                         name = "Vidlink",
                         url = link,
-                        quality = Qualities.Unknown.value,
-                        type = ExtractorLinkType.VIDEO,
-                        headers = mapOf("Referer" to "https://vidlink.pro/")
-                    )
+                        referer = "https://vidlink.pro/",
+                        type = ExtractorLinkType.VIDEO
+                    ) {
+                        this.quality = Qualities.Unknown.value
+                        this.headers = headers
+                    }
                 )
                 foundStream = true
             }
