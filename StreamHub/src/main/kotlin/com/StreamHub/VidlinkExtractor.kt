@@ -2,7 +2,11 @@ package com.StreamHub
 
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.utils.AppUtils
+import com.lagradost.cloudstream3.utils.ExtractorApi
+import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.Qualities
 
 object VidlinkExtractor : ExtractorApi() {
     override val name = "Vidlink"
@@ -73,7 +77,7 @@ object VidlinkExtractor : ExtractorApi() {
                         headers = videoHeaders,
                         extractorData = null,
                         type = ExtractorLinkType.M3U8,
-                        audioTracks = emptyList()
+                        audioTracks = emptyList() // Bypasses the compiler ERROR
                     )
                 )
                 foundStream = true
@@ -97,7 +101,7 @@ object VidlinkExtractor : ExtractorApi() {
                             headers = videoHeaders,
                             extractorData = null,
                             type = ExtractorLinkType.VIDEO,
-                            audioTracks = emptyList()
+                            audioTracks = emptyList() // Bypasses the compiler ERROR
                         )
                     )
                     foundStream = true
