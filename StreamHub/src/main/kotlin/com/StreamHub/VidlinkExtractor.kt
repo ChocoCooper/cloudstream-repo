@@ -13,7 +13,6 @@ object VidlinkExtractor : ExtractorApi() {
 
     private const val ENC_API = "https://enc-dec.app/api"
     
-    // Headers matching Python exactly
     private val videoHeaders = mapOf(
         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
         "Origin" to "https://vidlink.pro",
@@ -55,50 +54,71 @@ object VidlinkExtractor : ExtractorApi() {
 
         val responseText = app.get(vidlinkApiUrl, headers = videoHeaders).text
         
-        val m3u8Regex = Regex("""(https?://[^"]+\.m3u8[^"]*)""")
-        val m3u8Match = m3u8Regex.find(responseText)
-        
-        if (m3u8Match != null) {
-            // Find FIRST Master playlist and immediately invoke. 
-            // This prevents duplicate spam and keeps the source list perfectly clean ("Vidlink").
-            val link = m3u8Match.groupValues[1].replace("\\/", "/").replace("\\u0026", "&")
-            callback.invoke(
-                ExtractorLink(
-                    source = "Vidlink",
-                    name = "Vidlink",
-                    url = link,
-                    referer = videoHeaders["Referer"] ?: "",
-                    quality = Qualities.Unknown.value,
-                    headers = videoHeaders,
-                    extractorData = null,
-                    type = ExtractorLinkType.M3U8,
-                    audioTracks = emptyList()
-                )
-            )
-            return true // Stop immediately. The video player will extract the track options automatically!
-        }
-        
-        // MP4 fallback loop just in case
         var foundStream = false
         val foundUrls = mutableSetOf<String>()
-        val mp4Regex = Regex("""(https?://[^"]+\.mp4[^"]*)""")
         
+        val m3u8Regex = Regex("""(https?://[^"]+\.m3u8[^"]*)""")
+        m3u8Regex.findAll(responseText).forEach { match ->
+            val link = match.groupValues[1].replace("\\/", "/").replace("\\u0026", "&")
+            if (foundUrls.add(link)) {
+                try {
+                    // Let Cloudstream natively parse the Master Playlist to output "Vidlink - 1080p", "Vidlink - 720p", etc.
+                    val extractedLinks = M3u8Helper.generateM3u8(
+                        source = "Vidlink",
+                        streamUrl = link,
+                        referer = "https://vidlink.pro/",
+                        headers = videoHeaders
+                    )
+                    if (extractedLinks.isNotEmpty()) {
+                        extractedLinks.forEach { callback.invoke(it) }
+                        foundStream = true
+                    } else {
+                        callback.invoke(
+                            ExtractorLink(
+                                source = "Vidlink",
+                                name = "Vidlink",
+                                url = link,
+                                referer = "https://vidlink.pro/",
+                                quality = Qualities.Unknown.value,
+                                type = ExtractorLinkType.M3U8,
+                                headers = videoHeaders,
+                                extractorData = null
+                            )
+                        )
+                        foundStream = true
+                    }
+                } catch (e: Exception) {
+                    callback.invoke(
+                        ExtractorLink(
+                            source = "Vidlink",
+                            name = "Vidlink",
+                            url = link,
+                            referer = "https://vidlink.pro/",
+                            quality = Qualities.Unknown.value,
+                            type = ExtractorLinkType.M3U8,
+                            headers = videoHeaders,
+                            extractorData = null
+                        )
+                    )
+                    foundStream = true
+                }
+            }
+        }
+        
+        val mp4Regex = Regex("""(https?://[^"]+\.mp4[^"]*)""")
         mp4Regex.findAll(responseText).forEach { match ->
             val link = match.groupValues[1].replace("\\/", "/").replace("\\u0026", "&")
             if (foundUrls.add(link)) {
-                val qualityInfo = getQualityFromName(link, "Vidlink")
-
                 callback.invoke(
                     ExtractorLink(
                         source = "Vidlink",
-                        name = qualityInfo.second,
+                        name = "Vidlink",
                         url = link,
-                        referer = videoHeaders["Referer"] ?: "",
-                        quality = qualityInfo.first,
-                        headers = videoHeaders,
-                        extractorData = null,
+                        referer = "https://vidlink.pro/",
+                        quality = Qualities.Unknown.value,
                         type = ExtractorLinkType.VIDEO,
-                        audioTracks = emptyList()
+                        headers = videoHeaders,
+                        extractorData = null
                     )
                 )
                 foundStream = true
@@ -106,16 +126,5 @@ object VidlinkExtractor : ExtractorApi() {
         }
 
         return foundStream
-    }
-
-    private fun getQualityFromName(url: String, baseName: String): Pair<Int, String> {
-        return when {
-            url.contains("2160") || url.contains("4k", ignoreCase = true) -> Pair(Qualities.P2160.value, "$baseName - 4K")
-            url.contains("1080") -> Pair(Qualities.P1080.value, "$baseName - 1080p")
-            url.contains("720") -> Pair(Qualities.P720.value, "$baseName - 720p")
-            url.contains("480") -> Pair(Qualities.P480.value, "$baseName - 480p")
-            url.contains("360") -> Pair(Qualities.P360.value, "$baseName - 360p")
-            else -> Pair(Qualities.Unknown.value, baseName)
-        }
     }
 }
