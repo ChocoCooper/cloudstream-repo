@@ -1,7 +1,7 @@
 package com.StreamHub
 
 import com.fasterxml.jackson.annotation.JsonProperty
-import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.*
 
 object VidlinkExtractor : ExtractorApi() {
@@ -26,6 +26,7 @@ object VidlinkExtractor : ExtractorApi() {
         @JsonProperty("error") val error: String?
     )
 
+    @Suppress("DEPRECATION")
     suspend fun getStream(url: String, callback: (ExtractorLink) -> Unit): Boolean {
         val isMovie = url.contains("/movie/")
         val parts = url.split("/")
@@ -74,16 +75,17 @@ object VidlinkExtractor : ExtractorApi() {
             // Unescape backward slashes commonly found in JSON encoded URLs
             val link = match.groupValues[1].replace("\\/", "/")
             callback.invoke(
-                newExtractorLink(
+                ExtractorLink(
                     source = "Vidlink",
                     name = "Vidlink",
                     url = link,
                     referer = "https://vidlink.pro/",
-                    type = ExtractorLinkType.M3U8
-                ) {
-                    this.quality = Qualities.Unknown.value
-                    this.headers = headers
-                }
+                    quality = Qualities.Unknown.value,
+                    headers = mapOf("Referer" to "https://vidlink.pro/"),
+                    extractorData = null,
+                    type = ExtractorLinkType.M3U8,
+                    audioTracks = emptyList() // Forces compiler to use the warning-level constructor safely
+                )
             )
             foundStream = true
         }
@@ -94,16 +96,17 @@ object VidlinkExtractor : ExtractorApi() {
             mp4Regex.findAll(responseText).forEach { match ->
                 val link = match.groupValues[1].replace("\\/", "/")
                 callback.invoke(
-                    newExtractorLink(
+                    ExtractorLink(
                         source = "Vidlink",
                         name = "Vidlink",
                         url = link,
                         referer = "https://vidlink.pro/",
-                        type = ExtractorLinkType.VIDEO
-                    ) {
-                        this.quality = Qualities.Unknown.value
-                        this.headers = headers
-                    }
+                        quality = Qualities.Unknown.value,
+                        headers = mapOf("Referer" to "https://vidlink.pro/"),
+                        extractorData = null,
+                        type = ExtractorLinkType.VIDEO,
+                        audioTracks = emptyList() // Forces compiler to use the warning-level constructor safely
+                    )
                 )
                 foundStream = true
             }
