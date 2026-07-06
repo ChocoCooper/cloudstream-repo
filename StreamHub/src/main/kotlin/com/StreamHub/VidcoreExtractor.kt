@@ -1,7 +1,7 @@
 package com.StreamHub
 
 import com.fasterxml.jackson.annotation.JsonProperty
-import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 
 object VidcoreExtractor : ExtractorApi() {
@@ -118,12 +118,15 @@ object VidcoreExtractor : ExtractorApi() {
                 val link = match.groupValues[1].replace("\\/", "/")
                 callback.invoke(
                     newExtractorLink(
+                        source = "Vidcore",
                         name = "Vidcore - $serverName",
                         url = link,
-                        quality = Qualities.Unknown.value,
-                        type = ExtractorLinkType.M3U8,
-                        headers = mapOf("Referer" to "https://vidcore.net/") // Explicitly inject referer here
-                    )
+                        referer = "https://vidcore.net/",
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.quality = Qualities.Unknown.value
+                        this.headers = mapOf("Referer" to "https://vidcore.net/")
+                    }
                 )
                 foundStream = true
             }
@@ -135,12 +138,15 @@ object VidcoreExtractor : ExtractorApi() {
                     val link = match.groupValues[1].replace("\\/", "/")
                     callback.invoke(
                         newExtractorLink(
+                            source = "Vidcore",
                             name = "Vidcore - $serverName",
                             url = link,
-                            quality = Qualities.Unknown.value,
-                            type = ExtractorLinkType.VIDEO,
-                            headers = mapOf("Referer" to "https://vidcore.net/")
-                        )
+                            referer = "https://vidcore.net/",
+                            type = ExtractorLinkType.VIDEO
+                        ) {
+                            this.quality = Qualities.Unknown.value
+                            this.headers = mapOf("Referer" to "https://vidcore.net/")
+                        }
                     )
                     foundStream = true
                 }
