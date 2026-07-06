@@ -13,16 +13,14 @@ object VidcoreExtractor : ExtractorApi() {
 
     private const val ENC_API = "https://enc-dec.app/api"
     
-    // Headers mapped directly from vidcore.py for API requests
+    // By omitting the User-Agent here, we force OkHttp to use CloudStream's default User-Agent.
+    // This ensures the CDN token generated matches the UA ExoPlayer natively uses, fixing 403 errors!
     private val baseHeaders = mapOf(
-        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
         "Referer" to "https://vidcore.net/",
         "X-Requested-With" to "XMLHttpRequest"
     )
     
-    // Strict headers required by ExoPlayer to bypass Shadowlemon 403 Forbidden errors
     private val videoHeaders = mapOf(
-        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
         "Origin" to "https://vidcore.net",
         "Referer" to "https://vidcore.net/"
     )
@@ -94,7 +92,6 @@ object VidcoreExtractor : ExtractorApi() {
 
         val servers = decServersResponse?.result ?: emptyList()
         var foundStream = false
-        val foundUrls = mutableSetOf<String>() // Prevents duplicate streams
 
         servers.forEach { server ->
             val serverData = server.data ?: return@forEach
@@ -109,9 +106,29 @@ object VidcoreExtractor : ExtractorApi() {
             ).text
             
             val m3u8Regex = Regex("""(https?://[^"]+\.m3u8[^"]*)""")
-            m3u8Regex.findAll(decryptedJsonStr).forEach { match ->
-                val link = match.groupValues[1].replace("\\/", "/")
-                if (foundUrls.add(link)) {
+            val m3u8Match = m3u8Regex.find(decryptedJsonStr)
+            
+            if (m3u8Match != null) {
+                // Replacing \\u0026 unescapes unicode '&' characters often breaking CDN token URLs in JSON
+                val link = m3u8Match.groupValues[1].replace("\\/", "/").replace("\\u0026", "&")
+                callback.invoke(
+                    ExtractorLink(
+                        source = "Vidcore",
+                        name = "Vidcore - $serverName",
+                        url = link,
+                        referer = "https://vidcore.net/",
+                        quality = Qualities.Unknown.value,
+                        headers = videoHeaders,
+                        extractorData = null,
+                        type = ExtractorLinkType.M3U8,
+                        audioTracks = emptyList()
+                    )
+                )
+                foundStream = true
+            } else {
+                val mp4Regex = Regex("""(https?://[^"]+\.mp4[^"]*)""")
+                mp4Regex.find(decryptedJsonStr)?.let { match ->
+                    val link = match.groupValues[1].replace("\\/", "/").replace("\\u0026", "&")
                     callback.invoke(
                         ExtractorLink(
                             source = "Vidcore",
@@ -119,36 +136,13 @@ object VidcoreExtractor : ExtractorApi() {
                             url = link,
                             referer = "https://vidcore.net/",
                             quality = Qualities.Unknown.value,
-                            headers = videoHeaders, // Strict headers applied here
+                            headers = videoHeaders,
                             extractorData = null,
-                            type = ExtractorLinkType.M3U8,
+                            type = ExtractorLinkType.VIDEO,
                             audioTracks = emptyList()
                         )
                     )
                     foundStream = true
-                }
-            }
-
-            if (!foundStream) {
-                val mp4Regex = Regex("""(https?://[^"]+\.mp4[^"]*)""")
-                mp4Regex.findAll(decryptedJsonStr).forEach { match ->
-                    val link = match.groupValues[1].replace("\\/", "/")
-                    if (foundUrls.add(link)) {
-                        callback.invoke(
-                            ExtractorLink(
-                                source = "Vidcore",
-                                name = "Vidcore - $serverName",
-                                url = link,
-                                referer = "https://vidcore.net/",
-                                quality = Qualities.Unknown.value,
-                                headers = videoHeaders, // Strict headers applied here
-                                extractorData = null,
-                                type = ExtractorLinkType.VIDEO,
-                                audioTracks = emptyList()
-                            )
-                        )
-                        foundStream = true
-                    }
                 }
             }
         }
