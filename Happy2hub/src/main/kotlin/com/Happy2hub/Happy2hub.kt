@@ -2,6 +2,7 @@ package com.Happy2hub
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.ParList.parMap
 import org.jsoup.nodes.Element
 import java.net.URLDecoder
 
@@ -28,28 +29,54 @@ class Happy2hub : MainAPI() {
     )
 
     private val supportedDomains = listOf(
-        "pixeldrain", "luluvid", "lulustream", "playmogo",
-        "dood", "myvidplay", "voe", "streamtape", "streamwish"
+        "pixeldrain", "luluvid", "lulustream", "luluvdo", "lulu",
+        "playmogo", "dood", "myvidplay", "voe", "streamtape", "streamwish"
+    )
+
+    // Top active DoodStream family mirror domains
+    private val doodDomains = listOf(
+        "dood.la",
+        "playmogo.com",
+        "ds2play.com",
+        "d0000d.com",
+        "dood.so",
+        "dood.pm",
+        "dood.ws",
+        "doodstream.com",
+        "myvidplay.com"
+    )
+
+    // Top active LuluStream family mirror domains
+    private val luluDomains = listOf(
+        "luluvdo.com",
+        "lulustream.com",
+        "luluvid.com",
+        "luluvids.com"
     )
 
     private fun isSupportedDomain(url: String): Boolean {
         return supportedDomains.any { domain -> url.contains(domain, ignoreCase = true) }
     }
 
+    /**
+     * Recursively unwraps URL shorteners and redirects (e.g. ouo.io)
+     */
     private fun unwrapUrl(url: String): String {
-        val fixed = fixUrl(url)
-        return if (fixed.contains("?s=")) {
-            try {
-                val encodedUrl = fixed.substringAfter("?s=").substringBefore("&")
+        var currentUrl = fixUrl(url)
+        while (currentUrl.contains("?s=")) {
+            currentUrl = try {
+                val encodedUrl = currentUrl.substringAfter("?s=").substringBefore("&")
                 URLDecoder.decode(encodedUrl, "UTF-8")
             } catch (e: Exception) {
-                fixed
+                break
             }
-        } else {
-            fixed
         }
+        return currentUrl
     }
 
+    /**
+     * Selects only the best quality link available per section block
+     */
     private fun selectBestQualityLinks(aElements: List<Element>): List<Element> {
         if (aElements.isEmpty()) return emptyList()
 
@@ -58,9 +85,7 @@ class Happy2hub : MainAPI() {
             text.contains("1080p") || text.contains("720p") || text.contains("480p")
         }
 
-        if (!hasQualityLabel) {
-            return aElements
-        }
+        if (!hasQualityLabel) return aElements
 
         val link1080p = aElements.firstOrNull { it.text().contains("1080p", ignoreCase = true) }
         val link720p  = aElements.firstOrNull { it.text().contains("720p", ignoreCase = true) }
@@ -74,8 +99,12 @@ class Happy2hub : MainAPI() {
         val path = request.data.trimEnd('/')
         val url = "$mainUrl/$path/page/$page"
 
-        val document = app.get(url, headers = requestHeaders, timeout = 30L).document
-        val home = document.select("div.content-wrap > div > div > div").mapNotNull { it.toSearchResult() }
+        val home = try {
+            val document = app.get(url, headers = requestHeaders, timeout = 30L).document
+            document.select("div.content-wrap > div > div > div").mapNotNull { it.toSearchResult() }
+        } catch (e: Exception) {
+            emptyList()
+        }
 
         return newHomePageResponse(
             list = HomePageList(
@@ -100,9 +129,13 @@ class Happy2hub : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         val searchResponse = mutableListOf<SearchResponse>()
-        for (i in 1..5) {
-            val document = app.get("$mainUrl/page/$i?s=$query", headers = requestHeaders, timeout = 30L).document
-            val results = document.select("div.content-wrap > div > div > div").mapNotNull { it.toSearchResult() }
+        for (i in 1..3) {
+            val results = try {
+                val document = app.get("$mainUrl/page/$i?s=$query", headers = requestHeaders, timeout = 30L).document
+                document.select("div.content-wrap > div > div > div").mapNotNull { it.toSearchResult() }
+            } catch (e: Exception) {
+                emptyList()
+            }
 
             if (results.isEmpty()) break
 
@@ -172,6 +205,7 @@ class Happy2hub : MainAPI() {
                 }
             }
 
+            // Fallback for pages structured without explicit "Episode" headings
             if (episodes.isEmpty()) {
                 val rawFallbackLinks = mutableListOf<String>()
                 pTag.select("div.entry-content.clearfix h5, div.entry-content.clearfix p").forEach { container ->
@@ -209,49 +243,61 @@ class Happy2hub : MainAPI() {
         linksList.forEach { rawLink ->
             if (rawLink.isNotEmpty()) {
                 when {
-                    // PixelDrain Handling
+                    // Direct PixelDrain Resolver (Bypasses ISP Block via pixeldrain.dev)
                     rawLink.contains("pixeldrain", ignoreCase = true) -> {
                         val fileId = Regex("""pixeldrain\.(?:com|dev)/(?:u|api/file)/([a-zA-Z0-9]+)""")
                             .find(rawLink)?.groupValues?.get(1)
 
                         if (fileId != null) {
-                            callback.invoke(
-                                newExtractorLink(
-                                    source = name,
-                                    name = "PixelDrain",
-                                    url = "https://pixeldrain.dev/api/file/$fileId",
-                                    type = ExtractorLinkType.VIDEO
-                                ) {
-                                    this.referer = "https://pixeldrain.dev/"
-                                    this.quality = Qualities.Unknown.value
-                                }
-                            )
+                            listOf("pixeldrain.dev", "pixeldrain.com").forEach { domain ->
+                                callback.invoke(
+                                    newExtractorLink(
+                                        source = name,
+                                        name = "PixelDrain",
+                                        url = "https://$domain/api/file/$fileId",
+                                        type = ExtractorLinkType.VIDEO
+                                    ) {
+                                        this.referer = "https://$domain/"
+                                        this.quality = Qualities.Unknown.value
+                                    }
+                                )
+                            }
                         } else {
                             loadExtractor(rawLink, subtitleCallback, callback)
                         }
                     }
 
-                    // Playmogo / DoodStream Handling
+                    // Concurrent LuluStream Mirror Resolution
+                    rawLink.contains("luluvid", ignoreCase = true) ||
+                    rawLink.contains("lulustream", ignoreCase = true) ||
+                    rawLink.contains("luluvdo", ignoreCase = true) ||
+                    rawLink.contains("lulu.", ignoreCase = true) -> {
+                        val fileId = Regex("""/(?:d|e)/([a-zA-Z0-9_-]+)""")
+                            .find(rawLink)?.groupValues?.get(1)
+
+                        if (fileId != null) {
+                            luluDomains.parMap { domain ->
+                                loadExtractor("https://$domain/e/$fileId", subtitleCallback, callback)
+                            }
+                        } else {
+                            loadExtractor(rawLink, subtitleCallback, callback)
+                        }
+                    }
+
+                    // Concurrent Playmogo / DoodStream Mirror Resolution
                     rawLink.contains("playmogo", ignoreCase = true) ||
                     rawLink.contains("dood", ignoreCase = true) ||
                     rawLink.contains("myvidplay", ignoreCase = true) -> {
-                        val fixedDoodUrl = rawLink
-                            .replace("playmogo.com", "dood.la")
-                            .replace("myvidplay.com", "dood.la")
-                            .replace("doodstream.com", "dood.la")
-                            .replace("/d/", "/e/")
+                        val fileId = Regex("""/(?:d|e)/([a-zA-Z0-9_-]+)""")
+                            .find(rawLink)?.groupValues?.get(1)
 
-                        loadExtractor(fixedDoodUrl, subtitleCallback, callback)
-                    }
-
-                    // Luluvid / LuluStream Handling
-                    rawLink.contains("luluvid", ignoreCase = true) ||
-                    rawLink.contains("lulustream", ignoreCase = true) -> {
-                        val fixedLuluUrl = rawLink
-                            .replace("luluvid.com", "lulustream.com")
-                            .replace("/d/", "/e/")
-
-                        loadExtractor(fixedLuluUrl, subtitleCallback, callback)
+                        if (fileId != null) {
+                            doodDomains.parMap { domain ->
+                                loadExtractor("https://$domain/e/$fileId", subtitleCallback, callback)
+                            }
+                        } else {
+                            loadExtractor(rawLink, subtitleCallback, callback)
+                        }
                     }
 
                     else -> {
