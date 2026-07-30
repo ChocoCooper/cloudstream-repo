@@ -17,22 +17,14 @@ class Happy2hub : MainAPI() {
     private val requestHeaders = mapOf("User-Agent" to USER_AGENT)
 
     override val mainPage = mainPageOf(
-        "ullu-a/" to "Ullu",
-        "tag/primeplay-watch-online" to "Primeplay",
-        "tag/altt-watch-online" to "Altt",
-        "tag/bigshots-ott-watch-online" to "Bigshots",
-        "tag/naari-magazine-watch-online" to "Naari",
-        "tag/desiflix-originals-watch-online" to "Desiflix",
-        "tag/idiot-boxx-watch-online" to "Idiot",
-        "tag/hotshots-watch-online" to "Hotshots",
-        "tag/mx-player-watch-online" to "MX Player",
-        "tag/namastey-flix-originals" to "Namastey Flix",
-        "tag/18" to "All Videos",
-        "tag/brazzersexxtra" to "Brazzer",
-        "tag/mojflix-watch-online" to "Mojflix",
-        "tag/mangoflix-watch-online" to "Mangoflix",
-        "tag/hothit-watch-online" to "Hothit",
-        "tag/porn" to "All Porn",
+        "ullu-b/" to "Ullu",
+        "atrangii-b/" to "Atrangii",
+        "altt/" to "Altt",
+        "primplay-f/" to "PrimePlay",
+        "hotshots/" to "Hotshots",
+        "voovi-b/" to "Voovi",
+        "primeshots/" to "PrimeShots",
+        "hitprime/" to "HitPrime",
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
@@ -44,7 +36,7 @@ class Happy2hub : MainAPI() {
             list = HomePageList(
                 name               = request.name,
                 list               = home,
-                isHorizontalImages = true
+                isHorizontalImages = false
             ),
             hasNext = home.isNotEmpty()
         )
