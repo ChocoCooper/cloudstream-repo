@@ -242,10 +242,17 @@ class Happy2hub : MainAPI() {
                     link.name
                 }
 
-                val modifiedLink = link.copy(
+                val modifiedLink = newExtractorLink(
+                    source = link.source,
                     name = displayName,
-                    quality = finalQuality
-                )
+                    url = link.url,
+                    type = link.type
+                ) {
+                    this.referer = link.referer
+                    this.quality = finalQuality
+                    this.headers = link.headers
+                    this.isM3u8 = link.isM3u8
+                }
                 callback.invoke(modifiedLink)
             }
         )
