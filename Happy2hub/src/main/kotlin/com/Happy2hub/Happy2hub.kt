@@ -149,7 +149,6 @@ class Happy2hub : MainAPI() {
 
                 val rawLinks = mutableListOf<String>()
 
-                // Extract all quality links inside the episode heading
                 episodeHeader.select("a").forEach { a ->
                     val rawHref = fixUrlNull(a.attr("href"))
                     if (!rawHref.isNullOrEmpty()) {
@@ -160,7 +159,6 @@ class Happy2hub : MainAPI() {
                     }
                 }
 
-                // Extract all quality links from sibling tags until the next episode
                 var nextElement = episodeHeader.nextElementSibling()
                 while (nextElement != null) {
                     val isNextHeader = (nextElement.tagName() in listOf("h4", "h5", "p")) &&
@@ -193,7 +191,6 @@ class Happy2hub : MainAPI() {
                 }
             }
 
-            // Fallback for pages structured without explicit "Episode" headings
             if (episodes.isEmpty()) {
                 val rawFallbackLinks = mutableListOf<String>()
                 pTag.select("div.entry-content.clearfix h5, div.entry-content.clearfix p").forEach { container ->
@@ -231,38 +228,27 @@ class Happy2hub : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        loadExtractor(url, subtitleCallback) { link ->
-            val baseServerName = link.name
-            val qStr = if (qualityTag.isNotEmpty()) {
-                qualityTag
-            } else {
-                getQualityString(link.quality)
-            }
+        loadExtractor(
+            url = url,
+            subtitleCallback = subtitleCallback,
+            callback = { link ->
+                val qVal = getQualityFromName(qualityTag)
+                val finalQuality = if (qVal != Qualities.Unknown.value) qVal else link.quality
+                val qStr = if (qualityTag.isNotEmpty()) qualityTag else getQualityString(link.quality)
 
-            val displayName = if (qStr.isNotEmpty() && !baseServerName.contains(qStr, ignoreCase = true)) {
-                "$baseServerName $qStr"
-            } else {
-                baseServerName
-            }
-
-            callback.invoke(
-                newExtractorLink(
-                    source = link.source,
-                    name = displayName,
-                    url = link.url,
-                    type = link.type
-                ) {
-                    this.referer = link.referer
-                    this.quality = if (getQualityFromName(qualityTag) != Qualities.Unknown.value) {
-                        getQualityFromName(qualityTag)
-                    } else {
-                        link.quality
-                    }
-                    this.headers = link.headers
-                    this.isM3u8 = link.isM3u8
+                val displayName = if (qStr.isNotEmpty() && !link.name.contains(qStr, ignoreCase = true)) {
+                    "${link.name} $qStr"
+                } else {
+                    link.name
                 }
-            )
-        }
+
+                val modifiedLink = link.copy(
+                    name = displayName,
+                    quality = finalQuality
+                )
+                callback.invoke(modifiedLink)
+            }
+        )
     }
 
     override suspend fun loadLinks(
@@ -279,7 +265,6 @@ class Happy2hub : MainAPI() {
                 val qualityTag = if (parts.size > 1) parts[1].trim() else ""
 
                 when {
-                    // PixelDrain Direct API Extraction with "PixelDrain Quality" Labeling
                     rawLink.contains("pixeldrain", ignoreCase = true) -> {
                         val fileId = Regex("""pixeldrain\.(?:com|dev)/(?:u|api/file)/([a-zA-Z0-9]+)""")
                             .find(rawLink)?.groupValues?.get(1)
@@ -304,7 +289,6 @@ class Happy2hub : MainAPI() {
                         }
                     }
 
-                    // LuluStream / Luluvid Handling with Custom Resolution Naming
                     rawLink.contains("luluvid", ignoreCase = true) ||
                     rawLink.contains("lulustream", ignoreCase = true) ||
                     rawLink.contains("luluvdo", ignoreCase = true) -> {
@@ -324,7 +308,6 @@ class Happy2hub : MainAPI() {
                         }
                     }
 
-                    // DoodStream / Playmogo Handling with Custom Resolution Naming
                     rawLink.contains("playmogo", ignoreCase = true) ||
                     rawLink.contains("dood", ignoreCase = true) ||
                     rawLink.contains("myvidplay", ignoreCase = true) -> {
