@@ -35,27 +35,6 @@ class Happy2hub : MainAPI() {
         "playmogo", "dood", "myvidplay", "voe", "streamtape", "streamwish"
     )
 
-    // Top active DoodStream family mirror domains
-    private val doodDomains = listOf(
-        "dood.la",
-        "playmogo.com",
-        "ds2play.com",
-        "d0000d.com",
-        "dood.so",
-        "dood.pm",
-        "dood.ws",
-        "doodstream.com",
-        "myvidplay.com"
-    )
-
-    // Top active LuluStream family mirror domains
-    private val luluDomains = listOf(
-        "luluvdo.com",
-        "lulustream.com",
-        "luluvid.com",
-        "luluvids.com"
-    )
-
     private fun isSupportedDomain(url: String): Boolean {
         return supportedDomains.any { domain -> url.contains(domain, ignoreCase = true) }
     }
@@ -238,41 +217,38 @@ class Happy2hub : MainAPI() {
         linksList.forEach { rawLink ->
             if (rawLink.isNotEmpty()) {
                 when {
-                    // Direct PixelDrain Resolver (Bypasses ISP Block via pixeldrain.dev)
+                    // Single PixelDrain Link Emission (Using pixeldrain.dev to prevent duplicates)
                     rawLink.contains("pixeldrain", ignoreCase = true) -> {
                         val fileId = Regex("""pixeldrain\.(?:com|dev)/(?:u|api/file)/([a-zA-Z0-9]+)""")
                             .find(rawLink)?.groupValues?.get(1)
 
                         if (fileId != null) {
-                            listOf("pixeldrain.dev", "pixeldrain.com").forEach { domain ->
-                                callback.invoke(
-                                    newExtractorLink(
-                                        source = name,
-                                        name = "PixelDrain",
-                                        url = "https://$domain/api/file/$fileId",
-                                        type = ExtractorLinkType.VIDEO
-                                    ) {
-                                        this.referer = "https://$domain/"
-                                        this.quality = Qualities.Unknown.value
-                                    }
-                                )
-                            }
+                            callback.invoke(
+                                newExtractorLink(
+                                    source = name,
+                                    name = "PixelDrain",
+                                    url = "https://pixeldrain.dev/api/file/$fileId",
+                                    type = ExtractorLinkType.VIDEO
+                                ) {
+                                    this.referer = "https://pixeldrain.dev/"
+                                    this.quality = Qualities.Unknown.value
+                                }
+                            )
                         } else {
                             loadExtractor(rawLink, subtitleCallback, callback)
                         }
                     }
 
-                    // Concurrent LuluStream Mirror Resolution using Kotlin Coroutines
+                    // LuluStream / Luluvid Handling (Targets lulustream.com and luluvdo.com explicitly)
                     rawLink.contains("luluvid", ignoreCase = true) ||
                     rawLink.contains("lulustream", ignoreCase = true) ||
-                    rawLink.contains("luluvdo", ignoreCase = true) ||
-                    rawLink.contains("lulu.", ignoreCase = true) -> {
+                    rawLink.contains("luluvdo", ignoreCase = true) -> {
                         val fileId = Regex("""/(?:d|e)/([a-zA-Z0-9_-]+)""")
                             .find(rawLink)?.groupValues?.get(1)
 
                         if (fileId != null) {
                             coroutineScope {
-                                luluDomains.map { domain ->
+                                listOf("lulustream.com", "luluvdo.com").map { domain ->
                                     async {
                                         loadExtractor("https://$domain/e/$fileId", subtitleCallback, callback)
                                     }
@@ -283,7 +259,7 @@ class Happy2hub : MainAPI() {
                         }
                     }
 
-                    // Concurrent Playmogo / DoodStream Mirror Resolution using Kotlin Coroutines
+                    // DoodStream / Playmogo Handling (Transforms playmogo.com into dood.la / doodstream.com)
                     rawLink.contains("playmogo", ignoreCase = true) ||
                     rawLink.contains("dood", ignoreCase = true) ||
                     rawLink.contains("myvidplay", ignoreCase = true) -> {
@@ -292,7 +268,7 @@ class Happy2hub : MainAPI() {
 
                         if (fileId != null) {
                             coroutineScope {
-                                doodDomains.map { domain ->
+                                listOf("dood.la", "doodstream.com").map { domain ->
                                     async {
                                         loadExtractor("https://$domain/e/$fileId", subtitleCallback, callback)
                                     }
