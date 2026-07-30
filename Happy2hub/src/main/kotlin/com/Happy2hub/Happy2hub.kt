@@ -27,6 +27,19 @@ class Happy2hub : MainAPI() {
         "hitprime/" to "HitPrime",
     )
 
+    // Playable server domain keywords supported by Cloudstream extractors
+    private val supportedDomains = listOf(
+        "pixeldrain", "luluvid", "lulustream", "playmogo",
+        "dood", "myvidplay", "voe", "streamtape", "streamwish"
+    )
+
+    private fun isSupportedDomain(url: String): Boolean {
+        return supportedDomains.any { domain -> url.contains(domain, ignoreCase = true) }
+    }
+
+    /**
+     * Unwraps redirection wrappers (ouo.io) to extract the real destination URL
+     */
     private fun unwrapUrl(url: String): String {
         val fixed = fixUrl(url)
         return if (fixed.contains("?s=")) {
@@ -39,6 +52,30 @@ class Happy2hub : MainAPI() {
         } else {
             fixed
         }
+    }
+
+    /**
+     * Filters a line of <a> tags to pick ONLY the highest quality link available (1080p > 720p > 480p).
+     * If no quality labels exist (e.g. "LuluStream", "DoodStream"), returns all tags.
+     */
+    private fun selectBestQualityLinks(aElements: List<Element>): List<Element> {
+        if (aElements.isEmpty()) return emptyList()
+
+        val hasQualityLabel = aElements.any {
+            val text = it.text().trim().lowercase()
+            text.contains("1080p") || text.contains("720p") || text.contains("480p")
+        }
+
+        if (!hasQualityLabel) {
+            return aElements
+        }
+
+        val link1080p = aElements.firstOrNull { it.text().contains("1080p", ignoreCase = true) }
+        val link720p  = aElements.firstOrNull { it.text().contains("720p", ignoreCase = true) }
+        val link480p  = aElements.firstOrNull { it.text().contains("480p", ignoreCase = true) }
+
+        val bestLink = link1080p ?: link720p ?: link480p
+        return if (bestLink != null) listOf(bestLink) else aElements
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
@@ -93,71 +130,78 @@ class Happy2hub : MainAPI() {
         val description = document.selectFirst("meta[property=og:description]")?.attr("content")?.trim()
         val episodes = mutableListOf<Episode>()
 
-        // Targets paste.happy2hub.eu or falls back to standard content link
         val targetHref = document.selectFirst("a[href*='paste.happy2hub.eu']")?.attr("href")
             ?: document.selectFirst("div.entry-content.clearfix p a")?.attr("href")
-        
+
         if (!targetHref.isNullOrEmpty()) {
             val fullTargetUrl = fixUrl(targetHref)
             val pTag = app.get(fullTargetUrl, headers = requestHeaders, timeout = 30L).document
 
-            // Select headers containing "Episode" regardless of tag (h4, h5, p, etc.)
             val episodeHeaders = pTag.select("div.entry-content.clearfix h4:contains(Episode), div.entry-content.clearfix h5:contains(Episode), div.entry-content.clearfix p:contains(Episode)")
 
             episodeHeaders.forEach { episodeHeader ->
                 val epText = episodeHeader.text()
-                
-                // Extracts digits following "Episode" e.g. "Download or Watch Online Episode 1" -> "1"
+                // Extracts episode number from "Download Episode 1" or "Download or Watch Online Episode 1"
                 val epno = Regex("""Episode\s*(\d+)""", RegexOption.IGNORE_CASE).find(epText)?.groupValues?.get(1)
                     ?: epText.substringAfter("Episode ").trim().takeWhile { it.isDigit() }.ifEmpty { "1" }
 
-                val episodeLinks = mutableListOf<String>()
+                val rawLinks = mutableListOf<String>()
 
-                // 1. Collect links inside the header tag itself (if any)
-                episodeHeader.select("a").forEach { linkElement ->
-                    val link = fixUrlNull(linkElement.attr("href"))
-                    if (!link.isNullOrEmpty()) {
-                        episodeLinks.add(unwrapUrl(link))
-                    }
+                // Check links inside header
+                val headerATags = episodeHeader.select("a")
+                selectBestQualityLinks(headerATags).forEach { a ->
+                    val link = fixUrlNull(a.attr("href"))
+                    if (!link.isNullOrEmpty()) rawLinks.add(unwrapUrl(link))
                 }
 
-                // 2. Iterate through sibling elements until encountering the next Episode heading
+                // Check links inside sibling blocks until next episode
                 var nextElement = episodeHeader.nextElementSibling()
                 while (nextElement != null) {
-                    val isNextEpisodeHeader = (nextElement.tagName() in listOf("h4", "h5", "p")) && 
+                    val isNextHeader = (nextElement.tagName() in listOf("h4", "h5", "p")) &&
                             nextElement.text().contains("Episode", ignoreCase = true)
-                    
-                    if (isNextEpisodeHeader) break
 
-                    nextElement.select("a").forEach { linkElement ->
-                        val link = fixUrlNull(linkElement.attr("href"))
-                        if (!link.isNullOrEmpty()) {
-                            episodeLinks.add(unwrapUrl(link))
-                        }
+                    if (isNextHeader) break
+
+                    val siblingATags = nextElement.select("a")
+                    selectBestQualityLinks(siblingATags).forEach { a ->
+                        val link = fixUrlNull(a.attr("href"))
+                        if (!link.isNullOrEmpty()) rawLinks.add(unwrapUrl(link))
                     }
 
                     nextElement = nextElement.nextElementSibling()
                 }
 
-                if (episodeLinks.isNotEmpty()) {
-                    episodes.add(newEpisode(episodeLinks.distinct().joinToString(",")) {
+                // Filter out non-streaming file hosters (UpFiles, Sendcm, 4Sync, etc.) to keep playable links
+                var playableLinks = rawLinks.filter { isSupportedDomain(it) }.distinct()
+
+                // Fallback to raw links if domain filter returns empty
+                if (playableLinks.isEmpty()) {
+                    playableLinks = rawLinks.distinct()
+                }
+
+                if (playableLinks.isNotEmpty()) {
+                    episodes.add(newEpisode(playableLinks.joinToString(",")) {
                         this.name = "Episode $epno"
-                        // Episode posters omitted
                     })
                 }
             }
 
-            // Fallback for pages without explicit "Episode" headings
+            // Fallback for pages without explicit Episode headings
             if (episodes.isEmpty()) {
-                val fallbackLinks = mutableListOf<String>()
-                pTag.select("div.entry-content.clearfix a").forEach { linkElement ->
-                    val link = fixUrlNull(linkElement.attr("href"))
-                    if (!link.isNullOrEmpty()) {
-                        fallbackLinks.add(unwrapUrl(link))
+                val rawFallbackLinks = mutableListOf<String>()
+                pTag.select("div.entry-content.clearfix h5, div.entry-content.clearfix p").forEach { container ->
+                    val aTags = container.select("a")
+                    selectBestQualityLinks(aTags).forEach { a ->
+                        val link = fixUrlNull(a.attr("href"))
+                        if (!link.isNullOrEmpty()) rawFallbackLinks.add(unwrapUrl(link))
                     }
                 }
-                if (fallbackLinks.isNotEmpty()) {
-                    episodes.add(newEpisode(fallbackLinks.distinct().joinToString(",")) {
+
+                var playableFallback = rawFallbackLinks.filter { isSupportedDomain(it) }.distinct()
+                if (playableFallback.isEmpty()) playableFallback = rawFallbackLinks.distinct()
+
+                if (playableFallback.isNotEmpty()) {
+                    episodes.add(newEpisode(playableFallback.joinToString(",")) {
                         this.name = "Full Content"
                     })
                 }
