@@ -49,9 +49,25 @@ class Happy2hub : MainAPI() {
         return currentUrl
     }
 
+    private fun extractQualityTag(a: Element, unwrappedUrl: String): String {
+        val aText = a.text().trim()
+        val matchA = Regex("""(\d{3,4}p)""", RegexOption.IGNORE_CASE).find(aText)
+        if (matchA != null) return matchA.value.lowercase()
+
+        val parentText = a.parent()?.text() ?: ""
+        val matchParent = Regex("""(\d{3,4}p)""", RegexOption.IGNORE_CASE).find(parentText)
+        if (matchParent != null) return matchParent.value.lowercase()
+
+        val matchUrl = Regex("""(\d{3,4}p)""", RegexOption.IGNORE_CASE).find(unwrappedUrl)
+        if (matchUrl != null) return matchUrl.value.lowercase()
+
+        return ""
+    }
+
     private fun getQualityFromName(qualityStr: String): Int {
         val lower = qualityStr.lowercase()
         return when {
+            lower.contains("2160") || lower.contains("4k") -> Qualities.P2160.value
             lower.contains("1080") -> Qualities.P1080.value
             lower.contains("720")  -> Qualities.P720.value
             lower.contains("480")  -> Qualities.P480.value
@@ -62,6 +78,7 @@ class Happy2hub : MainAPI() {
 
     private fun getQualityString(qualityInt: Int): String {
         return when (qualityInt) {
+            Qualities.P2160.value -> "2160p"
             Qualities.P1080.value -> "1080p"
             Qualities.P720.value  -> "720p"
             Qualities.P480.value  -> "480p"
@@ -150,8 +167,7 @@ class Happy2hub : MainAPI() {
                     val rawHref = fixUrlNull(a.attr("href"))
                     if (!rawHref.isNullOrEmpty()) {
                         val unwrapped = unwrapUrl(rawHref)
-                        val text = a.text().trim()
-                        val qTag = Regex("""(\d{3,4}p)""", RegexOption.IGNORE_CASE).find(text)?.value ?: ""
+                        val qTag = extractQualityTag(a, unwrapped)
                         rawLinks.add("$unwrapped|$qTag")
                     }
                 }
@@ -167,8 +183,7 @@ class Happy2hub : MainAPI() {
                         val rawHref = fixUrlNull(a.attr("href"))
                         if (!rawHref.isNullOrEmpty()) {
                             val unwrapped = unwrapUrl(rawHref)
-                            val text = a.text().trim()
-                            val qTag = Regex("""(\d{3,4}p)""", RegexOption.IGNORE_CASE).find(text)?.value ?: ""
+                            val qTag = extractQualityTag(a, unwrapped)
                             rawLinks.add("$unwrapped|$qTag")
                         }
                     }
@@ -195,8 +210,7 @@ class Happy2hub : MainAPI() {
                         val rawHref = fixUrlNull(a.attr("href"))
                         if (!rawHref.isNullOrEmpty()) {
                             val unwrapped = unwrapUrl(rawHref)
-                            val text = a.text().trim()
-                            val qTag = Regex("""(\d{3,4}p)""", RegexOption.IGNORE_CASE).find(text)?.value ?: ""
+                            val qTag = extractQualityTag(a, unwrapped)
                             rawFallbackLinks.add("$unwrapped|$qTag")
                         }
                     }
@@ -225,10 +239,10 @@ class Happy2hub : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        loadExtractor(url, subtitleCallback) { link ->
+        val customCallback: (ExtractorLink) -> Unit = { link ->
             val qVal = getQualityFromName(qualityTag)
             val finalQuality = if (qVal != Qualities.Unknown.value) qVal else link.quality
-            val qStr = if (qualityTag.isNotEmpty()) qualityTag else getQualityString(link.quality)
+            val qStr = if (qualityTag.isNotEmpty()) qualityTag else getQualityString(finalQuality)
 
             val displayName = if (qStr.isNotEmpty() && !link.name.contains(qStr, ignoreCase = true)) {
                 "${link.name} $qStr"
@@ -248,6 +262,8 @@ class Happy2hub : MainAPI() {
             }
             callback.invoke(modifiedLink)
         }
+
+        loadExtractor(url, subtitleCallback, customCallback)
     }
 
     override suspend fun loadLinks(
