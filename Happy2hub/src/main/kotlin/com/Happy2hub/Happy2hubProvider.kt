@@ -5,12 +5,16 @@ import com.lagradost.cloudstream3.plugins.Plugin
 import android.content.Context
 import com.lagradost.cloudstream3.extractors.PixelDrain
 import com.lagradost.cloudstream3.extractors.Voe
+import com.lagradost.cloudstream3.extractors.DoodLaExtractor
+import com.lagradost.cloudstream3.extractors.Lulustream
 
 @CloudstreamPlugin
-class ixipornProvider: Plugin() {
+class Happy2hubProvider : Plugin() {
     override fun load(context: Context) {
         registerMainAPI(Happy2hub())
-        registerExtractorAPI(Voe())
         registerExtractorAPI(PixelDrain())
+        registerExtractorAPI(Voe())
+        registerExtractorAPI(DoodLaExtractor())
+        registerExtractorAPI(Lulustream())
     }
 }
