@@ -12,7 +12,6 @@ class Happy2hub : MainAPI() {
     override val supportedTypes       = setOf(TvType.NSFW)
     override val vpnStatus            = VPNStatus.MightBeNeeded
 
-    // Real mobile browser header to prevent instant Cloudflare WAF flags
     private val USER_AGENT = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
     private val requestHeaders = mapOf("User-Agent" to USER_AGENT)
 
@@ -28,7 +27,9 @@ class Happy2hub : MainAPI() {
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = "$mainUrl/${request.data}/page/$page"
+        val path = request.data.trimEnd('/')
+        val url = "$mainUrl/$path/page/$page"
+
         val document = app.get(url, headers = requestHeaders, timeout = 30L).document
         val home = document.select("div.content-wrap > div > div > div").mapNotNull { it.toSearchResult() }
 
@@ -36,7 +37,7 @@ class Happy2hub : MainAPI() {
             list = HomePageList(
                 name               = request.name,
                 list               = home,
-                isHorizontalImages = false
+                isHorizontalImages = true
             ),
             hasNext = home.isNotEmpty()
         )
@@ -77,7 +78,6 @@ class Happy2hub : MainAPI() {
         val description = document.selectFirst("meta[property=og:description]")?.attr("content")?.trim()
         val episodes = mutableListOf<Episode>()
 
-        // Safely extract target link and handle relative paths
         val targetHref = document.selectFirst("div.entry-content.clearfix p a")?.attr("href")
         
         if (!targetHref.isNullOrEmpty()) {
