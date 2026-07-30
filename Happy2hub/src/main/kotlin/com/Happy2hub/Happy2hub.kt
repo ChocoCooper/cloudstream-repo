@@ -2,9 +2,6 @@ package com.Happy2hub
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import org.jsoup.nodes.Element
 import java.net.URLDecoder
 
@@ -228,7 +225,7 @@ class Happy2hub : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        val customCallback: (ExtractorLink) -> Unit = { link ->
+        loadExtractor(url, subtitleCallback) { link ->
             val qVal = getQualityFromName(qualityTag)
             val finalQuality = if (qVal != Qualities.Unknown.value) qVal else link.quality
             val qStr = if (qualityTag.isNotEmpty()) qualityTag else getQualityString(link.quality)
@@ -251,8 +248,6 @@ class Happy2hub : MainAPI() {
             }
             callback.invoke(modifiedLink)
         }
-
-        loadExtractor(url, subtitleCallback, customCallback)
     }
 
     override suspend fun loadLinks(
@@ -300,12 +295,8 @@ class Happy2hub : MainAPI() {
                             .find(rawLink)?.groupValues?.get(1)
 
                         if (fileId != null) {
-                            coroutineScope {
-                                listOf("lulustream.com", "luluvdo.com").map { domain ->
-                                    async {
-                                        loadExtractorWithCustomName("https://$domain/e/$fileId", qualityTag, subtitleCallback, callback)
-                                    }
-                                }.awaitAll()
+                            for (domain in listOf("lulustream.com", "luluvdo.com")) {
+                                loadExtractorWithCustomName("https://$domain/e/$fileId", qualityTag, subtitleCallback, callback)
                             }
                         } else {
                             loadExtractorWithCustomName(rawLink, qualityTag, subtitleCallback, callback)
@@ -319,12 +310,8 @@ class Happy2hub : MainAPI() {
                             .find(rawLink)?.groupValues?.get(1)
 
                         if (fileId != null) {
-                            coroutineScope {
-                                listOf("dood.la", "doodstream.com").map { domain ->
-                                    async {
-                                        loadExtractorWithCustomName("https://$domain/e/$fileId", qualityTag, subtitleCallback, callback)
-                                    }
-                                }.awaitAll()
+                            for (domain in listOf("dood.la", "doodstream.com")) {
+                                loadExtractorWithCustomName("https://$domain/e/$fileId", qualityTag, subtitleCallback, callback)
                             }
                         } else {
                             loadExtractorWithCustomName(rawLink, qualityTag, subtitleCallback, callback)
