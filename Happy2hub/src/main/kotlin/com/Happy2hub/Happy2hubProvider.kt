@@ -12,6 +12,8 @@ import com.lagradost.cloudstream3.extractors.LuluStream
 class Happy2hubProvider : Plugin() {
     override fun load(context: Context) {
         registerMainAPI(Happy2hub())
+        
+        // Register required extractors for the plugin
         registerExtractorAPI(Voe())
         registerExtractorAPI(PixelDrain())
         registerExtractorAPI(DoodLaExtractor())
