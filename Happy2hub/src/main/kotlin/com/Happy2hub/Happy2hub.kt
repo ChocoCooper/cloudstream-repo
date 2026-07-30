@@ -206,29 +206,57 @@ class Happy2hub : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val linksList = data.split(",").map { it.trim() }
-        linksList.forEach { link ->
-            if (link.isNotEmpty()) {
-                if (link.contains("pixeldrain", ignoreCase = true)) {
-                    val fileId = Regex("""pixeldrain\.(?:com|dev)/(?:u|api/file)/([a-zA-Z0-9]+)""")
-                        .find(link)?.groupValues?.get(1)
+        linksList.forEach { rawLink ->
+            if (rawLink.isNotEmpty()) {
+                when {
+                    // PixelDrain Handling
+                    rawLink.contains("pixeldrain", ignoreCase = true) -> {
+                        val fileId = Regex("""pixeldrain\.(?:com|dev)/(?:u|api/file)/([a-zA-Z0-9]+)""")
+                            .find(rawLink)?.groupValues?.get(1)
 
-                    if (fileId != null) {
-                        callback.invoke(
-                            newExtractorLink(
-                                source = name,
-                                name = "PixelDrain",
-                                url = "https://pixeldrain.dev/api/file/$fileId",
-                                type = ExtractorLinkType.VIDEO
-                            ) {
-                                this.referer = "https://pixeldrain.dev/"
-                                this.quality = Qualities.Unknown.value
-                            }
-                        )
-                    } else {
-                        loadExtractor(link, subtitleCallback, callback)
+                        if (fileId != null) {
+                            callback.invoke(
+                                newExtractorLink(
+                                    source = name,
+                                    name = "PixelDrain",
+                                    url = "https://pixeldrain.dev/api/file/$fileId",
+                                    type = ExtractorLinkType.VIDEO
+                                ) {
+                                    this.referer = "https://pixeldrain.dev/"
+                                    this.quality = Qualities.Unknown.value
+                                }
+                            )
+                        } else {
+                            loadExtractor(rawLink, subtitleCallback, callback)
+                        }
                     }
-                } else {
-                    loadExtractor(link, subtitleCallback, callback)
+
+                    // Playmogo / DoodStream Handling
+                    rawLink.contains("playmogo", ignoreCase = true) ||
+                    rawLink.contains("dood", ignoreCase = true) ||
+                    rawLink.contains("myvidplay", ignoreCase = true) -> {
+                        val fixedDoodUrl = rawLink
+                            .replace("playmogo.com", "dood.la")
+                            .replace("myvidplay.com", "dood.la")
+                            .replace("doodstream.com", "dood.la")
+                            .replace("/d/", "/e/")
+
+                        loadExtractor(fixedDoodUrl, subtitleCallback, callback)
+                    }
+
+                    // Luluvid / LuluStream Handling
+                    rawLink.contains("luluvid", ignoreCase = true) ||
+                    rawLink.contains("lulustream", ignoreCase = true) -> {
+                        val fixedLuluUrl = rawLink
+                            .replace("luluvid.com", "lulustream.com")
+                            .replace("/d/", "/e/")
+
+                        loadExtractor(fixedLuluUrl, subtitleCallback, callback)
+                    }
+
+                    else -> {
+                        loadExtractor(rawLink, subtitleCallback, callback)
+                    }
                 }
             }
         }
