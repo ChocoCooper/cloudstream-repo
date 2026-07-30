@@ -214,14 +214,15 @@ class Happy2hub : MainAPI() {
 
                     if (fileId != null) {
                         callback.invoke(
-                            ExtractorLink(
+                            newExtractorLink(
                                 source = name,
                                 name = "PixelDrain",
                                 url = "https://pixeldrain.dev/api/file/$fileId",
-                                referer = "https://pixeldrain.dev/",
-                                quality = Qualities.Unknown.value,
-                                isM3u8 = false
-                            )
+                                type = ExtractorLinkType.VIDEO
+                            ) {
+                                this.referer = "https://pixeldrain.dev/"
+                                this.quality = Qualities.Unknown.value
+                            }
                         )
                     } else {
                         loadExtractor(link, subtitleCallback, callback)
