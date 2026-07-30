@@ -21,6 +21,7 @@ class Happy2hub : MainAPI() {
         "atrangii-b/" to "Atrangii",
         "altt/" to "Altt",
         "primeplay-f/" to "PrimePlay",
+        "hotshots/" to "Hotshots",
         "voovi-b/" to "Voovi",
         "primeshots/" to "PrimeShots",
         "hitprime/" to "HitPrime",
@@ -50,15 +51,19 @@ class Happy2hub : MainAPI() {
 
     private fun extractQualityTag(a: Element, unwrappedUrl: String): String {
         val aText = a.text().trim()
-        val matchA = Regex("""(\d{3,4}p)""", RegexOption.IGNORE_CASE).find(aText)
+        val matchA = Regex("""(\d{3,4}p|4k)""", RegexOption.IGNORE_CASE).find(aText)
         if (matchA != null) return matchA.value.lowercase()
 
-        val parentText = a.parent()?.text() ?: ""
-        val matchParent = Regex("""(\d{3,4}p)""", RegexOption.IGNORE_CASE).find(parentText)
-        if (matchParent != null) return matchParent.value.lowercase()
+        val titleAttr = a.attr("title")
+        val matchTitle = Regex("""(\d{3,4}p|4k)""", RegexOption.IGNORE_CASE).find(titleAttr)
+        if (matchTitle != null) return matchTitle.value.lowercase()
 
-        val matchUrl = Regex("""(\d{3,4}p)""", RegexOption.IGNORE_CASE).find(unwrappedUrl)
+        val matchUrl = Regex("""(\d{3,4}p|4k)""", RegexOption.IGNORE_CASE).find(unwrappedUrl)
         if (matchUrl != null) return matchUrl.value.lowercase()
+
+        val previousText = a.previousSibling()?.outerHtml() ?: ""
+        val matchPrev = Regex("""(\d{3,4}p|4k)""", RegexOption.IGNORE_CASE).find(previousText)
+        if (matchPrev != null) return matchPrev.value.lowercase()
 
         return ""
     }
@@ -249,16 +254,17 @@ class Happy2hub : MainAPI() {
                 link.name
             }
 
-            val modifiedLink = newExtractorLink(
+            @Suppress("DEPRECATION")
+            val modifiedLink = ExtractorLink(
                 source = link.source,
                 name = displayName,
                 url = link.url,
-                type = if (link.isM3u8) ExtractorLinkType.M3U8 else link.type
-            ) {
-                this.referer = link.referer
-                this.quality = finalQuality
-                this.headers = link.headers
-            }
+                referer = link.referer,
+                quality = finalQuality,
+                type = if (link.isM3u8) ExtractorLinkType.M3U8 else link.type,
+                headers = link.headers,
+                extractorData = link.extractorData
+            )
             callback.invoke(modifiedLink)
         }
 
