@@ -228,34 +228,31 @@ class Happy2hub : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        loadExtractor(
-            url = url,
-            referer = null,
-            subtitleCallback = subtitleCallback,
-            callback = { link ->
-                val qVal = getQualityFromName(qualityTag)
-                val finalQuality = if (qVal != Qualities.Unknown.value) qVal else link.quality
-                val qStr = if (qualityTag.isNotEmpty()) qualityTag else getQualityString(link.quality)
+        loadExtractor(url, subtitleCallback) { link ->
+            val qVal = getQualityFromName(qualityTag)
+            val finalQuality = if (qVal != Qualities.Unknown.value) qVal else link.quality
+            val qStr = if (qualityTag.isNotEmpty()) qualityTag else getQualityString(link.quality)
 
-                val displayName = if (qStr.isNotEmpty() && !link.name.contains(qStr, ignoreCase = true)) {
-                    "${link.name} $qStr"
-                } else {
-                    link.name
-                }
-
-                val modifiedLink = newExtractorLink(
-                    source = link.source,
-                    name = displayName,
-                    url = link.url,
-                    type = if (link.isM3u8) ExtractorLinkType.M3U8 else link.type
-                ) {
-                    this.referer = link.referer
-                    this.quality = finalQuality
-                    this.headers = link.headers
-                }
-                callback.invoke(modifiedLink)
+            val displayName = if (qStr.isNotEmpty() && !link.name.contains(qStr, ignoreCase = true)) {
+                "${link.name} $qStr"
+            } else {
+                link.name
             }
-        )
+
+            val linkType = if (link.isM3u8) ExtractorLinkType.M3U8 else link.type
+
+            val modifiedLink = newExtractorLink(
+                source = link.source,
+                name = displayName,
+                url = link.url,
+                type = linkType
+            ) {
+                this.referer = link.referer
+                this.quality = finalQuality
+                this.headers = link.headers
+            }
+            callback.invoke(modifiedLink)
+        }
     }
 
     override suspend fun loadLinks(
@@ -265,7 +262,7 @@ class Happy2hub : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val linksList = data.split(",").map { it.trim() }
-        linksList.forEach { rawItem ->
+        for (rawItem in linksList) {
             if (rawItem.isNotEmpty()) {
                 val parts = rawItem.split("|")
                 val rawLink = parts[0].trim()
