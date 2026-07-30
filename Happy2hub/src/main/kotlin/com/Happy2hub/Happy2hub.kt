@@ -37,7 +37,7 @@ class Happy2hub : MainAPI() {
             list = HomePageList(
                 name               = request.name,
                 list               = home,
-                isHorizontalImages = true
+                isHorizontalImages = false
             ),
             hasNext = home.isNotEmpty()
         )
@@ -78,7 +78,8 @@ class Happy2hub : MainAPI() {
         val description = document.selectFirst("meta[property=og:description]")?.attr("content")?.trim()
         val episodes = mutableListOf<Episode>()
 
-        val targetHref = document.selectFirst("div.entry-content.clearfix p a")?.attr("href")
+        // Specifically search for the paste.happy2hub.eu link
+        val targetHref = document.selectFirst("a[href*='paste.happy2hub.eu']")?.attr("href")
         
         if (!targetHref.isNullOrEmpty()) {
             val fullTargetUrl = fixUrl(targetHref)
@@ -102,7 +103,7 @@ class Happy2hub : MainAPI() {
                 if (episodeLinks.isNotEmpty()) {
                     episodes.add(newEpisode(episodeLinks.joinToString(",")) {
                         this.name = "Episode $epno"
-                        this.posterUrl = poster
+                        // Episode poster explicitly omitted here
                     })
                 }
             }
