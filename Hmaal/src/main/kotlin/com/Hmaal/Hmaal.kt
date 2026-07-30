@@ -80,7 +80,7 @@ class Hmaal : MainAPI() {
         val seenTitles = mutableSetOf<String>()
 
         coroutineScope {
-            searchDomains.map { domain ->
+            val tasks = searchDomains.map { domain ->
                 async {
                     try {
                         val searchUrl = "$domain/?s=$query"
@@ -90,8 +90,10 @@ class Hmaal : MainAPI() {
                         emptyList()
                     }
                 }
-            }.awaitAll().forEach { list ->
-                list.forEach { item ->
+            }
+            
+            tasks.awaitAll().forEach { list ->
+                for (item in list) {
                     val normTitle = item.name.lowercase().trim()
                     if (seenTitles.add(normTitle)) {
                         allResults.add(item)
@@ -126,8 +128,8 @@ class Hmaal : MainAPI() {
                 val seriesDoc = app.get(seriesUrl, headers = requestHeaders, timeout = 30L).document
                 val episodeElements = seriesDoc.select("#primary > div > a.video, #primary > div > a")
 
-                episodeElements.forEach { epElem ->
-                    val epHref = fixUrlNull(epElem.attr("href")) ?: return@forEach
+                for (epElem in episodeElements) {
+                    val epHref = fixUrlNull(epElem.attr("href")) ?: continue
                     val epTitleAttr = epElem.attr("title").ifEmpty { epElem.text() }.trim()
 
                     val epNum = Regex("""Episode\s*(\d+)""", RegexOption.IGNORE_CASE).find(epTitleAttr)?.groupValues?.get(1)
@@ -154,7 +156,7 @@ class Hmaal : MainAPI() {
                     })
                 }
             } catch (e: Exception) {
-                // Ignore series fetch failure and fall back
+                // Ignore series page errors and fall back to single item
             }
         }
 
@@ -193,7 +195,7 @@ class Hmaal : MainAPI() {
         )
 
         coroutineScope {
-            targetDomains.map { domain ->
+            val tasks = targetDomains.map { domain ->
                 async {
                     val fullUrl = "$domain$cleanPath"
                     try {
@@ -203,7 +205,7 @@ class Hmaal : MainAPI() {
                             val domainHost = domain.substringAfter("://")
 
                             val videoSources = document.select("#my-video source[src], video source[src], source[src]")
-                            videoSources.forEach { sourceElem ->
+                            for (sourceElem in videoSources) {
                                 val videoUrl = fixUrlNull(sourceElem.attr("src"))
                                 if (!videoUrl.isNullOrEmpty()) {
                                     val qualityLabel = when {
@@ -232,7 +234,8 @@ class Hmaal : MainAPI() {
                                 }
                             }
 
-                            document.select("iframe[src]").forEach { iframe ->
+                            val iframes = document.select("iframe[src]")
+                            for (iframe in iframes) {
                                 val iframeUrl = fixUrlNull(iframe.attr("src"))
                                 if (!iframeUrl.isNullOrEmpty()) {
                                     loadExtractor(iframeUrl, subtitleCallback, callback)
@@ -240,10 +243,11 @@ class Hmaal : MainAPI() {
                             }
                         }
                     } catch (e: Exception) {
-                        // Silently handle 404 / connection errors per mirror domain
+                        // Silently handle 404 or connection failure for any individual mirror domain
                     }
                 }
-            }.awaitAll()
+            }
+            tasks.awaitAll()
         }
 
         return true
