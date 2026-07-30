@@ -228,7 +228,7 @@ class Happy2hub : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        loadExtractor(url, subtitleCallback) { link ->
+        val customCallback: (ExtractorLink) -> Unit = { link ->
             val qVal = getQualityFromName(qualityTag)
             val finalQuality = if (qVal != Qualities.Unknown.value) qVal else link.quality
             val qStr = if (qualityTag.isNotEmpty()) qualityTag else getQualityString(link.quality)
@@ -239,13 +239,11 @@ class Happy2hub : MainAPI() {
                 link.name
             }
 
-            val linkType = if (link.isM3u8) ExtractorLinkType.M3U8 else link.type
-
             val modifiedLink = newExtractorLink(
                 source = link.source,
                 name = displayName,
                 url = link.url,
-                type = linkType
+                type = if (link.isM3u8) ExtractorLinkType.M3U8 else link.type
             ) {
                 this.referer = link.referer
                 this.quality = finalQuality
@@ -253,6 +251,8 @@ class Happy2hub : MainAPI() {
             }
             callback.invoke(modifiedLink)
         }
+
+        loadExtractor(url, subtitleCallback, customCallback)
     }
 
     override suspend fun loadLinks(
