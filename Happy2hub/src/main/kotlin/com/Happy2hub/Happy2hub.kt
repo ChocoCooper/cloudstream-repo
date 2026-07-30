@@ -2,7 +2,9 @@ package com.Happy2hub
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.ParList.parMap
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import org.jsoup.nodes.Element
 import java.net.URLDecoder
 
@@ -58,9 +60,6 @@ class Happy2hub : MainAPI() {
         return supportedDomains.any { domain -> url.contains(domain, ignoreCase = true) }
     }
 
-    /**
-     * Recursively unwraps URL shorteners and redirects (e.g. ouo.io)
-     */
     private fun unwrapUrl(url: String): String {
         var currentUrl = fixUrl(url)
         while (currentUrl.contains("?s=")) {
@@ -74,9 +73,6 @@ class Happy2hub : MainAPI() {
         return currentUrl
     }
 
-    /**
-     * Selects only the best quality link available per section block
-     */
     private fun selectBestQualityLinks(aElements: List<Element>): List<Element> {
         if (aElements.isEmpty()) return emptyList()
 
@@ -205,7 +201,6 @@ class Happy2hub : MainAPI() {
                 }
             }
 
-            // Fallback for pages structured without explicit "Episode" headings
             if (episodes.isEmpty()) {
                 val rawFallbackLinks = mutableListOf<String>()
                 pTag.select("div.entry-content.clearfix h5, div.entry-content.clearfix p").forEach { container ->
@@ -267,7 +262,7 @@ class Happy2hub : MainAPI() {
                         }
                     }
 
-                    // Concurrent LuluStream Mirror Resolution
+                    // Concurrent LuluStream Mirror Resolution using Kotlin Coroutines
                     rawLink.contains("luluvid", ignoreCase = true) ||
                     rawLink.contains("lulustream", ignoreCase = true) ||
                     rawLink.contains("luluvdo", ignoreCase = true) ||
@@ -276,15 +271,19 @@ class Happy2hub : MainAPI() {
                             .find(rawLink)?.groupValues?.get(1)
 
                         if (fileId != null) {
-                            luluDomains.parMap { domain ->
-                                loadExtractor("https://$domain/e/$fileId", subtitleCallback, callback)
+                            coroutineScope {
+                                luluDomains.map { domain ->
+                                    async {
+                                        loadExtractor("https://$domain/e/$fileId", subtitleCallback, callback)
+                                    }
+                                }.awaitAll()
                             }
                         } else {
                             loadExtractor(rawLink, subtitleCallback, callback)
                         }
                     }
 
-                    // Concurrent Playmogo / DoodStream Mirror Resolution
+                    // Concurrent Playmogo / DoodStream Mirror Resolution using Kotlin Coroutines
                     rawLink.contains("playmogo", ignoreCase = true) ||
                     rawLink.contains("dood", ignoreCase = true) ||
                     rawLink.contains("myvidplay", ignoreCase = true) -> {
@@ -292,8 +291,12 @@ class Happy2hub : MainAPI() {
                             .find(rawLink)?.groupValues?.get(1)
 
                         if (fileId != null) {
-                            doodDomains.parMap { domain ->
-                                loadExtractor("https://$domain/e/$fileId", subtitleCallback, callback)
+                            coroutineScope {
+                                doodDomains.map { domain ->
+                                    async {
+                                        loadExtractor("https://$domain/e/$fileId", subtitleCallback, callback)
+                                    }
+                                }.awaitAll()
                             }
                         } else {
                             loadExtractor(rawLink, subtitleCallback, callback)
