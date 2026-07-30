@@ -27,7 +27,6 @@ class Happy2hub : MainAPI() {
         "hitprime/" to "HitPrime",
     )
 
-    // Playable server domain keywords supported by Cloudstream extractors
     private val supportedDomains = listOf(
         "pixeldrain", "luluvid", "lulustream", "playmogo",
         "dood", "myvidplay", "voe", "streamtape", "streamwish"
@@ -37,9 +36,6 @@ class Happy2hub : MainAPI() {
         return supportedDomains.any { domain -> url.contains(domain, ignoreCase = true) }
     }
 
-    /**
-     * Unwraps redirection wrappers (ouo.io) to extract the real destination URL
-     */
     private fun unwrapUrl(url: String): String {
         val fixed = fixUrl(url)
         return if (fixed.contains("?s=")) {
@@ -54,10 +50,6 @@ class Happy2hub : MainAPI() {
         }
     }
 
-    /**
-     * Filters a line of <a> tags to pick ONLY the highest quality link available (1080p > 720p > 480p).
-     * If no quality labels exist (e.g. "LuluStream", "DoodStream"), returns all tags.
-     */
     private fun selectBestQualityLinks(aElements: List<Element>): List<Element> {
         if (aElements.isEmpty()) return emptyList()
 
@@ -141,20 +133,17 @@ class Happy2hub : MainAPI() {
 
             episodeHeaders.forEach { episodeHeader ->
                 val epText = episodeHeader.text()
-                // Extracts episode number from "Download Episode 1" or "Download or Watch Online Episode 1"
                 val epno = Regex("""Episode\s*(\d+)""", RegexOption.IGNORE_CASE).find(epText)?.groupValues?.get(1)
                     ?: epText.substringAfter("Episode ").trim().takeWhile { it.isDigit() }.ifEmpty { "1" }
 
                 val rawLinks = mutableListOf<String>()
 
-                // Check links inside header
                 val headerATags = episodeHeader.select("a")
                 selectBestQualityLinks(headerATags).forEach { a ->
                     val link = fixUrlNull(a.attr("href"))
                     if (!link.isNullOrEmpty()) rawLinks.add(unwrapUrl(link))
                 }
 
-                // Check links inside sibling blocks until next episode
                 var nextElement = episodeHeader.nextElementSibling()
                 while (nextElement != null) {
                     val isNextHeader = (nextElement.tagName() in listOf("h4", "h5", "p")) &&
@@ -171,10 +160,7 @@ class Happy2hub : MainAPI() {
                     nextElement = nextElement.nextElementSibling()
                 }
 
-                // Filter out non-streaming file hosters (UpFiles, Sendcm, 4Sync, etc.) to keep playable links
                 var playableLinks = rawLinks.filter { isSupportedDomain(it) }.distinct()
-
-                // Fallback to raw links if domain filter returns empty
                 if (playableLinks.isEmpty()) {
                     playableLinks = rawLinks.distinct()
                 }
@@ -186,7 +172,6 @@ class Happy2hub : MainAPI() {
                 }
             }
 
-            // Fallback for pages without explicit Episode headings
             if (episodes.isEmpty()) {
                 val rawFallbackLinks = mutableListOf<String>()
                 pTag.select("div.entry-content.clearfix h5, div.entry-content.clearfix p").forEach { container ->
@@ -223,7 +208,27 @@ class Happy2hub : MainAPI() {
         val linksList = data.split(",").map { it.trim() }
         linksList.forEach { link ->
             if (link.isNotEmpty()) {
-                loadExtractor(link, subtitleCallback, callback)
+                if (link.contains("pixeldrain", ignoreCase = true)) {
+                    val fileId = Regex("""pixeldrain\.(?:com|dev)/(?:u|api/file)/([a-zA-Z0-9]+)""")
+                        .find(link)?.groupValues?.get(1)
+
+                    if (fileId != null) {
+                        callback.invoke(
+                            ExtractorLink(
+                                source = name,
+                                name = "PixelDrain",
+                                url = "https://pixeldrain.dev/api/file/$fileId",
+                                referer = "https://pixeldrain.dev/",
+                                quality = Qualities.Unknown.value,
+                                isM3u8 = false
+                            )
+                        )
+                    } else {
+                        loadExtractor(link, subtitleCallback, callback)
+                    }
+                } else {
+                    loadExtractor(link, subtitleCallback, callback)
+                }
             }
         }
         return true
