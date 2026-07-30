@@ -230,6 +230,7 @@ class Happy2hub : MainAPI() {
     ) {
         loadExtractor(
             url = url,
+            referer = null,
             subtitleCallback = subtitleCallback,
             callback = { link ->
                 val qVal = getQualityFromName(qualityTag)
@@ -246,12 +247,11 @@ class Happy2hub : MainAPI() {
                     source = link.source,
                     name = displayName,
                     url = link.url,
-                    type = link.type
+                    type = if (link.isM3u8) ExtractorLinkType.M3U8 else link.type
                 ) {
                     this.referer = link.referer
                     this.quality = finalQuality
                     this.headers = link.headers
-                    this.isM3u8 = link.isM3u8
                 }
                 callback.invoke(modifiedLink)
             }
