@@ -7,7 +7,7 @@ import com.lagradost.cloudstream3.extractors.PixelDrain
 import com.lagradost.cloudstream3.extractors.Voe
 
 @CloudstreamPlugin
-class ixipornProvider: Plugin() {
+class Happy2hubProvider: Plugin() {
     override fun load(context: Context) {
         registerMainAPI(Happy2hub())
         registerExtractorAPI(Voe())
