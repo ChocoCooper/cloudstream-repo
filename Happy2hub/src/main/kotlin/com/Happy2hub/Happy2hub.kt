@@ -21,7 +21,6 @@ class Happy2hub : MainAPI() {
         "atrangii-b/" to "Atrangii",
         "altt/" to "Altt",
         "primeplay-f/" to "PrimePlay",
-        "hotshots/" to "Hotshots",
         "voovi-b/" to "Voovi",
         "primeshots/" to "PrimeShots",
         "hitprime/" to "HitPrime",
@@ -263,7 +262,11 @@ class Happy2hub : MainAPI() {
             callback.invoke(modifiedLink)
         }
 
-        loadExtractor(url, subtitleCallback, customCallback)
+        loadExtractor(
+            url = url,
+            subtitleCallback = subtitleCallback,
+            callback = customCallback
+        )
     }
 
     override suspend fun loadLinks(
@@ -290,7 +293,7 @@ class Happy2hub : MainAPI() {
 
                             callback.invoke(
                                 newExtractorLink(
-                                    source = name,
+                                    source = serverName,
                                     name = displayName,
                                     url = "https://pixeldrain.dev/api/file/$fileId",
                                     type = ExtractorLinkType.VIDEO
