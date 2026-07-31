@@ -53,11 +53,24 @@ class HmaalProvider : MainAPI() {
         "Accept-Language" to "en-US,en;q=0.9"
     )
 
+    /** Encodes spaces and unescaped characters in video paths to prevent 404/URISyntax errors on CDNs */
+    private fun sanitizeUrl(url: String): String {
+        if (url.isBlank()) return url
+        var cleaned = url.trim()
+        // Replace unencoded spaces in path while preserving valid URL structure
+        cleaned = cleaned.replace(" ", "%20")
+        return cleaned
+    }
+
     /** Domain-aware URL helpers that allow custom domain resolution */
     private fun fixUrl(url: String, domain: String): String {
-        if (url.startsWith("http://") || url.startsWith("https://")) return url
-        if (url.startsWith("//")) return "https:$url"
-        return "${domain.trimEnd('/')}/${url.trimStart('/')}"
+        val trimmed = url.trim()
+        val fullUrl = when {
+            trimmed.startsWith("http://") || trimmed.startsWith("https://") -> trimmed
+            trimmed.startsWith("//") -> "https:$trimmed"
+            else -> "${domain.trimEnd('/')}/${trimmed.trimStart('/')}"
+        }
+        return sanitizeUrl(fullUrl)
     }
 
     private fun fixUrlNull(url: String?, domain: String): String? {
@@ -66,18 +79,20 @@ class HmaalProvider : MainAPI() {
     }
 
     /**
-     * Thoroughly scrubs prefixes (e.g. "Watch "), keywords (e.g. "Web Series"),
-     * and site suffixes (e.g. "» HotOTT", "| BotMaal") to return clean titles.
+     * Cleans prefixes ("Watch "), tags ("Web Series"), and site branding ("» HotOTT", "- Botmaal")
      */
     private fun cleanTitle(title: String?): String {
         if (title.isNullOrBlank()) return "Unknown"
         var clean = title.trim()
 
+        // Unescape any HTML entities (&amp;, &quot;, etc.)
+        clean = org.jsoup.parser.Parser.unescapeEntities(clean, false)
+
         // 1. Remove leading "Watch "
         clean = clean.replace(Regex("""(?i)^Watch\s+"""), "")
 
-        // 2. Remove common extra tags like "Web Series", "Full Movie", etc.
-        clean = clean.replace(Regex("""(?i)\s*(?:web\s*series|online|full\s*movie|hd|all\s*episodes?)\b"""), "")
+        // 2. Remove common tags
+        clean = clean.replace(Regex("""(?i)\s*\b(web\s*series|online|full\s*movie|hd|all\s*episodes?|hindi)\b"""), "")
 
         // 3. Remove trailing site branding delimiter and names (e.g. » HotOTT, - Botmaal, | OTTDude)
         clean = clean.replace(
@@ -85,16 +100,18 @@ class HmaalProvider : MainAPI() {
             ""
         )
 
-        // 4. Fallback: drop any remaining trailing "» <anything>"
+        // 4. Fallback: drop any remaining trailing "» <anything>" or "> <anything>"
         clean = clean.replace(Regex("""(?i)\s*»\s*.*$"""), "")
+        clean = clean.replace(Regex("""(?i)\s*>\s*.*$"""), "")
 
         // 5. Trim trailing symbols/punctuation
-        clean = clean.trim(' ', '-', '|', ':', '»', '>', '–', '—').trim()
+        clean = clean.trim(' ', '-', '|', ':', '»', '>', '–', '—', '.').trim()
+        clean = clean.replace(Regex("""\s+"""), " ")
 
         return if (clean.isNotBlank()) clean else title.trim()
     }
 
-    /** Converts page URL to mirror site name (e.g. "ottdude", "serieswala", "botmaal") */
+    /** Converts page URL to mirror site name (e.g. "hotott", "ottdude", "botmaal") */
     private fun getSiteName(pageUrl: String): String {
         return try {
             val host = URI(pageUrl).host?.removePrefix("www.") ?: ""
