@@ -65,7 +65,7 @@ class HmaalProvider : MainAPI() {
         return fixUrl(url, domain)
     }
 
-    /** Converts full URL to normalized path slug (e.g. "/ott/ullu/movie/") for mirror-agnostic cache keys. */
+    /** Converts full URL to normalized path slug for mirror-agnostic cache keys. */
     private fun getPath(url: String): String {
         return try {
             val path = URI(url).rawPath ?: ""
@@ -75,7 +75,7 @@ class HmaalProvider : MainAPI() {
         }
     }
 
-    /** scheme://host for a given absolute URL, used as the Referer for hotlink-protected images. */
+    /** scheme://host for a given absolute URL, used as Referer. */
     private fun originOf(url: String): String {
         return try {
             val u = URI(url)
@@ -85,7 +85,7 @@ class HmaalProvider : MainAPI() {
         }
     }
 
-    /** Headers that let Coil load images from CDNs that reject requests with no/foreign Referer. */
+    /** Headers that let Coil load images from CDNs with hotlink protection. */
     private fun refererHeaders(url: String?): Map<String, String> {
         val origin = if (!url.isNullOrBlank()) originOf(url) else mainUrl
         return mapOf(
@@ -95,7 +95,7 @@ class HmaalProvider : MainAPI() {
     }
 
     /**
-     * Looks for video links on both container variants:
+     * Looks for video elements across various layout containers:
      * - `#primary > div.videos > a` (hotott.net, botmaal.io)
      * - `#primary > div > a` (ottdude.com, serieswala.com, maaltv.io)
      */
@@ -105,25 +105,31 @@ class HmaalProvider : MainAPI() {
     }
 
     /**
-     * Looks for a playable video URL in several possible spots.
+     * Extracts playable video URLs and iframe embeds from document.
      */
     private fun Document.extractVideoSources(): List<String> {
         val urls = linkedSetOf<String>()
 
-        this.select("#my-video source, video#my-video source, video source").forEach { el ->
-            val src = el.attr("src").ifBlank { el.attr("data-src") }.trim()
-            if (src.isNotBlank()) urls.add(src)
+        // Direct video/source tags
+        this.select("#my-video source, video#my-video source, video source, #my-video, video#my-video, video").forEach { el ->
+            val src = el.attr("src").ifBlank { el.attr("data-src") }.ifBlank { el.attr("data-video-src") }.trim()
+            if (src.isNotBlank() && !src.startsWith("blob:")) {
+                urls.add(src)
+            }
         }
 
-        this.select("#my-video, video#my-video, video").forEach { el ->
-            val src = el.attr("src").ifBlank { el.attr("data-src") }.trim()
-            if (src.isNotBlank()) urls.add(src)
+        // Iframe player embeds
+        this.select("iframe").forEach { el ->
+            val src = el.attr("src").ifBlank { el.attr("data-src") }.ifBlank { el.attr("data-lazy-src") }.trim()
+            if (src.isNotBlank() && !src.startsWith("about:") && !src.startsWith("javascript:")) {
+                urls.add(src)
+            }
         }
 
         return urls.toList()
     }
 
-    /** Pulls the url out of `background-image: url('...')` or lazy data attributes. */
+    /** Pulls url out of background-image style or lazy attributes. */
     private fun Element.extractBackgroundImage(): String? {
         val style = this.attr("style").ifBlank { this.attr("data-style") }
         val match = Regex("""url\(\s*['"]?(.*?)['"]?\s*\)""", RegexOption.IGNORE_CASE).find(style)
@@ -137,7 +143,7 @@ class HmaalProvider : MainAPI() {
         }.trim().ifBlank { null }
     }
 
-    /** Extracts image poster from element via background-style or fallback img tags. */
+    /** Extracts image poster from element. */
     private fun Element.extractPoster(domain: String): String? {
         val bg = this.extractBackgroundImage()
         val src = if (bg.isNullOrBlank()) {
@@ -148,7 +154,7 @@ class HmaalProvider : MainAPI() {
         return src?.trim()?.ifBlank { null }?.let { fixUrlNull(it, domain) }
     }
 
-    /** Converts one `a.video` tile (homepage / search) into a SearchResponse. */
+    /** Converts video tile to SearchResponse. */
     private fun Element.toSearchResult(domain: String): SearchResponse? {
         val title = this.attr("title").ifBlank { this.text() }.trim()
         if (title.isBlank()) return null
@@ -198,7 +204,6 @@ class HmaalProvider : MainAPI() {
             }.awaitAll()
         }
 
-        // Dedupe by exact media name (case-insensitive, trimmed) — keeps first hit found.
         return results.distinctBy { it.name.trim().lowercase() }
     }
 
@@ -236,9 +241,8 @@ class HmaalProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         var found = false
+        val processedUrls = ConcurrentHashMap.newKeySet<String>()
 
-        // Extract path+query from whichever mirror the URL came from so we can
-        // rebuild it against every other mirror (they share the same slugs).
         val path = try {
             URI(data).let { (it.rawPath ?: "") + (it.rawQuery?.let { q -> "?$q" } ?: "") }
         } catch (e: Exception) {
@@ -255,35 +259,77 @@ class HmaalProvider : MainAPI() {
             candidateUrls.map { pageUrl ->
                 async {
                     try {
+                        val currentDomain = originOf(pageUrl)
                         val doc = app.get(pageUrl, headers = browserHeaders).document
-                        val videoUrls = doc.extractVideoSources()
-                        if (videoUrls.isEmpty()) return@async // e.g. "oops page not found" mirror
+                        val rawSources = doc.extractVideoSources()
+                        if (rawSources.isEmpty()) return@async
 
-                        val host = URI(pageUrl).host ?: pageUrl
+                        for (rawUrl in rawSources) {
+                            val fullUrl = fixUrl(rawUrl, currentDomain)
+                            if (!processedUrls.add(fullUrl)) continue
 
-                        videoUrls.forEach { rawUrl ->
-                            val videoUrl = fixUrl(rawUrl)
-                            callback(
-                                newExtractorLink(
-                                    source = this@HmaalProvider.name,
-                                    name = "${this@HmaalProvider.name} - $host",
-                                    url = videoUrl,
-                                    type = if (videoUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                ) {
-                                    this.referer = pageUrl
-                                    this.quality = Qualities.Unknown.value
-                                    this.headers = mapOf("User-Agent" to desktopUserAgent)
-                                }
-                            )
-                            found = true
+                            // 1. Try standard Cloudstream extractors for embedded links
+                            val extractorLoaded = loadExtractor(fullUrl, pageUrl, subtitleCallback, callback)
+                            if (extractorLoaded) {
+                                found = true
+                                continue
+                            }
+
+                            // 2. If it's an internal embed page or iframe, attempt to fetch inner video
+                            if (fullUrl.contains("/embed/") || fullUrl.contains("/player/") || rawUrl.contains("iframe")) {
+                                try {
+                                    val iframeDoc = app.get(fullUrl, headers = browserHeaders + mapOf("Referer" to pageUrl)).document
+                                    val innerSources = iframeDoc.extractVideoSources()
+                                    for (innerRaw in innerSources) {
+                                        val innerFull = fixUrl(innerRaw, originOf(fullUrl))
+                                        if (processedUrls.add(innerFull)) {
+                                            if (!loadExtractor(innerFull, fullUrl, subtitleCallback, callback)) {
+                                                emitVideoLink(innerFull, pageUrl, callback)
+                                                found = true
+                                            } else {
+                                                found = true
+                                            }
+                                        }
+                                    }
+                                } catch (_: Exception) {}
+                            } else {
+                                // 3. Direct video file (.mp4, .m3u8, etc.)
+                                emitVideoLink(fullUrl, pageUrl, callback)
+                                found = true
+                            }
                         }
                     } catch (e: Exception) {
-                        // dead mirror / not found for this specific media, skip and keep trying others
+                        // mirror unreachable / not found for this media, continue searching others
                     }
                 }
             }.awaitAll()
         }
 
         return found
+    }
+
+    private fun emitVideoLink(
+        videoUrl: String,
+        pageUrl: String,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val host = try { URI(videoUrl).host ?: originOf(pageUrl) } catch (e: Exception) { originOf(pageUrl) }
+        val isM3u8 = videoUrl.contains(".m3u8", ignoreCase = true)
+
+        callback(
+            newExtractorLink(
+                source = this@HmaalProvider.name,
+                name = "${this@HmaalProvider.name} - $host",
+                url = videoUrl,
+                type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+            ) {
+                this.referer = pageUrl
+                this.quality = Qualities.Unknown.value
+                this.headers = mapOf(
+                    "User-Agent" to desktopUserAgent,
+                    "Referer" to pageUrl
+                )
+            }
+        )
     }
 }
