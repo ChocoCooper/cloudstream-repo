@@ -35,6 +35,25 @@ class HmaalProvider : MainAPI() {
 
     // ---------- helpers ----------
 
+    /** scheme://host for a given absolute URL, used as the Referer for hotlink-protected images. */
+    private fun originOf(url: String): String {
+        return try {
+            val u = URI(url)
+            if (u.scheme != null && u.host != null) "${u.scheme}://${u.host}" else mainUrl
+        } catch (e: Exception) {
+            mainUrl
+        }
+    }
+
+    /** Headers that let Coil load images from CDNs that reject requests with no/foreign Referer. */
+    private fun refererHeaders(domain: String): Map<String, String> {
+        val origin = if (domain.startsWith("http")) domain else originOf(domain)
+        return mapOf(
+            "Referer" to "$origin/",
+            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        )
+    }
+
     /** Pulls the url out of `background-image: url('...')` in a style attribute. */
     private fun Element.extractBackgroundImage(): String? {
         val style = this.attr("style")
@@ -42,21 +61,32 @@ class HmaalProvider : MainAPI() {
         return match?.groupValues?.get(2)?.trim()?.ifBlank { null }
     }
 
-    /** Grabs an integer episode number out of a title like "Series Episode 2". */
+    /**
+     * Grabs an integer episode number out of a title regardless of what surrounds it, e.g.
+     * "Series Episode 2", "Series Episode-02", "Series Ep 2", "Bidaai Episode 2 (Wife)".
+     * Uses `find` (not an end/full match) so trailing text after the number is fine.
+     */
     private fun parseEpisodeNumber(title: String): Int? {
-        val match = Regex("""episode\s*[-:]?\s*(\d+)""", RegexOption.IGNORE_CASE).find(title)
-            ?: Regex("""\bep\s*[-:]?\s*(\d+)""", RegexOption.IGNORE_CASE).find(title)
-        return match?.groupValues?.get(1)?.toIntOrNull()
+        val patterns = listOf(
+            Regex("""episode\s*[-:.#]?\s*(\d+)""", RegexOption.IGNORE_CASE),
+            Regex("""\bep\s*[-:.#]?\s*(\d+)""", RegexOption.IGNORE_CASE),
+            Regex("""\be\s*[-:.#]?(\d+)\b""", RegexOption.IGNORE_CASE)
+        )
+        for (pattern in patterns) {
+            pattern.find(title)?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
+        }
+        return null
     }
 
     /** Converts one `a.video` tile (homepage / search / series listing) into a SearchResponse. */
-    private fun Element.toSearchResult(): SearchResponse? {
+    private fun Element.toSearchResult(domain: String): SearchResponse? {
         val title = this.attr("title").ifBlank { this.text() }.trim()
         if (title.isBlank()) return null
         val href = fixUrlNull(this.attr("href")) ?: return null
         val posterUrl = this.extractBackgroundImage()?.let { fixUrlNull(it) }
         return newMovieSearchResponse(title, href, TvType.NSFW) {
             this.posterUrl = posterUrl
+            this.posterHeaders = refererHeaders(domain)
         }
     }
 
@@ -66,10 +96,10 @@ class HmaalProvider : MainAPI() {
         val url = if (page <= 1) request.data else "${request.data.trimEnd('/')}/page/$page/"
         val document = app.get(url).document
 
-        val items = document.select("#primary > div > a").mapNotNull { it.toSearchResult() }
+        val items = document.select("#primary > div > a").mapNotNull { it.toSearchResult(mainUrl) }
 
         return newHomePageResponse(
-            list = listOf(HomePageList(request.name, items)),
+            list = listOf(HomePageList(request.name, items, isHorizontalImages = true)),
             hasNext = items.isNotEmpty()
         )
     }
@@ -84,7 +114,7 @@ class HmaalProvider : MainAPI() {
                 async {
                     try {
                         val doc = app.get("$domain/?s=$query").document
-                        val items = doc.select("#primary > div > a").mapNotNull { it.toSearchResult() }
+                        val items = doc.select("#primary > div > a").mapNotNull { it.toSearchResult(domain) }
                         synchronized(results) { results.addAll(items) }
                     } catch (e: Exception) {
                         // mirror unreachable / no results on this domain, skip it
@@ -108,6 +138,7 @@ class HmaalProvider : MainAPI() {
             val seriesName = seriesLink.text().trim().ifBlank { "Unknown Series" }
             val seriesUrl = fixUrl(seriesLink.attr("href"))
             val seriesDoc = app.get(seriesUrl).document
+            val seriesDomain = originOf(seriesUrl)
 
             val episodes = seriesDoc.select("#primary > div > a").mapNotNull { el ->
                 val title = el.attr("title").ifBlank { el.text() }.trim()
@@ -120,6 +151,7 @@ class HmaalProvider : MainAPI() {
                     this.name = title
                     this.episode = epNum
                     this.posterUrl = epImage
+                    this.posterHeaders = refererHeaders(seriesDomain)
                 }
             }.sortedBy { it.episode ?: Int.MAX_VALUE }
 
@@ -128,6 +160,7 @@ class HmaalProvider : MainAPI() {
 
             return newTvSeriesLoadResponse(seriesName, url, TvType.NSFW, episodes) {
                 this.posterUrl = poster
+                this.posterHeaders = refererHeaders(originOf(url))
             }
         }
 
@@ -143,6 +176,7 @@ class HmaalProvider : MainAPI() {
 
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
             this.posterUrl = poster
+            this.posterHeaders = refererHeaders(originOf(url))
         }
     }
 
