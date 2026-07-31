@@ -25,6 +25,7 @@ class HmaalProvider : MainAPI() {
         "https://hotmaal.xxx",
         "https://ottdude.com",
         "https://serieswala.com",
+        "https://ottzone.net",
         "https://hotott.net",
         "https://botmaal.io",
         "https://maaltv.io"
@@ -104,9 +105,7 @@ class HmaalProvider : MainAPI() {
     }
 
     /**
-     * Looks for a playable video URL in several possible spots, since these theme sites don't
-     * always keep the stream on `#my-video > source src=` — some lazy-load it into `data-src`,
-     * some put it directly on the `<video>` tag with no child `<source>` at all.
+     * Looks for a playable video URL in several possible spots.
      */
     private fun Document.extractVideoSources(): List<String> {
         val urls = linkedSetOf<String>()
@@ -149,23 +148,7 @@ class HmaalProvider : MainAPI() {
         return src?.trim()?.ifBlank { null }?.let { fixUrlNull(it, domain) }
     }
 
-    /**
-     * Grabs an integer episode number out of a title regardless of what surrounds it, e.g.
-     * "Series Episode 2", "Series Episode-02", "Series Ep 2", "Bidaai Episode 2 (Wife)".
-     */
-    private fun parseEpisodeNumber(title: String): Int? {
-        val patterns = listOf(
-            Regex("""episode\s*[-:.#]?\s*(\d+)""", RegexOption.IGNORE_CASE),
-            Regex("""\bep\s*[-:.#]?\s*(\d+)""", RegexOption.IGNORE_CASE),
-            Regex("""\be\s*[-:.#]?(\d+)\b""", RegexOption.IGNORE_CASE)
-        )
-        for (pattern in patterns) {
-            pattern.find(title)?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
-        }
-        return null
-    }
-
-    /** Converts one `a.video` tile (homepage / search / series listing) into a SearchResponse. */
+    /** Converts one `a.video` tile (homepage / search) into a SearchResponse. */
     private fun Element.toSearchResult(domain: String): SearchResponse? {
         val title = this.attr("title").ifBlank { this.text() }.trim()
         if (title.isBlank()) return null
@@ -219,7 +202,7 @@ class HmaalProvider : MainAPI() {
         return results.distinctBy { it.name.trim().lowercase() }
     }
 
-    // ---------- load (series episode list OR single movie/episode) ----------
+    // ---------- load (single movie/video page ONLY) ----------
 
     override suspend fun load(url: String): LoadResponse {
         val pathKey = getPath(url)
@@ -228,55 +211,9 @@ class HmaalProvider : MainAPI() {
 
         val document = app.get(url, headers = browserHeaders).document
 
-        // Check for taxonomy series link (`#primary > div.taxonomy-meta > div.series-list > a`)
-        val seriesLink = document.selectFirst("#primary > div.taxonomy-meta > div.series-list > a")
-
-        val targetDoc = if (seriesLink != null) {
-            val seriesUrl = fixUrl(seriesLink.attr("href"), currentDomain)
-            app.get(seriesUrl, headers = browserHeaders).document
-        } else {
-            document
-        }
-
-        val seriesName = seriesLink?.text()?.trim()?.ifBlank { null }
-            ?: targetDoc.selectFirst("#primary > div.taxonomy-meta > div.series-list > a")?.text()?.trim()?.ifBlank { null }
-            ?: targetDoc.selectFirst("h1.page-title, h1.title, h1")?.text()?.trim()?.ifBlank { null }
-            ?: "Unknown Series"
-
-        // Uses site-aware selection for episode listing tiles
-        val episodes = targetDoc.selectVideoElements().mapNotNull { el ->
-            val title = el.attr("title").ifBlank { el.text() }.trim()
-            if (title.isBlank()) return@mapNotNull null
-            val epHref = fixUrlNull(el.attr("href"), currentDomain) ?: return@mapNotNull null
-            val epImage = el.extractPoster(currentDomain)
-            val epNum = parseEpisodeNumber(title)
-
-            if (epImage != null) {
-                posterCache[getPath(epHref)] = epImage
-            }
-
-            newEpisode(epHref) {
-                this.name = title
-                this.episode = epNum
-                this.posterUrl = epImage
-            }
-        }.sortedBy { it.episode ?: Int.MAX_VALUE }
-
-        if (episodes.isNotEmpty() && (seriesLink != null || episodes.size > 1)) {
-            val poster = cachedPoster
-                ?: targetDoc.selectFirst("a.video")?.extractPoster(currentDomain)
-                ?: document.selectFirst("a.video")?.extractPoster(currentDomain)
-                ?: episodes.firstOrNull()?.posterUrl
-
-            return newTvSeriesLoadResponse(seriesName, url, TvType.NSFW, episodes) {
-                this.posterUrl = poster
-                this.posterHeaders = refererHeaders(poster)
-            }
-        }
-
-        // No series list found -> treat as a standalone movie/episode page.
         val title = document.selectFirst("meta[property=og:title]")?.attr("content")
             ?.trim()?.ifBlank { null }
+            ?: document.selectFirst("h1.page-title, h1.title, h1")?.text()?.trim()?.ifBlank { null }
             ?: document.selectFirst("title")?.text()?.trim()
             ?: "Unknown"
 
