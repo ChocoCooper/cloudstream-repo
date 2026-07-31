@@ -6,6 +6,7 @@ import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.withTimeoutOrNull
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URI
@@ -36,8 +37,7 @@ class HmaalProvider : MainAPI() {
 
     // hotott.net has been observed serving stale/dead links from an old R2 bucket
     // (pub-*.r2.dev) instead of the live video.maalcdn.com / cdn.pmaal.com CDN that
-    // every other mirror uses. We still scrape it (it's the primary domain and drives
-    // the main page/search), but we never trust its video links without validating them.
+    // every other mirror uses. We still scrape it, but we validate r2.dev links before trusting them.
     private val knownUnreliableCdnHosts = listOf("r2.dev")
 
     // Caches listing posters (homepage/search) keyed by path slug so load() reuses them.
@@ -239,12 +239,14 @@ class HmaalProvider : MainAPI() {
         coroutineScope {
             mirrorDomains.map { domain ->
                 async {
-                    try {
-                        val doc = app.get("$domain/?s=$query", headers = browserHeaders).document
-                        val items = doc.selectVideoElements().mapNotNull { it.toSearchResult(domain) }
-                        synchronized(results) { results.addAll(items) }
-                    } catch (e: Exception) {
-                        Log.w(TAG, "search: mirror $domain failed: ${e.message}")
+                    withTimeoutOrNull(6000L) {
+                        try {
+                            val doc = app.get("$domain/?s=$query", headers = browserHeaders).document
+                            val items = doc.selectVideoElements().mapNotNull { it.toSearchResult(domain) }
+                            synchronized(results) { results.addAll(items) }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "search: mirror $domain failed: ${e.message}")
+                        }
                     }
                 }
             }.awaitAll()
@@ -305,91 +307,93 @@ class HmaalProvider : MainAPI() {
         coroutineScope {
             candidateUrls.map { pageUrl ->
                 async {
-                    val domainLabel = getSiteName(pageUrl)
-                    try {
-                        val currentDomain = originOf(pageUrl)
-                        val doc = app.get(pageUrl, headers = browserHeaders).document
-                        val rawSources = doc.extractVideoSources()
-                        Log.d(TAG, "loadLinks: [$domainLabel] page fetched, ${rawSources.size} raw source(s) found")
-                        if (rawSources.isEmpty()) return@async
+                    // Impose a 6-second timeout per mirror branch to avoid blocking the global request.
+                    withTimeoutOrNull(6000L) {
+                        val domainLabel = getSiteName(pageUrl)
+                        try {
+                            val currentDomain = originOf(pageUrl)
+                            val doc = app.get(pageUrl, headers = browserHeaders).document
+                            val rawSources = doc.extractVideoSources()
+                            Log.d(TAG, "loadLinks: [$domainLabel] page fetched, ${rawSources.size} raw source(s) found")
+                            if (rawSources.isEmpty()) return@withTimeoutOrNull
 
-                        for (rawUrl in rawSources) {
-                            val fullUrl = fixUrl(rawUrl, currentDomain)
-                            if (!processedUrls.add(fullUrl)) continue
+                            for (rawUrl in rawSources) {
+                                val fullUrl = fixUrl(rawUrl, currentDomain)
+                                if (!processedUrls.add(fullUrl)) continue
 
-                            val extractorLoaded = loadExtractor(fullUrl, pageUrl, subtitleCallback, callback)
-                            if (extractorLoaded) {
-                                found = true
-                                continue
-                            }
+                                val extractorLoaded = loadExtractor(fullUrl, pageUrl, subtitleCallback, callback)
+                                if (extractorLoaded) {
+                                    found = true
+                                    continue
+                                }
 
-                            if (fullUrl.contains("/embed/") || fullUrl.contains("/player/") || rawUrl.contains("iframe") || fullUrl.endsWith(".html") || fullUrl.endsWith(".php")) {
-                                try {
-                                    val iframeDoc = app.get(fullUrl, headers = browserHeaders + mapOf("Referer" to pageUrl)).document
-                                    val innerSources = iframeDoc.extractVideoSources()
-                                    for (innerRaw in innerSources) {
-                                        val innerFull = fixUrl(innerRaw, originOf(fullUrl))
-                                        if (processedUrls.add(innerFull)) {
-                                            if (!loadExtractor(innerFull, fullUrl, subtitleCallback, callback)) {
-                                                if (emitVideoLinkIfAlive(innerFull, pageUrl, domainLabel, callback)) {
+                                if (fullUrl.contains("/embed/") || fullUrl.contains("/player/") || rawUrl.contains("iframe") || fullUrl.endsWith(".html") || fullUrl.endsWith(".php")) {
+                                    try {
+                                        val iframeDoc = app.get(fullUrl, headers = browserHeaders + mapOf("Referer" to pageUrl)).document
+                                        val innerSources = iframeDoc.extractVideoSources()
+                                        for (innerRaw in innerSources) {
+                                            val innerFull = fixUrl(innerRaw, originOf(fullUrl))
+                                            if (processedUrls.add(innerFull)) {
+                                                if (!loadExtractor(innerFull, fullUrl, subtitleCallback, callback)) {
+                                                    if (emitVideoLinkIfAlive(innerFull, pageUrl, domainLabel, callback)) {
+                                                        found = true
+                                                    }
+                                                } else {
                                                     found = true
                                                 }
-                                            } else {
-                                                found = true
                                             }
                                         }
+                                    } catch (e: Exception) {
+                                        Log.w(TAG, "loadLinks: [$domainLabel] iframe fetch failed: ${e.message}")
                                     }
-                                } catch (e: Exception) {
-                                    Log.w(TAG, "loadLinks: [$domainLabel] iframe fetch failed: ${e.message}")
-                                }
-                            } else {
-                                // Direct video file (.mp4, .m3u8, etc.) — validate before trusting it.
-                                if (emitVideoLinkIfAlive(fullUrl, pageUrl, domainLabel, callback)) {
-                                    found = true
+                                } else {
+                                    // Direct video file (.mp4, .m3u8, etc.)
+                                    if (emitVideoLinkIfAlive(fullUrl, pageUrl, domainLabel, callback)) {
+                                        found = true
+                                    }
                                 }
                             }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "loadLinks: [$domainLabel] mirror unreachable/skip: ${e.message}")
                         }
-                    } catch (e: Exception) {
-                        Log.w(TAG, "loadLinks: [$domainLabel] mirror unreachable/skip: ${e.message}")
                     }
                 }
             }.awaitAll()
         }
 
-        Log.d(TAG, "loadLinks: finished, found=$found, validatedLinks=${processedUrls.size}")
+        Log.d(TAG, "loadLinks: finished, found=$found, processedLinks=${processedUrls.size}")
         return found
     }
 
     /**
-     * Checks a candidate video URL with a cheap ranged GET before handing it to the player.
-     * This stops known-dead sources (e.g. hotott.net's stale r2.dev bucket links) from ever
-     * reaching ExoPlayer, so CloudStream falls back to whichever mirror actually has a live link
-     * instead of surfacing a single 404.
+     * Optional health check for known flaky hosts.
+     * Fast 3-second max timeout.
      */
     private suspend fun isLinkAlive(url: String, referer: String): Boolean {
-        return try {
-            val response = app.get(
-                url,
-                headers = mapOf(
-                    "User-Agent" to mobileUserAgent,
-                    "Referer" to referer,
-                    "Accept" to "*/*",
-                    "Range" to "bytes=0-1",
-                    "Sec-Fetch-Dest" to "video",
-                    "Sec-Fetch-Mode" to "no-cors",
-                    "Sec-Fetch-Site" to "cross-site"
+        return withTimeoutOrNull(3000L) {
+            try {
+                val response = app.get(
+                    url,
+                    headers = mapOf(
+                        "User-Agent" to mobileUserAgent,
+                        "Referer" to referer,
+                        "Accept" to "*/*",
+                        "Range" to "bytes=0-1",
+                        "Sec-Fetch-Dest" to "video",
+                        "Sec-Fetch-Mode" to "no-cors",
+                        "Sec-Fetch-Site" to "cross-site"
+                    )
                 )
-            )
-            // Accept 200 (full content), 206 (partial content / range honored)
-            val alive = response.code == 200 || response.code == 206
-            if (!alive) {
-                Log.w(TAG, "isLinkAlive: $url returned HTTP ${response.code}")
+                val alive = response.code == 200 || response.code == 206
+                if (!alive) {
+                    Log.w(TAG, "isLinkAlive: $url returned HTTP ${response.code}")
+                }
+                alive
+            } catch (e: Exception) {
+                Log.w(TAG, "isLinkAlive: $url failed validation: ${e.message}")
+                false
             }
-            alive
-        } catch (e: Exception) {
-            Log.w(TAG, "isLinkAlive: $url failed validation: ${e.message}")
-            false
-        }
+        } ?: false
     }
 
     private suspend fun emitVideoLinkIfAlive(
@@ -401,13 +405,15 @@ class HmaalProvider : MainAPI() {
         val pageOrigin = originOf(pageUrl)
         val refererValue = "$pageOrigin/"
 
-        // Known-dead CDN hosts (currently: hotott.net's stale R2 bucket) are skipped without
-        // even spending a network round trip, since they've been observed to always 404.
-        if (knownUnreliableCdnHosts.any { videoUrl.contains(it, ignoreCase = true) }) {
-            Log.w(TAG, "emitVideoLinkIfAlive: [$domainLabel] skipping known-unreliable CDN host: $videoUrl")
-            if (!isLinkAlive(videoUrl, refererValue)) return false
-        } else if (!isLinkAlive(videoUrl, refererValue)) {
-            return false
+        val isUnreliableHost = knownUnreliableCdnHosts.any { videoUrl.contains(it, ignoreCase = true) }
+
+        // Only validate if host is explicitly listed in knownUnreliableCdnHosts (e.g. r2.dev)
+        if (isUnreliableHost) {
+            Log.w(TAG, "emitVideoLinkIfAlive: [$domainLabel] checking unreliable CDN host: $videoUrl")
+            if (!isLinkAlive(videoUrl, refererValue)) {
+                Log.w(TAG, "emitVideoLinkIfAlive: [$domainLabel] link failed check, skipping: $videoUrl")
+                return false
+            }
         }
 
         val isM3u8 = videoUrl.contains(".m3u8", ignoreCase = true)
