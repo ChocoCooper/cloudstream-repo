@@ -20,6 +20,10 @@ class HmaalProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.NSFW)
 
+    override val mainPage = mainPageOf(
+        "$mainUrl/" to "Home"
+    )
+
     private val TAG = "HmaalProvider"
 
     // All mirror sites share the exact same theme/markup structure.
@@ -37,7 +41,7 @@ class HmaalProvider : MainAPI() {
 
     // hotott.net has been observed serving stale/dead links from an old R2 bucket
     // (pub-*.r2.dev) instead of the live video.maalcdn.com / cdn.pmaal.com CDN that
-    // every other mirror uses. We still scrape it, but we validate r2.dev links before trusting them.
+    // every other mirror uses.
     private val knownUnreliableCdnHosts = listOf("r2.dev")
 
     // Caches listing posters (homepage/search) keyed by path slug so load() reuses them.
@@ -48,7 +52,6 @@ class HmaalProvider : MainAPI() {
     private val desktopUserAgent =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
-    // Matches the UA your working cURLs used for the actual CDN byte-range requests.
     private val mobileUserAgent =
         "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36"
 
@@ -56,6 +59,11 @@ class HmaalProvider : MainAPI() {
         "User-Agent" to desktopUserAgent,
         "Accept-Language" to "en-US,en;q=0.9"
     )
+
+    private fun isValidUrl(url: String?): Boolean {
+        if (url.isNullOrBlank()) return false
+        return url.startsWith("http://") || url.startsWith("https://")
+    }
 
     /** Encodes spaces and unescaped characters in video paths to prevent 404/URISyntax errors on CDNs */
     private fun sanitizeUrl(url: String): String {
@@ -220,13 +228,14 @@ class HmaalProvider : MainAPI() {
     // ---------- homepage ----------
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val url = if (page <= 1) request.data else "${request.data.trimEnd('/')}/page/$page/"
+        val baseUrl = if (request.data.isNotBlank() && isValidUrl(request.data)) request.data else mainUrl
+        val url = if (page <= 1) baseUrl else "${baseUrl.trimEnd('/')}/page/$page/"
         val document = app.get(url, headers = browserHeaders).document
 
-        val items = document.selectVideoElements().mapNotNull { it.toSearchResult(mainUrl) }
+        val items = document.selectVideoElements().mapNotNull { it.toSearchResult(baseUrl) }
 
         return newHomePageResponse(
-            list = listOf(HomePageList(request.name, items, isHorizontalImages = true)),
+            list = listOf(HomePageList(request.name.ifBlank { "Home" }, items, isHorizontalImages = true)),
             hasNext = items.isNotEmpty()
         )
     }
@@ -234,7 +243,7 @@ class HmaalProvider : MainAPI() {
     // ---------- search (all mirrors, deduplicated) ----------
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val results = mutableListOf<SearchResponse>()
+        val results = ConcurrentHashMap.newKeySet<SearchResponse>()
 
         coroutineScope {
             mirrorDomains.map { domain ->
@@ -243,7 +252,7 @@ class HmaalProvider : MainAPI() {
                         try {
                             val doc = app.get("$domain/?s=$query", headers = browserHeaders).document
                             val items = doc.selectVideoElements().mapNotNull { it.toSearchResult(domain) }
-                            synchronized(results) { results.addAll(items) }
+                            results.addAll(items)
                         } catch (e: Exception) {
                             Log.w(TAG, "search: mirror $domain failed: ${e.message}")
                         }
@@ -292,13 +301,18 @@ class HmaalProvider : MainAPI() {
         var found = false
         val processedUrls = ConcurrentHashMap.newKeySet<String>()
 
+        if (data.isBlank()) return false
+
         val path = try {
-            URI(data).let { (it.rawPath ?: "") + (it.rawQuery?.let { q -> "?$q" } ?: "") }
+            val uri = URI(data)
+            val p = uri.rawPath ?: ""
+            val q = uri.rawQuery?.let { "?$it" } ?: ""
+            p + q
         } catch (e: Exception) {
-            null
+            ""
         }
 
-        val candidateUrls = if (!path.isNullOrBlank()) {
+        val candidateUrls = if (path.isNotBlank()) {
             mirrorDomains.map { it.trimEnd('/') + path }.distinct()
         } else {
             listOf(data)
@@ -307,7 +321,6 @@ class HmaalProvider : MainAPI() {
         coroutineScope {
             candidateUrls.map { pageUrl ->
                 async {
-                    // Impose a 6-second timeout per mirror branch to avoid blocking the global request.
                     withTimeoutOrNull(6000L) {
                         val domainLabel = getSiteName(pageUrl)
                         try {
@@ -319,7 +332,7 @@ class HmaalProvider : MainAPI() {
 
                             for (rawUrl in rawSources) {
                                 val fullUrl = fixUrl(rawUrl, currentDomain)
-                                if (!processedUrls.add(fullUrl)) continue
+                                if (!isValidUrl(fullUrl) || !processedUrls.add(fullUrl)) continue
 
                                 val extractorLoaded = loadExtractor(fullUrl, pageUrl, subtitleCallback, callback)
                                 if (extractorLoaded) {
@@ -333,7 +346,7 @@ class HmaalProvider : MainAPI() {
                                         val innerSources = iframeDoc.extractVideoSources()
                                         for (innerRaw in innerSources) {
                                             val innerFull = fixUrl(innerRaw, originOf(fullUrl))
-                                            if (processedUrls.add(innerFull)) {
+                                            if (isValidUrl(innerFull) && processedUrls.add(innerFull)) {
                                                 if (!loadExtractor(innerFull, fullUrl, subtitleCallback, callback)) {
                                                     if (emitVideoLinkIfAlive(innerFull, pageUrl, domainLabel, callback)) {
                                                         found = true
@@ -347,7 +360,6 @@ class HmaalProvider : MainAPI() {
                                         Log.w(TAG, "loadLinks: [$domainLabel] iframe fetch failed: ${e.message}")
                                     }
                                 } else {
-                                    // Direct video file (.mp4, .m3u8, etc.)
                                     if (emitVideoLinkIfAlive(fullUrl, pageUrl, domainLabel, callback)) {
                                         found = true
                                     }
@@ -365,11 +377,8 @@ class HmaalProvider : MainAPI() {
         return found
     }
 
-    /**
-     * Optional health check for known flaky hosts.
-     * Fast 3-second max timeout.
-     */
     private suspend fun isLinkAlive(url: String, referer: String): Boolean {
+        if (!isValidUrl(url)) return false
         return withTimeoutOrNull(3000L) {
             try {
                 val response = app.get(
@@ -407,7 +416,6 @@ class HmaalProvider : MainAPI() {
 
         val isUnreliableHost = knownUnreliableCdnHosts.any { videoUrl.contains(it, ignoreCase = true) }
 
-        // Only validate if host is explicitly listed in knownUnreliableCdnHosts (e.g. r2.dev)
         if (isUnreliableHost) {
             Log.w(TAG, "emitVideoLinkIfAlive: [$domainLabel] checking unreliable CDN host: $videoUrl")
             if (!isLinkAlive(videoUrl, refererValue)) {
