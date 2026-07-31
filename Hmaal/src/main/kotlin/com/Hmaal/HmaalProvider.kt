@@ -65,6 +65,25 @@ class HmaalProvider : MainAPI() {
         return fixUrl(url, domain)
     }
 
+    /** Cleans site branding suffix / prefix from media titles */
+    private fun cleanTitle(title: String?): String {
+        if (title.isNullOrBlank()) return "Unknown"
+        return title
+            .replace(Regex("""(?i)\s*[-|–—:]\s*(botmaal|hotott|ottdude|serieswala|maaltv|ymaal|zmaal|hdmaal|hotmaal|ottzone|newmaal|hmaal)(\.\w+)?.*$"""), "")
+            .replace(Regex("""(?i)\b(botmaal|hotott|ottdude|serieswala|maaltv|ymaal|zmaal|hdmaal|hotmaal|ottzone|newmaal|hmaal)\.(com|io|net|tv|xxx|co)\b"""), "")
+            .trim()
+    }
+
+    /** Converts page URL to mirror site name (e.g. "ottdude", "serieswala", "botmaal") */
+    private fun getSiteName(pageUrl: String): String {
+        return try {
+            val host = URI(pageUrl).host?.removePrefix("www.") ?: ""
+            host.substringBefore(".")
+        } catch (e: Exception) {
+            "mirror"
+        }
+    }
+
     /** Converts full URL to normalized path slug for mirror-agnostic cache keys. */
     private fun getPath(url: String): String {
         return try {
@@ -127,7 +146,7 @@ class HmaalProvider : MainAPI() {
                 .ifBlank { el.attr("data-src") }
                 .ifBlank { el.attr("data-video-src") }
                 .trim()
-            if (src.isNotBlank() && !src.startsWith("blob:")) {
+            if (src.isNotBlank() && !src.startsWith("blob:") && !src.startsWith("javascript:")) {
                 urls.add(src)
             }
         }
@@ -174,7 +193,8 @@ class HmaalProvider : MainAPI() {
 
     /** Converts video tile to SearchResponse. */
     private fun Element.toSearchResult(domain: String): SearchResponse? {
-        val title = this.attr("title").ifBlank { this.text() }.trim()
+        val rawTitle = this.attr("title").ifBlank { this.text() }.trim()
+        val title = cleanTitle(rawTitle)
         if (title.isBlank()) return null
         val href = fixUrlNull(this.attr("href"), domain) ?: return null
         val posterUrl = this.extractPoster(domain)
@@ -234,11 +254,13 @@ class HmaalProvider : MainAPI() {
 
         val document = app.get(url, headers = browserHeaders).document
 
-        val title = document.selectFirst("meta[property=og:title]")?.attr("content")
+        val rawTitle = document.selectFirst("meta[property=og:title]")?.attr("content")
             ?.trim()?.ifBlank { null }
             ?: document.selectFirst("h1.page-title, h1.title, h1")?.text()?.trim()?.ifBlank { null }
             ?: document.selectFirst("title")?.text()?.trim()
             ?: "Unknown"
+
+        val title = cleanTitle(rawTitle)
 
         val poster = cachedPoster
             ?: document.selectFirst("meta[property=og:image]")?.attr("content")?.let { fixUrlNull(it, currentDomain) }
@@ -294,7 +316,7 @@ class HmaalProvider : MainAPI() {
                             }
 
                             // 2. If it's an internal embed page or iframe, attempt to fetch inner video
-                            if (fullUrl.contains("/embed/") || fullUrl.contains("/player/") || rawUrl.contains("iframe")) {
+                            if (fullUrl.contains("/embed/") || fullUrl.contains("/player/") || rawUrl.contains("iframe") || fullUrl.endsWith(".html") || fullUrl.endsWith(".php")) {
                                 try {
                                     val iframeDoc = app.get(fullUrl, headers = browserHeaders + mapOf("Referer" to pageUrl)).document
                                     val innerSources = iframeDoc.extractVideoSources()
@@ -331,13 +353,14 @@ class HmaalProvider : MainAPI() {
         pageUrl: String,
         callback: (ExtractorLink) -> Unit
     ) {
-        val host = try { URI(videoUrl).host ?: originOf(pageUrl) } catch (e: Exception) { originOf(pageUrl) }
+        val siteName = getSiteName(pageUrl)
         val isM3u8 = videoUrl.contains(".m3u8", ignoreCase = true)
+        val pageOrigin = originOf(pageUrl)
 
         callback(
             newExtractorLink(
                 source = this@HmaalProvider.name,
-                name = "${this@HmaalProvider.name} - $host",
+                name = "${this@HmaalProvider.name} - $siteName",
                 url = videoUrl,
                 type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
             ) {
@@ -345,7 +368,8 @@ class HmaalProvider : MainAPI() {
                 this.quality = Qualities.Unknown.value
                 this.headers = mapOf(
                     "User-Agent" to desktopUserAgent,
-                    "Referer" to pageUrl
+                    "Referer" to "$pageOrigin/",
+                    "Origin" to pageOrigin
                 )
             }
         )
