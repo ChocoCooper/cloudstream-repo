@@ -8,6 +8,7 @@ import kotlinx.coroutines.coroutineScope
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URI
+import java.util.concurrent.ConcurrentHashMap
 
 class HmaalProvider : MainAPI() {
     override var mainUrl = "https://hmaal.tv"
@@ -34,6 +35,9 @@ class HmaalProvider : MainAPI() {
         "$mainUrl/ott/jugnu/" to "Jugnu"
     )
 
+    // Caches listing posters (homepage/search) keyed by path slug so load() reuses them.
+    private val posterCache = ConcurrentHashMap<String, String>()
+
     // ---------- helpers ----------
 
     // A bare (no User-Agent) request is a dead giveaway for a bot/scraper and gets blocked or
@@ -46,6 +50,16 @@ class HmaalProvider : MainAPI() {
         "Accept-Language" to "en-US,en;q=0.9"
     )
 
+    /** Converts full URL to normalized path slug (e.g. "/ott/ullu/movie/") for mirror-agnostic cache keys. */
+    private fun getPath(url: String): String {
+        return try {
+            val path = URI(url).rawPath ?: ""
+            path.trimEnd('/')
+        } catch (e: Exception) {
+            url
+        }
+    }
+
     /** scheme://host for a given absolute URL, used as the Referer for hotlink-protected images. */
     private fun originOf(url: String): String {
         return try {
@@ -57,8 +71,8 @@ class HmaalProvider : MainAPI() {
     }
 
     /** Headers that let Coil load images from CDNs that reject requests with no/foreign Referer. */
-    private fun refererHeaders(domain: String): Map<String, String> {
-        val origin = if (domain.startsWith("http")) domain else originOf(domain)
+    private fun refererHeaders(url: String?): Map<String, String> {
+        val origin = if (!url.isNullOrBlank()) originOf(url) else mainUrl
         return browserHeaders + mapOf("Referer" to "$origin/")
     }
 
@@ -90,10 +104,20 @@ class HmaalProvider : MainAPI() {
         return match?.groupValues?.get(2)?.trim()?.ifBlank { null }
     }
 
+    /** Extracts image poster from element via background-style or fallback img tags. */
+    private fun Element.extractPoster(domain: String): String? {
+        val bg = this.extractBackgroundImage()
+        val src = if (bg.isNullOrBlank()) {
+            this.selectFirst("img")?.attr("src")?.ifBlank { this.selectFirst("img")?.attr("data-src") }
+        } else {
+            bg
+        }
+        return src?.trim()?.ifBlank { null }?.let { fixUrlNull(it, domain) }
+    }
+
     /**
      * Grabs an integer episode number out of a title regardless of what surrounds it, e.g.
      * "Series Episode 2", "Series Episode-02", "Series Ep 2", "Bidaai Episode 2 (Wife)".
-     * Uses `find` (not an end/full match) so trailing text after the number is fine.
      */
     private fun parseEpisodeNumber(title: String): Int? {
         val patterns = listOf(
@@ -111,11 +135,16 @@ class HmaalProvider : MainAPI() {
     private fun Element.toSearchResult(domain: String): SearchResponse? {
         val title = this.attr("title").ifBlank { this.text() }.trim()
         if (title.isBlank()) return null
-        val href = fixUrlNull(this.attr("href")) ?: return null
-        val posterUrl = this.extractBackgroundImage()?.let { fixUrlNull(it) }
+        val href = fixUrlNull(this.attr("href"), domain) ?: return null
+        val posterUrl = this.extractPoster(domain)
+
+        if (posterUrl != null) {
+            posterCache[getPath(href)] = posterUrl
+        }
+
         return newMovieSearchResponse(title, href, TvType.NSFW) {
             this.posterUrl = posterUrl
-            this.posterHeaders = refererHeaders(domain)
+            this.posterHeaders = refererHeaders(posterUrl)
         }
     }
 
@@ -159,21 +188,29 @@ class HmaalProvider : MainAPI() {
     // ---------- load (series episode list OR single movie/episode) ----------
 
     override suspend fun load(url: String): LoadResponse {
+        val pathKey = getPath(url)
+        val cachedPoster = posterCache[pathKey]
+        val currentDomain = originOf(url)
+
         val document = app.get(url, headers = browserHeaders).document
 
         val seriesLink = document.selectFirst("#primary > div.taxonomy-meta > div.series-list > a")
 
         if (seriesLink != null) {
             val seriesName = seriesLink.text().trim().ifBlank { "Unknown Series" }
-            val seriesUrl = fixUrl(seriesLink.attr("href"))
+            val seriesUrl = fixUrl(seriesLink.attr("href"), currentDomain)
             val seriesDoc = app.get(seriesUrl, headers = browserHeaders).document
 
             val episodes = seriesDoc.select("#primary > div > a").mapNotNull { el ->
                 val title = el.attr("title").ifBlank { el.text() }.trim()
                 if (title.isBlank()) return@mapNotNull null
-                val epHref = fixUrlNull(el.attr("href")) ?: return@mapNotNull null
-                val epImage = el.extractBackgroundImage()?.let { fixUrlNull(it) }
+                val epHref = fixUrlNull(el.attr("href"), currentDomain) ?: return@mapNotNull null
+                val epImage = el.extractPoster(currentDomain)
                 val epNum = parseEpisodeNumber(title)
+
+                if (epImage != null) {
+                    posterCache[getPath(epHref)] = epImage
+                }
 
                 newEpisode(epHref) {
                     this.name = title
@@ -182,12 +219,13 @@ class HmaalProvider : MainAPI() {
                 }
             }.sortedBy { it.episode ?: Int.MAX_VALUE }
 
-            val poster = document.selectFirst("a.video")?.extractBackgroundImage()
-                ?.let { fixUrlNull(it) } ?: episodes.firstOrNull()?.posterUrl
+            val poster = cachedPoster
+                ?: document.selectFirst("a.video")?.extractPoster(currentDomain)
+                ?: episodes.firstOrNull()?.posterUrl
 
             return newTvSeriesLoadResponse(seriesName, url, TvType.NSFW, episodes) {
                 this.posterUrl = poster
-                this.posterHeaders = refererHeaders(originOf(url))
+                this.posterHeaders = refererHeaders(poster)
             }
         }
 
@@ -197,13 +235,13 @@ class HmaalProvider : MainAPI() {
             ?: document.selectFirst("title")?.text()?.trim()
             ?: "Unknown"
 
-        val poster = document.selectFirst("meta[property=og:image]")?.attr("content")
-            ?.let { fixUrlNull(it) }
-            ?: document.selectFirst("a.video")?.extractBackgroundImage()?.let { fixUrlNull(it) }
+        val poster = cachedPoster
+            ?: document.selectFirst("meta[property=og:image]")?.attr("content")?.let { fixUrlNull(it, currentDomain) }
+            ?: document.selectFirst("a.video")?.extractPoster(currentDomain)
 
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
             this.posterUrl = poster
-            this.posterHeaders = refererHeaders(originOf(url))
+            this.posterHeaders = refererHeaders(poster)
         }
     }
 
