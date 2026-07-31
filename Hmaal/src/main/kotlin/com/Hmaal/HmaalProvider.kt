@@ -106,7 +106,6 @@ class HmaalProvider : MainAPI() {
 
     /**
      * Extracts playable video URLs and iframe embeds from document.
-     * Updated to check vid-src and xplayer container elements.
      */
     private fun Document.extractVideoSources(): List<String> {
         val urls = linkedSetOf<String>()
@@ -327,7 +326,7 @@ class HmaalProvider : MainAPI() {
         return found
     }
 
-    private fun emitVideoLink(
+    private suspend fun emitVideoLink(
         videoUrl: String,
         pageUrl: String,
         callback: (ExtractorLink) -> Unit
