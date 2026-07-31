@@ -18,15 +18,22 @@ class HmaalProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.NSFW)
 
-    // All three sites share (almost) the exact same theme/markup structure,
-    // so a page path from one mirror usually resolves on the others too.
+    // All mirror sites share the exact same theme/markup structure.
     private val mirrorDomains = listOf(
         "https://hmaal.tv",
         "https://hdmaal.io",
-        "https://hotmaal.xxx"
+        "https://hotmaal.xxx",
+        "https://ottdude.com",
+        "https://serieswala.com",
+        "https://zmaal.net",
+        "https://ymaal.co",
+        "https://hotott.net",
+        "https://botmaal.io",
+        "https://maaltv.io",
+        "https://newmaal.com"
     )
 
-    // Homepage only ever pulls from the primary domain (hmaal.tv), per spec.
+    // Homepage only pulls from the primary domain (hmaal.tv).
     override val mainPage = mainPageOf(
         "$mainUrl/ott/ullu/" to "Ullu",
         "$mainUrl/ott/atrangii/" to "Atrangii",
@@ -182,7 +189,7 @@ class HmaalProvider : MainAPI() {
         )
     }
 
-    // ---------- search (all three mirrors, deduplicated) ----------
+    // ---------- search (all mirrors, deduplicated) ----------
 
     override suspend fun search(query: String): List<SearchResponse> {
         val results = mutableListOf<SearchResponse>()
