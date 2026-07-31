@@ -60,6 +60,22 @@ class HmaalProvider : MainAPI() {
         return fixUrl(url, domain)
     }
 
+    /**
+     * Reroutes slow/throttled mirror image domains (e.g. hotmaal.xxx) to the primary domain
+     * (hmaal.tv) CDN, preventing timeouts and grey placeholders in Cloudstream.
+     */
+    private fun normalizeImageUrl(url: String?): String? {
+        if (url.isNullOrBlank()) return null
+        var formatted = url
+        for (mirror in mirrorDomains) {
+            if (formatted.startsWith(mirror)) {
+                formatted = formatted.replace(mirror, mainUrl)
+                break
+            }
+        }
+        return formatted
+    }
+
     /** Converts full URL to normalized path slug (e.g. "/ott/ullu/movie/") for mirror-agnostic cache keys. */
     private fun getPath(url: String): String {
         return try {
@@ -83,7 +99,11 @@ class HmaalProvider : MainAPI() {
     /** Headers that let Coil load images from CDNs that reject requests with no/foreign Referer. */
     private fun refererHeaders(url: String?): Map<String, String> {
         val origin = if (!url.isNullOrBlank()) originOf(url) else mainUrl
-        return browserHeaders + mapOf("Referer" to "$origin/")
+        return mapOf(
+            "User-Agent" to desktopUserAgent,
+            "Referer" to "$origin/",
+            "Accept" to "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+        )
     }
 
     /**
@@ -107,11 +127,18 @@ class HmaalProvider : MainAPI() {
         return urls.toList()
     }
 
-    /** Pulls the url out of `background-image: url('...')` in a style attribute. */
+    /** Pulls the url out of `background-image: url('...')` or lazy data attributes. */
     private fun Element.extractBackgroundImage(): String? {
-        val style = this.attr("style")
-        val match = Regex("""url\((['"]?)(.*?)\1\)""").find(style)
-        return match?.groupValues?.get(2)?.trim()?.ifBlank { null }
+        val style = this.attr("style").ifBlank { this.attr("data-style") }
+        val match = Regex("""url\(\s*['"]?(.*?)['"]?\s*\)""", RegexOption.IGNORE_CASE).find(style)
+        val url = match?.groupValues?.get(1)?.trim()?.ifBlank { null }
+        if (url != null) return url
+
+        return this.attr("data-src").ifBlank {
+            this.attr("data-bg").ifBlank {
+                this.attr("data-background")
+            }
+        }.trim().ifBlank { null }
     }
 
     /** Extracts image poster from element via background-style or fallback img tags. */
@@ -122,7 +149,8 @@ class HmaalProvider : MainAPI() {
         } else {
             bg
         }
-        return src?.trim()?.ifBlank { null }?.let { fixUrlNull(it, domain) }
+        val rawUrl = src?.trim()?.ifBlank { null }?.let { fixUrlNull(it, domain) }
+        return normalizeImageUrl(rawUrl)
     }
 
     /**
@@ -246,7 +274,8 @@ class HmaalProvider : MainAPI() {
             ?: "Unknown"
 
         val poster = cachedPoster
-            ?: document.selectFirst("meta[property=og:image]")?.attr("content")?.let { fixUrlNull(it, currentDomain) }
+            ?: document.selectFirst("meta[property=og:image]")?.attr("content")
+                ?.let { fixUrlNull(it, currentDomain) }?.let { normalizeImageUrl(it) }
             ?: document.selectFirst("a.video")?.extractPoster(currentDomain)
 
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
