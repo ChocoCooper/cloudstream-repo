@@ -1,11 +1,11 @@
-package com.Hmaal
+package com.hmaal
 
+import android.content.Context
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
-import android.content.Context
 
 @CloudstreamPlugin
-class HmaalProvider : Plugin() {
+class HmaalPlugin : Plugin() {
     override fun load(context: Context) {
         registerMainAPI(Hmaal())
     }
