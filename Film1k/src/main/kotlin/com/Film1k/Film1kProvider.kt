@@ -164,7 +164,7 @@ class Film1kProvider : MainAPI() {
                     }
                     builder.append(sibling.text()).append(" ")
                 } else if (sibling is TextNode) {
-                    builder.append(sibling.text).append(" ")
+                    builder.append(sibling.text()).append(" ")
                 }
                 sibling = sibling.nextSibling()
             }
