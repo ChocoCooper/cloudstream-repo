@@ -3,16 +3,15 @@ package com.film1k
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Document
-import org.jsoup.nodes.Element
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 
-class Film1kPlugin : MainAPI() {
+class Film1kProvider : MainAPI() {
     override var mainUrl = "https://www.film1k.com"
     override var name = "Film1k"
     override var lang = "en"
     override val hasMainPage = true
-    override val supportedTypes = setOf(TvType.NSFW)
+    override val supportedTypes = setOf(TvType.NSFW, TvType.Movie)
 
     override val mainPage = mainPageOf(
         "$mainUrl/" to "Home",
@@ -20,7 +19,7 @@ class Film1kPlugin : MainAPI() {
         "$mainUrl/tag/1990s" to "1990s Movies"
     )
 
-    override async fun getMainPage(
+    override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
@@ -103,7 +102,7 @@ class Film1kPlugin : MainAPI() {
         }
     }
 
-    override async fun load(url: String): LoadResponse {
+    override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url).document
 
         // Image & Media Name extraction
@@ -136,7 +135,7 @@ class Film1kPlugin : MainAPI() {
         }
     }
 
-    override async fun loadLinks(
+    override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
@@ -168,8 +167,8 @@ class Film1kPlugin : MainAPI() {
             if (videoUrl.endsWith(".mp4") || videoUrl.contains(".m3u8")) {
                 callback.invoke(
                     ExtractorLink(
-                        name = this.name,
                         source = this.name,
+                        name = this.name,
                         url = videoUrl,
                         referer = mainUrl,
                         quality = Qualities.Unknown.value,
