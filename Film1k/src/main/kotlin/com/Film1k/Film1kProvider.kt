@@ -12,7 +12,7 @@ class Film1kPlugin : MainAPI() {
     override var name = "Film1k"
     override var lang = "en"
     override val hasMainPage = true
-    override val supportedTypes = setOf(TvType.Movie)
+    override val supportedTypes = setOf(TvType.NSFW)
 
     override val mainPage = mainPageOf(
         "$mainUrl/" to "Home",
