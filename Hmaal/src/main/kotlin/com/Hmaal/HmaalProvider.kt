@@ -85,7 +85,7 @@ class HmaalProvider : MainAPI() {
         if (title.isNullOrBlank()) return "Unknown"
         var clean = title.trim()
 
-        // Unescape any HTML entities (&amp;, &quot;, etc.)
+        // Unescape any HTML entities (&amp;, &quot;, &#8211;, etc.)
         clean = org.jsoup.parser.Parser.unescapeEntities(clean, false)
 
         // 1. Remove leading "Watch "
@@ -104,7 +104,7 @@ class HmaalProvider : MainAPI() {
         clean = clean.replace(Regex("""(?i)\s*»\s*.*$"""), "")
         clean = clean.replace(Regex("""(?i)\s*>\s*.*$"""), "")
 
-        // 5. Trim trailing symbols/punctuation
+        // 5. Trim trailing symbols/punctuation and normalize whitespace
         clean = clean.trim(' ', '-', '|', ':', '»', '>', '–', '—', '.').trim()
         clean = clean.replace(Regex("""\s+"""), " ")
 
