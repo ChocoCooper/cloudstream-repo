@@ -69,7 +69,8 @@ class HmaalProvider : MainAPI() {
 
         return newHomePageResponse(
             HomePageList(request.name, items),
-            hasNext = items.isNotEmpty()
+            hasNext = items.isNotEmpty(),
+            isHorizontalImages = true
         )
     }
 
