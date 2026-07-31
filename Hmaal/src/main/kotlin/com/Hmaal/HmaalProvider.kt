@@ -65,13 +65,33 @@ class HmaalProvider : MainAPI() {
         return fixUrl(url, domain)
     }
 
-    /** Cleans site branding suffix / prefix from media titles */
+    /**
+     * Thoroughly scrubs prefixes (e.g. "Watch "), keywords (e.g. "Web Series"),
+     * and site suffixes (e.g. "» HotOTT", "| BotMaal") to return clean titles.
+     */
     private fun cleanTitle(title: String?): String {
         if (title.isNullOrBlank()) return "Unknown"
-        return title
-            .replace(Regex("""(?i)\s*[-|–—:]\s*(botmaal|hotott|ottdude|serieswala|maaltv|ymaal|zmaal|hdmaal|hotmaal|ottzone|newmaal|hmaal)(\.\w+)?.*$"""), "")
-            .replace(Regex("""(?i)\b(botmaal|hotott|ottdude|serieswala|maaltv|ymaal|zmaal|hdmaal|hotmaal|ottzone|newmaal|hmaal)\.(com|io|net|tv|xxx|co)\b"""), "")
-            .trim()
+        var clean = title.trim()
+
+        // 1. Remove leading "Watch "
+        clean = clean.replace(Regex("""(?i)^Watch\s+"""), "")
+
+        // 2. Remove common extra tags like "Web Series", "Full Movie", etc.
+        clean = clean.replace(Regex("""(?i)\s*(?:web\s*series|online|full\s*movie|hd|all\s*episodes?)\b"""), "")
+
+        // 3. Remove trailing site branding delimiter and names (e.g. » HotOTT, - Botmaal, | OTTDude)
+        clean = clean.replace(
+            Regex("""(?i)\s*[-|–—:»>]\s*(?:watch|hotott|botmaal|ottdude|serieswala|maaltv|ymaal|zmaal|hdmaal|hotmaal|ottzone|newmaal|hmaal)(?:\.\w+)?.*$"""),
+            ""
+        )
+
+        // 4. Fallback: drop any remaining trailing "» <anything>"
+        clean = clean.replace(Regex("""(?i)\s*»\s*.*$"""), "")
+
+        // 5. Trim trailing symbols/punctuation
+        clean = clean.trim(' ', '-', '|', ':', '»', '>', '–', '—').trim()
+
+        return if (clean.isNotBlank()) clean else title.trim()
     }
 
     /** Converts page URL to mirror site name (e.g. "ottdude", "serieswala", "botmaal") */
@@ -254,9 +274,8 @@ class HmaalProvider : MainAPI() {
 
         val document = app.get(url, headers = browserHeaders).document
 
-        val rawTitle = document.selectFirst("meta[property=og:title]")?.attr("content")
-            ?.trim()?.ifBlank { null }
-            ?: document.selectFirst("h1.page-title, h1.title, h1")?.text()?.trim()?.ifBlank { null }
+        val rawTitle = document.selectFirst("h1.page-title, h1.title, h1")?.text()?.trim()?.ifBlank { null }
+            ?: document.selectFirst("meta[property=og:title]")?.attr("content")?.trim()?.ifBlank { null }
             ?: document.selectFirst("title")?.text()?.trim()
             ?: "Unknown"
 
@@ -364,12 +383,16 @@ class HmaalProvider : MainAPI() {
                 url = videoUrl,
                 type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
             ) {
-                this.referer = pageUrl
+                this.referer = "$pageOrigin/"
                 this.quality = Qualities.Unknown.value
                 this.headers = mapOf(
                     "User-Agent" to desktopUserAgent,
                     "Referer" to "$pageOrigin/",
-                    "Origin" to pageOrigin
+                    "Accept" to "*/*",
+                    "Accept-Language" to "en-US",
+                    "Sec-Fetch-Dest" to "video",
+                    "Sec-Fetch-Mode" to "no-cors",
+                    "Sec-Fetch-Site" to "cross-site"
                 )
             }
         )
