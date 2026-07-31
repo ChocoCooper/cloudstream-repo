@@ -28,11 +28,10 @@ class HmaalProvider : MainAPI() {
         "https://ottzone.net",
         "https://hotott.net",
         "https://botmaal.io",
-        "https://maaltv.io",
-        "https://newmaal.com"
+        "https://maaltv.io"
     )
 
-    // Homepage only pulls from the primary domain (hmaal.tv).
+    // Homepage pulls from primary domain (hotott.net)
     override val mainPage = mainPageOf(
         "$mainUrl/ott/ullu/" to "Ullu",
         "$mainUrl/ott/atrangii/" to "Atrangii",
@@ -220,32 +219,42 @@ class HmaalProvider : MainAPI() {
 
         val document = app.get(url, headers = browserHeaders).document
 
+        // Check for taxonomy series link (`#primary > div.taxonomy-meta > div.series-list > a`)
         val seriesLink = document.selectFirst("#primary > div.taxonomy-meta > div.series-list > a")
 
-        if (seriesLink != null) {
-            val seriesName = seriesLink.text().trim().ifBlank { "Unknown Series" }
+        val targetDoc = if (seriesLink != null) {
             val seriesUrl = fixUrl(seriesLink.attr("href"), currentDomain)
-            val seriesDoc = app.get(seriesUrl, headers = browserHeaders).document
+            app.get(seriesUrl, headers = browserHeaders).document
+        } else {
+            document
+        }
 
-            val episodes = seriesDoc.select("#primary > div > a").mapNotNull { el ->
-                val title = el.attr("title").ifBlank { el.text() }.trim()
-                if (title.isBlank()) return@mapNotNull null
-                val epHref = fixUrlNull(el.attr("href"), currentDomain) ?: return@mapNotNull null
-                val epImage = el.extractPoster(currentDomain)
-                val epNum = parseEpisodeNumber(title)
+        val seriesName = seriesLink?.text()?.trim()?.ifBlank { null }
+            ?: targetDoc.selectFirst("#primary > div.taxonomy-meta > div.series-list > a")?.text()?.trim()?.ifBlank { null }
+            ?: targetDoc.selectFirst("h1.page-title, h1.title, h1")?.text()?.trim()?.ifBlank { null }
+            ?: "Unknown Series"
 
-                if (epImage != null) {
-                    posterCache[getPath(epHref)] = epImage
-                }
+        val episodes = targetDoc.select("#primary > div > a").mapNotNull { el ->
+            val title = el.attr("title").ifBlank { el.text() }.trim()
+            if (title.isBlank()) return@mapNotNull null
+            val epHref = fixUrlNull(el.attr("href"), currentDomain) ?: return@mapNotNull null
+            val epImage = el.extractPoster(currentDomain)
+            val epNum = parseEpisodeNumber(title)
 
-                newEpisode(epHref) {
-                    this.name = title
-                    this.episode = epNum
-                    this.posterUrl = epImage
-                }
-            }.sortedBy { it.episode ?: Int.MAX_VALUE }
+            if (epImage != null) {
+                posterCache[getPath(epHref)] = epImage
+            }
 
+            newEpisode(epHref) {
+                this.name = title
+                this.episode = epNum
+                this.posterUrl = epImage
+            }
+        }.sortedBy { it.episode ?: Int.MAX_VALUE }
+
+        if (episodes.isNotEmpty() && (seriesLink != null || episodes.size > 1)) {
             val poster = cachedPoster
+                ?: targetDoc.selectFirst("a.video")?.extractPoster(currentDomain)
                 ?: document.selectFirst("a.video")?.extractPoster(currentDomain)
                 ?: episodes.firstOrNull()?.posterUrl
 
