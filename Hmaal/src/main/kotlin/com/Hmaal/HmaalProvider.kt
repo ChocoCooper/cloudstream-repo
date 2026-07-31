@@ -1,8 +1,7 @@
 package com.hmaal
 
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -69,9 +68,8 @@ class HmaalProvider : MainAPI() {
 
         val items = document.select("#primary > div > a").mapNotNull { it.toSearchResult() }
 
-        return HomePageResponse(
+        return newHomePageResponse(
             list = listOf(HomePageList(request.name, items)),
-            isHorizontalImages = true,
             hasNext = items.isNotEmpty()
         )
     }
@@ -186,14 +184,15 @@ class HmaalProvider : MainAPI() {
                             val videoUrl = source.attr("src")
                             if (videoUrl.isNotBlank()) {
                                 callback(
-                                    ExtractorLink(
+                                    newExtractorLink(
                                         source = this@HmaalProvider.name,
                                         name = "${this@HmaalProvider.name} - $host",
                                         url = fixUrl(videoUrl),
-                                        referer = pageUrl,
-                                        quality = Qualities.Unknown.value,
-                                        isM3u8 = videoUrl.contains(".m3u8")
-                                    )
+                                        type = if (videoUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                    ) {
+                                        this.referer = pageUrl
+                                        this.quality = Qualities.Unknown.value
+                                    }
                                 )
                                 found = true
                             }
