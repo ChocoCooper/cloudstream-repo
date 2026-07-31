@@ -2,8 +2,10 @@ package com.hmaal
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import org.jsoup.nodes.Element
 import java.net.URI
 
@@ -67,10 +69,10 @@ class HmaalProvider : MainAPI() {
 
         val items = document.select("#primary > div > a").mapNotNull { it.toSearchResult() }
 
-        return newHomePageResponse(
-            HomePageList(request.name, items),
-            hasNext = items.isNotEmpty(),
-            isHorizontalImages = true
+        return HomePageResponse(
+            list = listOf(HomePageList(request.name, items)),
+            isHorizontalImages = true,
+            hasNext = items.isNotEmpty()
         )
     }
 
@@ -79,14 +81,18 @@ class HmaalProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         val results = mutableListOf<SearchResponse>()
 
-        mirrorDomains.apmap { domain ->
-            try {
-                val doc = app.get("$domain/?s=$query").document
-                val items = doc.select("#primary > div > a").mapNotNull { it.toSearchResult() }
-                synchronized(results) { results.addAll(items) }
-            } catch (e: Exception) {
-                // mirror unreachable / no results on this domain, skip it
-            }
+        coroutineScope {
+            mirrorDomains.map { domain ->
+                async {
+                    try {
+                        val doc = app.get("$domain/?s=$query").document
+                        val items = doc.select("#primary > div > a").mapNotNull { it.toSearchResult() }
+                        synchronized(results) { results.addAll(items) }
+                    } catch (e: Exception) {
+                        // mirror unreachable / no results on this domain, skip it
+                    }
+                }
+            }.awaitAll()
         }
 
         // Dedupe by exact media name (case-insensitive, trimmed) — keeps first hit found.
@@ -166,34 +172,37 @@ class HmaalProvider : MainAPI() {
             listOf(data)
         }
 
-        candidateUrls.apmap { pageUrl ->
-            try {
-                val doc = app.get(pageUrl).document
-                val sources = doc.select("#my-video > source")
-                if (sources.isEmpty()) return@apmap // e.g. "oops page not found" mirror
+        coroutineScope {
+            candidateUrls.map { pageUrl ->
+                async {
+                    try {
+                        val doc = app.get(pageUrl).document
+                        val sources = doc.select("#my-video > source")
+                        if (sources.isEmpty()) return@async // e.g. "oops page not found" mirror
 
-                val host = URI(pageUrl).host ?: pageUrl
+                        val host = URI(pageUrl).host ?: pageUrl
 
-                sources.forEach { source ->
-                    val videoUrl = source.attr("src")
-                    if (videoUrl.isNotBlank()) {
-                        callback(
-                            newExtractorLink(
-                                source = this.name,
-                                name = "${this.name} - $host",
-                                url = fixUrl(videoUrl),
-                                type = ExtractorLinkType.VIDEO
-                            ) {
-                                this.referer = pageUrl
-                                this.quality = Qualities.Unknown.value
+                        sources.forEach { source ->
+                            val videoUrl = source.attr("src")
+                            if (videoUrl.isNotBlank()) {
+                                callback(
+                                    ExtractorLink(
+                                        source = this@HmaalProvider.name,
+                                        name = "${this@HmaalProvider.name} - $host",
+                                        url = fixUrl(videoUrl),
+                                        referer = pageUrl,
+                                        quality = Qualities.Unknown.value,
+                                        isM3u8 = videoUrl.contains(".m3u8")
+                                    )
+                                )
+                                found = true
                             }
-                        )
-                        found = true
+                        }
+                    } catch (e: Exception) {
+                        // dead mirror / not found for this specific media, skip and keep trying others
                     }
                 }
-            } catch (e: Exception) {
-                // dead mirror / not found for this specific media, skip and keep trying others
-            }
+            }.awaitAll()
         }
 
         return found
