@@ -5,6 +5,7 @@ import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URI
 
@@ -35,6 +36,16 @@ class HmaalProvider : MainAPI() {
 
     // ---------- helpers ----------
 
+    // A bare (no User-Agent) request is a dead giveaway for a bot/scraper and gets blocked or
+    // served a stripped-down page by these WordPress theme sites. Send this on every request.
+    private val desktopUserAgent =
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
+    private val browserHeaders = mapOf(
+        "User-Agent" to desktopUserAgent,
+        "Accept-Language" to "en-US,en;q=0.9"
+    )
+
     /** scheme://host for a given absolute URL, used as the Referer for hotlink-protected images. */
     private fun originOf(url: String): String {
         return try {
@@ -48,10 +59,28 @@ class HmaalProvider : MainAPI() {
     /** Headers that let Coil load images from CDNs that reject requests with no/foreign Referer. */
     private fun refererHeaders(domain: String): Map<String, String> {
         val origin = if (domain.startsWith("http")) domain else originOf(domain)
-        return mapOf(
-            "Referer" to "$origin/",
-            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        )
+        return browserHeaders + mapOf("Referer" to "$origin/")
+    }
+
+    /**
+     * Looks for a playable video URL in several possible spots, since these theme sites don't
+     * always keep the stream on `#my-video > source src=` — some lazy-load it into `data-src`,
+     * some put it directly on the `<video>` tag with no child `<source>` at all.
+     */
+    private fun Document.extractVideoSources(): List<String> {
+        val urls = linkedSetOf<String>()
+
+        this.select("#my-video source, video#my-video source, video source").forEach { el ->
+            val src = el.attr("src").ifBlank { el.attr("data-src") }.trim()
+            if (src.isNotBlank()) urls.add(src)
+        }
+
+        this.select("#my-video, video#my-video, video").forEach { el ->
+            val src = el.attr("src").ifBlank { el.attr("data-src") }.trim()
+            if (src.isNotBlank()) urls.add(src)
+        }
+
+        return urls.toList()
     }
 
     /** Pulls the url out of `background-image: url('...')` in a style attribute. */
@@ -94,7 +123,7 @@ class HmaalProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = if (page <= 1) request.data else "${request.data.trimEnd('/')}/page/$page/"
-        val document = app.get(url).document
+        val document = app.get(url, headers = browserHeaders).document
 
         val items = document.select("#primary > div > a").mapNotNull { it.toSearchResult(mainUrl) }
 
@@ -113,7 +142,7 @@ class HmaalProvider : MainAPI() {
             mirrorDomains.map { domain ->
                 async {
                     try {
-                        val doc = app.get("$domain/?s=$query").document
+                        val doc = app.get("$domain/?s=$query", headers = browserHeaders).document
                         val items = doc.select("#primary > div > a").mapNotNull { it.toSearchResult(domain) }
                         synchronized(results) { results.addAll(items) }
                     } catch (e: Exception) {
@@ -130,14 +159,14 @@ class HmaalProvider : MainAPI() {
     // ---------- load (series episode list OR single movie/episode) ----------
 
     override suspend fun load(url: String): LoadResponse {
-        val document = app.get(url).document
+        val document = app.get(url, headers = browserHeaders).document
 
         val seriesLink = document.selectFirst("#primary > div.taxonomy-meta > div.series-list > a")
 
         if (seriesLink != null) {
             val seriesName = seriesLink.text().trim().ifBlank { "Unknown Series" }
             val seriesUrl = fixUrl(seriesLink.attr("href"))
-            val seriesDoc = app.get(seriesUrl).document
+            val seriesDoc = app.get(seriesUrl, headers = browserHeaders).document
 
             val episodes = seriesDoc.select("#primary > div > a").mapNotNull { el ->
                 val title = el.attr("title").ifBlank { el.text() }.trim()
@@ -206,28 +235,27 @@ class HmaalProvider : MainAPI() {
             candidateUrls.map { pageUrl ->
                 async {
                     try {
-                        val doc = app.get(pageUrl).document
-                        val sources = doc.select("#my-video > source")
-                        if (sources.isEmpty()) return@async // e.g. "oops page not found" mirror
+                        val doc = app.get(pageUrl, headers = browserHeaders).document
+                        val videoUrls = doc.extractVideoSources()
+                        if (videoUrls.isEmpty()) return@async // e.g. "oops page not found" mirror
 
                         val host = URI(pageUrl).host ?: pageUrl
 
-                        sources.forEach { source ->
-                            val videoUrl = source.attr("src")
-                            if (videoUrl.isNotBlank()) {
-                                callback(
-                                    newExtractorLink(
-                                        source = this@HmaalProvider.name,
-                                        name = "${this@HmaalProvider.name} - $host",
-                                        url = fixUrl(videoUrl),
-                                        type = if (videoUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                    ) {
-                                        this.referer = pageUrl
-                                        this.quality = Qualities.Unknown.value
-                                    }
-                                )
-                                found = true
-                            }
+                        videoUrls.forEach { rawUrl ->
+                            val videoUrl = fixUrl(rawUrl)
+                            callback(
+                                newExtractorLink(
+                                    source = this@HmaalProvider.name,
+                                    name = "${this@HmaalProvider.name} - $host",
+                                    url = videoUrl,
+                                    type = if (videoUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                ) {
+                                    this.referer = pageUrl
+                                    this.quality = Qualities.Unknown.value
+                                    this.headers = mapOf("User-Agent" to desktopUserAgent)
+                                }
+                            )
+                            found = true
                         }
                     } catch (e: Exception) {
                         // dead mirror / not found for this specific media, skip and keep trying others
