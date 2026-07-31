@@ -1,177 +1,147 @@
-package com.Hmaal
+package com.hmaal
 
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.*
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
+import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
+import com.lagradost.cloudstream3.utils.Qualities
 import org.jsoup.nodes.Element
+import java.net.URI
 
-class Hmaal : MainAPI() {
-    override var mainUrl              = "https://hmaal.tv"
-    override var name                 = "Hmaal"
-    override val hasMainPage          = true
-    override var lang                 = "en"
-    override val supportedTypes       = setOf(TvType.NSFW)
-    override val vpnStatus            = VPNStatus.MightBeNeeded
+class HmaalProvider : MainAPI() {
+    override var mainUrl = "https://hmaal.tv"
+    override var name = "Hmaal"
+    override val hasMainPage = true
+    override var lang = "hi"
+    override val hasDownloadSupport = true
+    override val supportedTypes = setOf(TvType.NSFW)
 
-    private val USER_AGENT = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
-    private val requestHeaders = mapOf("User-Agent" to USER_AGENT)
-
-    override val mainPage = mainPageOf(
-        "ott/ullu/" to "Ullu",
-        "ott/atrangii/" to "Atrangii",
-        "ott/primeplay/" to "Primeplay",
-        "ott/voovi/" to "Voovi",
-        "ott/jugnu/" to "Jugnu",
+    // All three sites share (almost) the exact same theme/markup structure,
+    // so a page path from one mirror usually resolves on the others too.
+    private val mirrorDomains = listOf(
+        "https://hmaal.tv",
+        "https://hdmaal.io",
+        "https://hotmaal.xxx"
     )
 
+    // Homepage only ever pulls from the primary domain (hmaal.tv), per spec.
+    override val mainPage = mainPageOf(
+        "$mainUrl/ott/ullu/" to "Ullu",
+        "$mainUrl/ott/atrangii/" to "Atrangii",
+        "$mainUrl/ott/primeplay/" to "PrimePlay",
+        "$mainUrl/ott/voovi/" to "Voovi",
+        "$mainUrl/ott/jugnu/" to "Jugnu"
+    )
+
+    // ---------- helpers ----------
+
+    /** Pulls the url out of `background-image: url('...')` in a style attribute. */
+    private fun Element.extractBackgroundImage(): String? {
+        val style = this.attr("style")
+        val match = Regex("""url\((['"]?)(.*?)\1\)""").find(style)
+        return match?.groupValues?.get(2)?.trim()?.ifBlank { null }
+    }
+
+    /** Grabs an integer episode number out of a title like "Series Episode 2". */
+    private fun parseEpisodeNumber(title: String): Int? {
+        val match = Regex("""episode\s*[-:]?\s*(\d+)""", RegexOption.IGNORE_CASE).find(title)
+            ?: Regex("""\bep\s*[-:]?\s*(\d+)""", RegexOption.IGNORE_CASE).find(title)
+        return match?.groupValues?.get(1)?.toIntOrNull()
+    }
+
+    /** Converts one `a.video` tile (homepage / search / series listing) into a SearchResponse. */
     private fun Element.toSearchResult(): SearchResponse? {
+        val title = this.attr("title").ifBlank { this.text() }.trim()
+        if (title.isBlank()) return null
         val href = fixUrlNull(this.attr("href")) ?: return null
-        val title = this.attr("title").ifEmpty { this.text() }.trim()
-        if (title.isEmpty()) return null
-
-        var posterUrl: String? = null
-        val styleAttr = this.attr("style")
-        if (styleAttr.contains("url(")) {
-            val match = Regex("""url\(['"]?(.*?)['"]?\)`""").find(styleAttr)
-            if (match != null) {
-                posterUrl = fixUrlNull(match.groupValues[1])
-            }
-        }
-        if (posterUrl == null) {
-            posterUrl = fixUrlNull(this.selectFirst("img")?.attr("src"))
-        }
-
+        val posterUrl = this.extractBackgroundImage()?.let { fixUrlNull(it) }
         return newMovieSearchResponse(title, href, TvType.NSFW) {
             this.posterUrl = posterUrl
         }
     }
 
-    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val path = request.data.trimEnd('/')
-        val url = if (page <= 1) "$mainUrl/$path/" else "$mainUrl/$path/page/$page/"
+    // ---------- homepage ----------
 
-        val home = try {
-            val document = app.get(url, headers = requestHeaders, timeout = 30L).document
-            document.select("#primary > div > a.video, #primary > div > a").mapNotNull { it.toSearchResult() }
-        } catch (e: Exception) {
-            emptyList()
-        }
+    override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
+        val url = if (page <= 1) request.data else "${request.data.trimEnd('/')}/page/$page/"
+        val document = app.get(url).document
+
+        val items = document.select("#primary > div > a").mapNotNull { it.toSearchResult() }
 
         return newHomePageResponse(
-            list = HomePageList(
-                name               = request.name,
-                list               = home,
-                isHorizontalImages = true
-            ),
-            hasNext = home.isNotEmpty()
+            HomePageList(request.name, items),
+            hasNext = items.isNotEmpty()
         )
     }
+
+    // ---------- search (all three mirrors, deduplicated) ----------
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val searchDomains = listOf(
-            "https://hmaal.tv",
-            "https://hdmaal.io",
-            "https://hotmaal.xxx"
-        )
+        val results = mutableListOf<SearchResponse>()
 
-        val allResults = mutableListOf<SearchResponse>()
-        val seenTitles = mutableSetOf<String>()
-
-        coroutineScope {
-            val tasks = searchDomains.map { domain ->
-                async {
-                    try {
-                        val searchUrl = "$domain/?s=$query"
-                        val document = app.get(searchUrl, headers = requestHeaders, timeout = 30L).document
-                        document.select("#primary > div > a.video, #primary > div > a").mapNotNull { it.toSearchResult() }
-                    } catch (e: Exception) {
-                        emptyList()
-                    }
-                }
-            }
-            
-            tasks.awaitAll().forEach { list ->
-                for (item in list) {
-                    val normTitle = item.name.lowercase().trim()
-                    if (seenTitles.add(normTitle)) {
-                        allResults.add(item)
-                    }
-                }
+        mirrorDomains.apmap { domain ->
+            try {
+                val doc = app.get("$domain/?s=$query").document
+                val items = doc.select("#primary > div > a").mapNotNull { it.toSearchResult() }
+                synchronized(results) { results.addAll(items) }
+            } catch (e: Exception) {
+                // mirror unreachable / no results on this domain, skip it
             }
         }
 
-        return allResults
+        // Dedupe by exact media name (case-insensitive, trimmed) — keeps first hit found.
+        return results.distinctBy { it.name.trim().lowercase() }
     }
+
+    // ---------- load (series episode list OR single movie/episode) ----------
 
     override suspend fun load(url: String): LoadResponse {
-        val document = app.get(url, headers = requestHeaders, timeout = 30L).document
-        val pageTitle = document.selectFirst("meta[property=og:title]")?.attr("content")?.trim()
-            ?: document.title().trim().ifEmpty { "Unknown" }
+        val document = app.get(url).document
 
-        val poster = fixUrlNull(document.selectFirst("meta[property='og:image']")?.attr("content"))
-            ?: fixUrlNull(document.selectFirst("#primary > div > a.video")?.let { el ->
-                val style = el.attr("style")
-                Regex("""url\(['"]?(.*?)['"]?\)`""").find(style)?.groupValues?.get(1)
-            })
+        val seriesLink = document.selectFirst("#primary > div.taxonomy-meta > div.series-list > a")
 
-        val description = document.selectFirst("meta[property=og:description]")?.attr("content")?.trim()
-        val episodes = mutableListOf<Episode>()
+        if (seriesLink != null) {
+            val seriesName = seriesLink.text().trim().ifBlank { "Unknown Series" }
+            val seriesUrl = fixUrl(seriesLink.attr("href"))
+            val seriesDoc = app.get(seriesUrl).document
 
-        val seriesLinkElement = document.selectFirst("#primary > div.taxonomy-meta > div.series-list > a")
-        val seriesUrl = fixUrlNull(seriesLinkElement?.attr("href"))
-        val seriesName = seriesLinkElement?.text()?.trim() ?: pageTitle.substringBefore("Episode").trim()
+            val episodes = seriesDoc.select("#primary > div > a").mapNotNull { el ->
+                val title = el.attr("title").ifBlank { el.text() }.trim()
+                if (title.isBlank()) return@mapNotNull null
+                val epHref = fixUrlNull(el.attr("href")) ?: return@mapNotNull null
+                val epImage = el.extractBackgroundImage()?.let { fixUrlNull(it) }
+                val epNum = parseEpisodeNumber(title)
 
-        if (!seriesUrl.isNullOrEmpty()) {
-            try {
-                val seriesDoc = app.get(seriesUrl, headers = requestHeaders, timeout = 30L).document
-                val episodeElements = seriesDoc.select("#primary > div > a.video, #primary > div > a")
-
-                for (epElem in episodeElements) {
-                    val epHref = fixUrlNull(epElem.attr("href")) ?: continue
-                    val epTitleAttr = epElem.attr("title").ifEmpty { epElem.text() }.trim()
-
-                    val epNum = Regex("""Episode\s*(\d+)""", RegexOption.IGNORE_CASE).find(epTitleAttr)?.groupValues?.get(1)
-                        ?: epTitleAttr.takeLastWhile { it.isDigit() }.ifEmpty { null }
-
-                    val formattedName = if (epNum != null) {
-                        "$seriesName Episode $epNum"
-                    } else {
-                        epTitleAttr.ifEmpty { "Episode 1" }
-                    }
-
-                    var epPoster: String? = null
-                    val styleAttr = epElem.attr("style")
-                    if (styleAttr.contains("url(")) {
-                        val match = Regex("""url\(['"]?(.*?)['"]?\)`""").find(styleAttr)
-                        if (match != null) {
-                            epPoster = fixUrlNull(match.groupValues[1])
-                        }
-                    }
-
-                    episodes.add(newEpisode(epHref) {
-                        this.name = formattedName
-                        this.posterUrl = epPoster
-                    })
+                newEpisode(epHref) {
+                    this.name = title
+                    this.episode = epNum
+                    this.posterUrl = epImage
                 }
-            } catch (e: Exception) {
-                // Ignore series page errors and fall back to single item
+            }.sortedBy { it.episode ?: Int.MAX_VALUE }
+
+            val poster = document.selectFirst("a.video")?.extractBackgroundImage()
+                ?.let { fixUrlNull(it) } ?: episodes.firstOrNull()?.posterUrl
+
+            return newTvSeriesLoadResponse(seriesName, url, TvType.NSFW, episodes) {
+                this.posterUrl = poster
             }
         }
 
-        if (episodes.isEmpty()) {
-            episodes.add(newEpisode(url) {
-                this.name = pageTitle
-                this.posterUrl = poster
-            })
-        }
+        // No series list found -> treat as a standalone movie/episode page.
+        val title = document.selectFirst("meta[property=og:title]")?.attr("content")
+            ?.trim()?.ifBlank { null }
+            ?: document.selectFirst("title")?.text()?.trim()
+            ?: "Unknown"
 
-        return newTvSeriesLoadResponse(if (seriesName.isNotEmpty()) seriesName else pageTitle, url, TvType.TvSeries, episodes) {
+        val poster = document.selectFirst("meta[property=og:image]")?.attr("content")
+            ?.let { fixUrlNull(it) }
+            ?: document.selectFirst("a.video")?.extractBackgroundImage()?.let { fixUrlNull(it) }
+
+        return newMovieLoadResponse(title, url, TvType.NSFW, url) {
             this.posterUrl = poster
-            this.plot = description
         }
     }
+
+    // ---------- links (tries the same page path across ALL mirrors) ----------
 
     override suspend fun loadLinks(
         data: String,
@@ -179,77 +149,52 @@ class Hmaal : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val uri = try {
-            java.net.URI(data)
+        var found = false
+
+        // Extract path+query from whichever mirror the URL came from so we can
+        // rebuild it against every other mirror (they share the same slugs).
+        val path = try {
+            URI(data).let { (it.rawPath ?: "") + (it.rawQuery?.let { q -> "?$q" } ?: "") }
         } catch (e: Exception) {
             null
         }
 
-        val path = uri?.path ?: data.substringAfter("://").substringAfter("/")
-        val cleanPath = if (path.startsWith("/")) path else "/$path"
-
-        val targetDomains = listOf(
-            "https://hmaal.tv",
-            "https://hdmaal.io",
-            "https://hotmaal.xxx"
-        )
-
-        coroutineScope {
-            val tasks = targetDomains.map { domain ->
-                async {
-                    val fullUrl = "$domain$cleanPath"
-                    try {
-                        val response = app.get(fullUrl, headers = requestHeaders, timeout = 15L)
-                        if (response.code == 200) {
-                            val document = response.document
-                            val domainHost = domain.substringAfter("://")
-
-                            val videoSources = document.select("#my-video source[src], video source[src], source[src]")
-                            for (sourceElem in videoSources) {
-                                val videoUrl = fixUrlNull(sourceElem.attr("src"))
-                                if (!videoUrl.isNullOrEmpty()) {
-                                    val qualityLabel = when {
-                                        videoUrl.contains("1080") -> "1080p"
-                                        videoUrl.contains("720") -> "720p"
-                                        videoUrl.contains("480") -> "480p"
-                                        else -> "MP4"
-                                    }
-
-                                    callback.invoke(
-                                        newExtractorLink(
-                                            source = "Hmaal ($domainHost)",
-                                            name = "Hmaal $qualityLabel ($domainHost)",
-                                            url = videoUrl,
-                                            type = ExtractorLinkType.VIDEO
-                                        ) {
-                                            this.referer = "$domain/"
-                                            this.quality = when {
-                                                qualityLabel.contains("1080") -> Qualities.P1080.value
-                                                qualityLabel.contains("720") -> Qualities.P720.value
-                                                qualityLabel.contains("480") -> Qualities.P480.value
-                                                else -> Qualities.Unknown.value
-                                            }
-                                        }
-                                    )
-                                }
-                            }
-
-                            val iframes = document.select("iframe[src]")
-                            for (iframe in iframes) {
-                                val iframeUrl = fixUrlNull(iframe.attr("src"))
-                                if (!iframeUrl.isNullOrEmpty()) {
-                                    loadExtractor(iframeUrl, subtitleCallback, callback)
-                                }
-                            }
-                        }
-                    } catch (e: Exception) {
-                        // Silently handle 404 or connection failure for any individual mirror domain
-                    }
-                }
-            }
-            tasks.awaitAll()
+        val candidateUrls = if (!path.isNullOrBlank()) {
+            mirrorDomains.map { it.trimEnd('/') + path }.distinct()
+        } else {
+            listOf(data)
         }
 
-        return true
+        candidateUrls.apmap { pageUrl ->
+            try {
+                val doc = app.get(pageUrl).document
+                val sources = doc.select("#my-video > source")
+                if (sources.isEmpty()) return@apmap // e.g. "oops page not found" mirror
+
+                val host = URI(pageUrl).host ?: pageUrl
+
+                sources.forEach { source ->
+                    val videoUrl = source.attr("src")
+                    if (videoUrl.isNotBlank()) {
+                        callback(
+                            newExtractorLink(
+                                source = this.name,
+                                name = "${this.name} - $host",
+                                url = fixUrl(videoUrl),
+                                type = ExtractorLinkType.VIDEO
+                            ) {
+                                this.referer = pageUrl
+                                this.quality = Qualities.Unknown.value
+                            }
+                        )
+                        found = true
+                    }
+                }
+            } catch (e: Exception) {
+                // dead mirror / not found for this specific media, skip and keep trying others
+            }
+        }
+
+        return found
     }
 }
