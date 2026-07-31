@@ -1,5 +1,6 @@
 package com.Hmaal
 
+import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.async
@@ -18,6 +19,8 @@ class HmaalProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.NSFW)
 
+    private val TAG = "HmaalProvider"
+
     // All mirror sites share the exact same theme/markup structure.
     private val mirrorDomains = listOf(
         "https://hmaal.tv",
@@ -31,14 +34,11 @@ class HmaalProvider : MainAPI() {
         "https://maaltv.io"
     )
 
-    // Homepage pulls from primary domain (hotott.net)
-    override val mainPage = mainPageOf(
-        "$mainUrl/ott/ullu/" to "Ullu",
-        "$mainUrl/ott/atrangii/" to "Atrangii",
-        "$mainUrl/ott/primeplay/" to "PrimePlay",
-        "$mainUrl/ott/voovi/" to "Voovi",
-        "$mainUrl/ott/jugnu/" to "Jugnu"
-    )
+    // hotott.net has been observed serving stale/dead links from an old R2 bucket
+    // (pub-*.r2.dev) instead of the live video.maalcdn.com / cdn.pmaal.com CDN that
+    // every other mirror uses. We still scrape it (it's the primary domain and drives
+    // the main page/search), but we never trust its video links without validating them.
+    private val knownUnreliableCdnHosts = listOf("r2.dev")
 
     // Caches listing posters (homepage/search) keyed by path slug so load() reuses them.
     private val posterCache = ConcurrentHashMap<String, String>()
@@ -47,6 +47,10 @@ class HmaalProvider : MainAPI() {
 
     private val desktopUserAgent =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
+    // Matches the UA your working cURLs used for the actual CDN byte-range requests.
+    private val mobileUserAgent =
+        "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36"
 
     private val browserHeaders = mapOf(
         "User-Agent" to desktopUserAgent,
@@ -57,12 +61,10 @@ class HmaalProvider : MainAPI() {
     private fun sanitizeUrl(url: String): String {
         if (url.isBlank()) return url
         var cleaned = url.trim()
-        // Replace unencoded spaces in path while preserving valid URL structure
         cleaned = cleaned.replace(" ", "%20")
         return cleaned
     }
 
-    /** Domain-aware URL helpers that allow custom domain resolution */
     private fun fixUrl(url: String, domain: String): String {
         val trimmed = url.trim()
         val fullUrl = when {
@@ -78,40 +80,25 @@ class HmaalProvider : MainAPI() {
         return fixUrl(url, domain)
     }
 
-    /**
-     * Cleans prefixes ("Watch "), tags ("Web Series"), and site branding ("» HotOTT", "- Botmaal")
-     */
     private fun cleanTitle(title: String?): String {
         if (title.isNullOrBlank()) return "Unknown"
         var clean = title.trim()
 
-        // Unescape any HTML entities (&amp;, &quot;, &#8211;, etc.)
         clean = org.jsoup.parser.Parser.unescapeEntities(clean, false)
-
-        // 1. Remove leading "Watch "
         clean = clean.replace(Regex("""(?i)^Watch\s+"""), "")
-
-        // 2. Remove common tags
         clean = clean.replace(Regex("""(?i)\s*\b(web\s*series|online|full\s*movie|hd|all\s*episodes?|hindi)\b"""), "")
-
-        // 3. Remove trailing site branding delimiter and names (e.g. » HotOTT, - Botmaal, | OTTDude)
         clean = clean.replace(
             Regex("""(?i)\s*[-|–—:»>]\s*(?:watch|hotott|botmaal|ottdude|serieswala|maaltv|ymaal|zmaal|hdmaal|hotmaal|ottzone|newmaal|hmaal)(?:\.\w+)?.*$"""),
             ""
         )
-
-        // 4. Fallback: drop any remaining trailing "» <anything>" or "> <anything>"
         clean = clean.replace(Regex("""(?i)\s*»\s*.*$"""), "")
         clean = clean.replace(Regex("""(?i)\s*>\s*.*$"""), "")
-
-        // 5. Trim trailing symbols/punctuation and normalize whitespace
         clean = clean.trim(' ', '-', '|', ':', '»', '>', '–', '—', '.').trim()
         clean = clean.replace(Regex("""\s+"""), " ")
 
         return if (clean.isNotBlank()) clean else title.trim()
     }
 
-    /** Converts page URL to mirror site name (e.g. "hotott", "ottdude", "botmaal") */
     private fun getSiteName(pageUrl: String): String {
         return try {
             val host = URI(pageUrl).host?.removePrefix("www.") ?: ""
@@ -121,7 +108,6 @@ class HmaalProvider : MainAPI() {
         }
     }
 
-    /** Converts full URL to normalized path slug for mirror-agnostic cache keys. */
     private fun getPath(url: String): String {
         return try {
             val path = URI(url).rawPath ?: ""
@@ -131,7 +117,6 @@ class HmaalProvider : MainAPI() {
         }
     }
 
-    /** scheme://host for a given absolute URL, used as Referer. */
     private fun originOf(url: String): String {
         return try {
             val u = URI(url)
@@ -141,7 +126,6 @@ class HmaalProvider : MainAPI() {
         }
     }
 
-    /** Headers that let Coil load images from CDNs with hotlink protection. */
     private fun refererHeaders(url: String?): Map<String, String> {
         val origin = if (!url.isNullOrBlank()) originOf(url) else mainUrl
         return mapOf(
@@ -150,19 +134,11 @@ class HmaalProvider : MainAPI() {
         )
     }
 
-    /**
-     * Looks for video elements across various layout containers:
-     * - `#primary > div.videos > a` (hotott.net, botmaal.io)
-     * - `#primary > div > a` (ottdude.com, serieswala.com, maaltv.io)
-     */
     private fun Document.selectVideoElements(): List<Element> {
         val elements = this.select("#primary > div.videos > a")
         return if (elements.isNotEmpty()) elements else this.select("#primary > div > a")
     }
 
-    /**
-     * Extracts playable video URLs and iframe embeds from document.
-     */
     private fun Document.extractVideoSources(): List<String> {
         val urls = linkedSetOf<String>()
 
@@ -176,7 +152,6 @@ class HmaalProvider : MainAPI() {
             ".xplayer-lazy-source"
         )
 
-        // Parse custom video sources using vid-src and src
         this.select(videoSelectors.joinToString(", ")).forEach { el ->
             val src = el.attr("vid-src")
                 .ifBlank { el.attr("src") }
@@ -188,7 +163,6 @@ class HmaalProvider : MainAPI() {
             }
         }
 
-        // Iframe player embeds
         this.select("iframe").forEach { el ->
             val src = el.attr("src")
                 .ifBlank { el.attr("vid-src") }
@@ -203,7 +177,6 @@ class HmaalProvider : MainAPI() {
         return urls.toList()
     }
 
-    /** Pulls url out of background-image style or lazy data attributes. */
     private fun Element.extractBackgroundImage(): String? {
         val style = this.attr("style").ifBlank { this.attr("data-style") }
         val match = Regex("""url\(\s*['"]?(.*?)['"]?\s*\)""", RegexOption.IGNORE_CASE).find(style)
@@ -217,7 +190,6 @@ class HmaalProvider : MainAPI() {
         }.trim().ifBlank { null }
     }
 
-    /** Extracts image poster from element. */
     private fun Element.extractPoster(domain: String): String? {
         val bg = this.extractBackgroundImage()
         val src = if (bg.isNullOrBlank()) {
@@ -228,7 +200,6 @@ class HmaalProvider : MainAPI() {
         return src?.trim()?.ifBlank { null }?.let { fixUrlNull(it, domain) }
     }
 
-    /** Converts video tile to SearchResponse. */
     private fun Element.toSearchResult(domain: String): SearchResponse? {
         val rawTitle = this.attr("title").ifBlank { this.text() }.trim()
         val title = cleanTitle(rawTitle)
@@ -273,7 +244,7 @@ class HmaalProvider : MainAPI() {
                         val items = doc.selectVideoElements().mapNotNull { it.toSearchResult(domain) }
                         synchronized(results) { results.addAll(items) }
                     } catch (e: Exception) {
-                        // mirror unreachable / no results on this domain, skip it
+                        Log.w(TAG, "search: mirror $domain failed: ${e.message}")
                     }
                 }
             }.awaitAll()
@@ -334,24 +305,24 @@ class HmaalProvider : MainAPI() {
         coroutineScope {
             candidateUrls.map { pageUrl ->
                 async {
+                    val domainLabel = getSiteName(pageUrl)
                     try {
                         val currentDomain = originOf(pageUrl)
                         val doc = app.get(pageUrl, headers = browserHeaders).document
                         val rawSources = doc.extractVideoSources()
+                        Log.d(TAG, "loadLinks: [$domainLabel] page fetched, ${rawSources.size} raw source(s) found")
                         if (rawSources.isEmpty()) return@async
 
                         for (rawUrl in rawSources) {
                             val fullUrl = fixUrl(rawUrl, currentDomain)
                             if (!processedUrls.add(fullUrl)) continue
 
-                            // 1. Try standard Cloudstream extractors for embedded links
                             val extractorLoaded = loadExtractor(fullUrl, pageUrl, subtitleCallback, callback)
                             if (extractorLoaded) {
                                 found = true
                                 continue
                             }
 
-                            // 2. If it's an internal embed page or iframe, attempt to fetch inner video
                             if (fullUrl.contains("/embed/") || fullUrl.contains("/player/") || rawUrl.contains("iframe") || fullUrl.endsWith(".html") || fullUrl.endsWith(".php")) {
                                 try {
                                     val iframeDoc = app.get(fullUrl, headers = browserHeaders + mapOf("Referer" to pageUrl)).document
@@ -360,58 +331,108 @@ class HmaalProvider : MainAPI() {
                                         val innerFull = fixUrl(innerRaw, originOf(fullUrl))
                                         if (processedUrls.add(innerFull)) {
                                             if (!loadExtractor(innerFull, fullUrl, subtitleCallback, callback)) {
-                                                emitVideoLink(innerFull, pageUrl, callback)
-                                                found = true
+                                                if (emitVideoLinkIfAlive(innerFull, pageUrl, domainLabel, callback)) {
+                                                    found = true
+                                                }
                                             } else {
                                                 found = true
                                             }
                                         }
                                     }
-                                } catch (_: Exception) {}
+                                } catch (e: Exception) {
+                                    Log.w(TAG, "loadLinks: [$domainLabel] iframe fetch failed: ${e.message}")
+                                }
                             } else {
-                                // 3. Direct video file (.mp4, .m3u8, etc.)
-                                emitVideoLink(fullUrl, pageUrl, callback)
-                                found = true
+                                // Direct video file (.mp4, .m3u8, etc.) — validate before trusting it.
+                                if (emitVideoLinkIfAlive(fullUrl, pageUrl, domainLabel, callback)) {
+                                    found = true
+                                }
                             }
                         }
                     } catch (e: Exception) {
-                        // mirror unreachable / not found for this media, continue searching others
+                        Log.w(TAG, "loadLinks: [$domainLabel] mirror unreachable/skip: ${e.message}")
                     }
                 }
             }.awaitAll()
         }
 
+        Log.d(TAG, "loadLinks: finished, found=$found, validatedLinks=${processedUrls.size}")
         return found
     }
 
-    private suspend fun emitVideoLink(
+    /**
+     * Checks a candidate video URL with a cheap ranged GET before handing it to the player.
+     * This stops known-dead sources (e.g. hotott.net's stale r2.dev bucket links) from ever
+     * reaching ExoPlayer, so CloudStream falls back to whichever mirror actually has a live link
+     * instead of surfacing a single 404.
+     */
+    private suspend fun isLinkAlive(url: String, referer: String): Boolean {
+        return try {
+            val response = app.get(
+                url,
+                headers = mapOf(
+                    "User-Agent" to mobileUserAgent,
+                    "Referer" to referer,
+                    "Accept" to "*/*",
+                    "Range" to "bytes=0-1",
+                    "Sec-Fetch-Dest" to "video",
+                    "Sec-Fetch-Mode" to "no-cors",
+                    "Sec-Fetch-Site" to "cross-site"
+                )
+            )
+            // Accept 200 (full content), 206 (partial content / range honored)
+            val alive = response.code == 200 || response.code == 206
+            if (!alive) {
+                Log.w(TAG, "isLinkAlive: $url returned HTTP ${response.code}")
+            }
+            alive
+        } catch (e: Exception) {
+            Log.w(TAG, "isLinkAlive: $url failed validation: ${e.message}")
+            false
+        }
+    }
+
+    private suspend fun emitVideoLinkIfAlive(
         videoUrl: String,
         pageUrl: String,
+        domainLabel: String,
         callback: (ExtractorLink) -> Unit
-    ) {
-        val siteName = getSiteName(pageUrl)
-        val isM3u8 = videoUrl.contains(".m3u8", ignoreCase = true)
+    ): Boolean {
         val pageOrigin = originOf(pageUrl)
+        val refererValue = "$pageOrigin/"
+
+        // Known-dead CDN hosts (currently: hotott.net's stale R2 bucket) are skipped without
+        // even spending a network round trip, since they've been observed to always 404.
+        if (knownUnreliableCdnHosts.any { videoUrl.contains(it, ignoreCase = true) }) {
+            Log.w(TAG, "emitVideoLinkIfAlive: [$domainLabel] skipping known-unreliable CDN host: $videoUrl")
+            if (!isLinkAlive(videoUrl, refererValue)) return false
+        } else if (!isLinkAlive(videoUrl, refererValue)) {
+            return false
+        }
+
+        val isM3u8 = videoUrl.contains(".m3u8", ignoreCase = true)
 
         callback(
             newExtractorLink(
                 source = this@HmaalProvider.name,
-                name = "${this@HmaalProvider.name} - $siteName",
+                name = "${this@HmaalProvider.name} - $domainLabel",
                 url = videoUrl,
                 type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
             ) {
-                this.referer = "$pageOrigin/"
+                this.referer = refererValue
                 this.quality = Qualities.Unknown.value
                 this.headers = mapOf(
-                    "User-Agent" to desktopUserAgent,
-                    "Referer" to "$pageOrigin/",
+                    "User-Agent" to mobileUserAgent,
+                    "Referer" to refererValue,
                     "Accept" to "*/*",
                     "Accept-Language" to "en-US",
+                    "Range" to "bytes=0-",
                     "Sec-Fetch-Dest" to "video",
                     "Sec-Fetch-Mode" to "no-cors",
                     "Sec-Fetch-Site" to "cross-site"
                 )
             }
         )
+        return true
     }
 }
