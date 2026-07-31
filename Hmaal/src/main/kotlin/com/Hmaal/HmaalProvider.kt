@@ -60,22 +60,6 @@ class HmaalProvider : MainAPI() {
         return fixUrl(url, domain)
     }
 
-    /**
-     * Reroutes slow/throttled mirror image domains (e.g. hotmaal.xxx) to the primary domain
-     * (hmaal.tv) CDN, preventing timeouts and grey placeholders in Cloudstream.
-     */
-    private fun normalizeImageUrl(url: String?): String? {
-        val nonNullUrl = url?.takeIf { it.isNotBlank() } ?: return null
-        var formatted = nonNullUrl
-        for (mirror in mirrorDomains) {
-            if (formatted.startsWith(mirror)) {
-                formatted = formatted.replace(mirror, mainUrl)
-                break
-            }
-        }
-        return formatted
-    }
-
     /** Converts full URL to normalized path slug (e.g. "/ott/ullu/movie/") for mirror-agnostic cache keys. */
     private fun getPath(url: String): String {
         return try {
@@ -101,8 +85,7 @@ class HmaalProvider : MainAPI() {
         val origin = if (!url.isNullOrBlank()) originOf(url) else mainUrl
         return mapOf(
             "User-Agent" to desktopUserAgent,
-            "Referer" to "$origin/",
-            "Accept" to "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+            "Referer" to "$origin/"
         )
     }
 
@@ -149,8 +132,7 @@ class HmaalProvider : MainAPI() {
         } else {
             bg
         }
-        val rawUrl = src?.trim()?.ifBlank { null }?.let { fixUrlNull(it, domain) }
-        return normalizeImageUrl(rawUrl)
+        return src?.trim()?.ifBlank { null }?.let { fixUrlNull(it, domain) }
     }
 
     /**
@@ -274,8 +256,7 @@ class HmaalProvider : MainAPI() {
             ?: "Unknown"
 
         val poster = cachedPoster
-            ?: document.selectFirst("meta[property=og:image]")?.attr("content")
-                ?.let { fixUrlNull(it, currentDomain) }?.let { normalizeImageUrl(it) }
+            ?: document.selectFirst("meta[property=og:image]")?.attr("content")?.let { fixUrlNull(it, currentDomain) }
             ?: document.selectFirst("a.video")?.extractPoster(currentDomain)
 
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
