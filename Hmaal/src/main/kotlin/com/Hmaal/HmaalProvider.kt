@@ -65,8 +65,8 @@ class HmaalProvider : MainAPI() {
      * (hmaal.tv) CDN, preventing timeouts and grey placeholders in Cloudstream.
      */
     private fun normalizeImageUrl(url: String?): String? {
-        if (url.isNullOrBlank()) return null
-        var formatted = url
+        val nonNullUrl = url?.takeIf { it.isNotBlank() } ?: return null
+        var formatted = nonNullUrl
         for (mirror in mirrorDomains) {
             if (formatted.startsWith(mirror)) {
                 formatted = formatted.replace(mirror, mainUrl)
