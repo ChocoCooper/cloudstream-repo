@@ -1,4 +1,4 @@
-package com.hmaal
+package com.Hmaal
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
@@ -40,8 +40,6 @@ class HmaalProvider : MainAPI() {
 
     // ---------- helpers ----------
 
-    // A bare (no User-Agent) request is a dead giveaway for a bot/scraper and gets blocked or
-    // served a stripped-down page by these WordPress theme sites. Send this on every request.
     private val desktopUserAgent =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
@@ -49,6 +47,18 @@ class HmaalProvider : MainAPI() {
         "User-Agent" to desktopUserAgent,
         "Accept-Language" to "en-US,en;q=0.9"
     )
+
+    /** Domain-aware URL helpers that allow custom domain resolution */
+    private fun fixUrl(url: String, domain: String): String {
+        if (url.startsWith("http://") || url.startsWith("https://")) return url
+        if (url.startsWith("//")) return "https:$url"
+        return "${domain.trimEnd('/')}/${url.trimStart('/')}"
+    }
+
+    private fun fixUrlNull(url: String?, domain: String): String? {
+        if (url.isNullOrBlank()) return null
+        return fixUrl(url, domain)
+    }
 
     /** Converts full URL to normalized path slug (e.g. "/ott/ullu/movie/") for mirror-agnostic cache keys. */
     private fun getPath(url: String): String {
