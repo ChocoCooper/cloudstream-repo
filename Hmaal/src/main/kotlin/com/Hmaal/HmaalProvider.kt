@@ -25,7 +25,6 @@ class HmaalProvider : MainAPI() {
         "https://hotmaal.xxx",
         "https://ottdude.com",
         "https://serieswala.com",
-        "https://ottzone.net",
         "https://hotott.net",
         "https://botmaal.io",
         "https://maaltv.io"
@@ -92,6 +91,16 @@ class HmaalProvider : MainAPI() {
             "User-Agent" to desktopUserAgent,
             "Referer" to "$origin/"
         )
+    }
+
+    /**
+     * Looks for video links on both container variants:
+     * - `#primary > div.videos > a` (hotott.net, botmaal.io)
+     * - `#primary > div > a` (ottdude.com, serieswala.com, maaltv.io)
+     */
+    private fun Document.selectVideoElements(): List<Element> {
+        val elements = this.select("#primary > div.videos > a")
+        return if (elements.isNotEmpty()) elements else this.select("#primary > div > a")
     }
 
     /**
@@ -179,7 +188,7 @@ class HmaalProvider : MainAPI() {
         val url = if (page <= 1) request.data else "${request.data.trimEnd('/')}/page/$page/"
         val document = app.get(url, headers = browserHeaders).document
 
-        val items = document.select("#primary > div > a").mapNotNull { it.toSearchResult(mainUrl) }
+        val items = document.selectVideoElements().mapNotNull { it.toSearchResult(mainUrl) }
 
         return newHomePageResponse(
             list = listOf(HomePageList(request.name, items, isHorizontalImages = true)),
@@ -197,7 +206,7 @@ class HmaalProvider : MainAPI() {
                 async {
                     try {
                         val doc = app.get("$domain/?s=$query", headers = browserHeaders).document
-                        val items = doc.select("#primary > div > a").mapNotNull { it.toSearchResult(domain) }
+                        val items = doc.selectVideoElements().mapNotNull { it.toSearchResult(domain) }
                         synchronized(results) { results.addAll(items) }
                     } catch (e: Exception) {
                         // mirror unreachable / no results on this domain, skip it
@@ -234,7 +243,8 @@ class HmaalProvider : MainAPI() {
             ?: targetDoc.selectFirst("h1.page-title, h1.title, h1")?.text()?.trim()?.ifBlank { null }
             ?: "Unknown Series"
 
-        val episodes = targetDoc.select("#primary > div > a").mapNotNull { el ->
+        // Uses site-aware selection for episode listing tiles
+        val episodes = targetDoc.selectVideoElements().mapNotNull { el ->
             val title = el.attr("title").ifBlank { el.text() }.trim()
             if (title.isBlank()) return@mapNotNull null
             val epHref = fixUrlNull(el.attr("href"), currentDomain) ?: return@mapNotNull null
