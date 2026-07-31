@@ -166,14 +166,15 @@ class Film1kProvider : MainAPI() {
         for (videoUrl in extractedUrls) {
             if (videoUrl.endsWith(".mp4") || videoUrl.contains(".m3u8")) {
                 callback.invoke(
-                    ExtractorLink(
-                        source = this.name,
+                    newExtractorLink(
                         name = this.name,
+                        source = this.name,
                         url = videoUrl,
-                        referer = mainUrl,
-                        quality = Qualities.Unknown.value,
-                        isM3u8 = videoUrl.contains(".m3u8")
-                    )
+                        type = if (videoUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                    ) {
+                        this.referer = mainUrl
+                        this.quality = Qualities.Unknown.value
+                    }
                 )
             } else {
                 // If it's an embed provider link (e.g. film1k.xyz/e/...)
