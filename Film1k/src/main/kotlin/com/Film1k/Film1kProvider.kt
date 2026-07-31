@@ -39,18 +39,29 @@ class Film1kProvider : MainAPI() {
             top10Elements.map { aTag ->
                 async {
                     val mediaUrl = fixUrl(aTag.attr("href"))
-                    try {
-                        val mediaDoc = app.get(mediaUrl).document
-                        val imgEl = mediaDoc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div > img")
-                        val rawName = imgEl?.attr("alt") ?: aTag.text()
-                        val mediaName = rawName.replace("movie poster watch online", "", ignoreCase = true).trim()
-                        val posterUrl = imgEl?.attr("src")?.let { fixUrl(it) }
+                    val imgInTag = aTag.selectFirst("img")
 
+                    if (imgInTag != null) {
+                        val rawName = imgInTag.attr("alt").ifBlank { aTag.text() }
+                        val mediaName = rawName.replace("movie poster watch online", "", ignoreCase = true).trim()
+                        val posterUrl = imgInTag.attr("src").ifBlank { imgInTag.attr("data-src") }.let { fixUrl(it) }
                         newMovieSearchResponse(mediaName, mediaUrl, TvType.Movie) {
                             this.posterUrl = posterUrl
                         }
-                    } catch (e: Exception) {
-                        null
+                    } else {
+                        try {
+                            val mediaDoc = app.get(mediaUrl).document
+                            val imgEl = mediaDoc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div > img")
+                            val rawName = imgEl?.attr("alt") ?: aTag.text()
+                            val mediaName = rawName.replace("movie poster watch online", "", ignoreCase = true).trim()
+                            val posterUrl = imgEl?.attr("src")?.let { fixUrl(it) }
+
+                            newMovieSearchResponse(mediaName, mediaUrl, TvType.Movie) {
+                                this.posterUrl = posterUrl
+                            }
+                        } catch (e: Exception) {
+                            null
+                        }
                     }
                 }
             }.mapNotNull { it.await() }
@@ -103,7 +114,10 @@ class Film1kProvider : MainAPI() {
             val mediaUrl = fixUrl(aHeader.attr("href"))
             if (mediaUrl.isBlank()) return@mapNotNull null
 
-            val imgEl = article.selectFirst("header > a > figure > img") ?: article.selectFirst("img")
+            val imgEl = article.selectFirst("header > a > figure > img")
+                ?: article.selectFirst("figure > img")
+                ?: article.selectFirst("img")
+
             val rawTitle = article.selectFirst("header > a > h2")?.text()
                 ?: imgEl?.attr("alt")
                 ?: aHeader.text()
@@ -111,7 +125,9 @@ class Film1kProvider : MainAPI() {
             val mediaName = rawTitle.replace("movie poster watch online", "", ignoreCase = true).trim()
 
             val posterUrl = imgEl?.let {
-                val src = it.attr("src").ifBlank { it.attr("data-src") }.ifBlank { it.attr("data-lazy-src") }
+                val src = it.attr("src")
+                    .ifBlank { it.attr("data-src") }
+                    .ifBlank { it.attr("data-lazy-src") }
                 if (src.isNotBlank()) fixUrl(src) else null
             }
 
@@ -131,35 +147,48 @@ class Film1kProvider : MainAPI() {
         val posterUrl = imgEl?.attr("src")?.let { fixUrl(it) }
 
         // Description / Plot extraction
-        val plotStrong = doc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div strong:contains(Plot)")
+        var plot: String? = null
+
+        val plotStrong = doc.selectFirst("#Ez-Wp > div > div.Container > div > aside strong:contains(Plot)")
+            ?: doc.selectFirst("#Ez-Wp > div > div.Container > div > aside b:contains(Plot)")
             ?: doc.selectFirst("strong:contains(Plot)")
 
-        val plot = if (plotStrong != null) {
-            val plotBuilder = StringBuilder()
-            var currentNode = plotStrong.nextSibling()
-            while (currentNode != null) {
-                if (currentNode is Element) {
-                    if (currentNode.tagName() in listOf("strong", "h1", "h2", "h3", "h4", "p", "div")) {
+        if (plotStrong != null) {
+            val builder = StringBuilder()
+            var sibling = plotStrong.nextSibling()
+            while (sibling != null) {
+                if (sibling is Element) {
+                    val tagName = sibling.tagName().lowercase()
+                    if (tagName in listOf("h1", "h2", "h3", "h4", "p", "div", "strong", "b") && tagName != "a") {
                         break
                     }
-                    plotBuilder.append(currentNode.text())
-                } else if (currentNode is TextNode) {
-                    plotBuilder.append(currentNode.text())
+                    builder.append(sibling.text()).append(" ")
+                } else if (sibling is TextNode) {
+                    builder.append(sibling.text).append(" ")
                 }
-                currentNode = currentNode.nextSibling()
+                sibling = sibling.nextSibling()
             }
-            plotBuilder.toString()
-                .replace("^\\s*:\\s*".toRegex(), "")
-                .trim('"', ' ', '\n', '\r')
-        } else {
+            val extracted = builder.toString().trim()
+            if (extracted.isNotBlank()) {
+                plot = extracted
+            }
+        }
+
+        if (plot.isNullOrBlank()) {
             val asideDiv = doc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div")
             val h3Text = asideDiv?.selectFirst("h3")?.text() ?: ""
             var rawPlot = asideDiv?.text() ?: ""
             if (h3Text.isNotBlank()) {
                 rawPlot = rawPlot.replace(h3Text, "").trim()
             }
-            rawPlot.replace("^\\s*:\\s*".toRegex(), "").trim('"', ' ', '\n', '\r')
+            plot = rawPlot
         }
+
+        plot = plot
+            ?.replace("^\\s*:\\s*".toRegex(), "")
+            ?.replace("^\\s*\"|\"\\s*$".toRegex(), "")
+            ?.replace("\\s+".toRegex(), " ")
+            ?.trim()
 
         // Meta Tags extraction
         val tags1 = doc.select("#Ez-Wp > div > div.Container > div > aside > div > p:nth-child(4) > a").map { it.text() }
