@@ -106,13 +106,28 @@ class HmaalProvider : MainAPI() {
 
     /**
      * Extracts playable video URLs and iframe embeds from document.
+     * Updated to check vid-src and xplayer container elements.
      */
     private fun Document.extractVideoSources(): List<String> {
         val urls = linkedSetOf<String>()
 
-        // Direct video/source tags
-        this.select("#my-video source, video#my-video source, video source, #my-video, video#my-video, video").forEach { el ->
-            val src = el.attr("src").ifBlank { el.attr("data-src") }.ifBlank { el.attr("data-video-src") }.trim()
+        val videoSelectors = listOf(
+            "#my-video source",
+            "#my-video",
+            "video source",
+            "video",
+            ".content > div.video-container > div > div.xplayer-lazy-source",
+            ".content > div.video-container > div > div",
+            ".xplayer-lazy-source"
+        )
+
+        // Parse custom video sources using vid-src and src
+        this.select(videoSelectors.joinToString(", ")).forEach { el ->
+            val src = el.attr("vid-src")
+                .ifBlank { el.attr("src") }
+                .ifBlank { el.attr("data-src") }
+                .ifBlank { el.attr("data-video-src") }
+                .trim()
             if (src.isNotBlank() && !src.startsWith("blob:")) {
                 urls.add(src)
             }
@@ -120,7 +135,11 @@ class HmaalProvider : MainAPI() {
 
         // Iframe player embeds
         this.select("iframe").forEach { el ->
-            val src = el.attr("src").ifBlank { el.attr("data-src") }.ifBlank { el.attr("data-lazy-src") }.trim()
+            val src = el.attr("src")
+                .ifBlank { el.attr("vid-src") }
+                .ifBlank { el.attr("data-src") }
+                .ifBlank { el.attr("data-lazy-src") }
+                .trim()
             if (src.isNotBlank() && !src.startsWith("about:") && !src.startsWith("javascript:")) {
                 urls.add(src)
             }
@@ -129,7 +148,7 @@ class HmaalProvider : MainAPI() {
         return urls.toList()
     }
 
-    /** Pulls url out of background-image style or lazy attributes. */
+    /** Pulls url out of background-image style or lazy data attributes. */
     private fun Element.extractBackgroundImage(): String? {
         val style = this.attr("style").ifBlank { this.attr("data-style") }
         val match = Regex("""url\(\s*['"]?(.*?)['"]?\s*\)""", RegexOption.IGNORE_CASE).find(style)
