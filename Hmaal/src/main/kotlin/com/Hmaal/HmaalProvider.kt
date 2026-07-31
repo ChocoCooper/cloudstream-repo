@@ -138,7 +138,6 @@ class HmaalProvider : MainAPI() {
             val seriesName = seriesLink.text().trim().ifBlank { "Unknown Series" }
             val seriesUrl = fixUrl(seriesLink.attr("href"))
             val seriesDoc = app.get(seriesUrl).document
-            val seriesDomain = originOf(seriesUrl)
 
             val episodes = seriesDoc.select("#primary > div > a").mapNotNull { el ->
                 val title = el.attr("title").ifBlank { el.text() }.trim()
@@ -151,7 +150,6 @@ class HmaalProvider : MainAPI() {
                     this.name = title
                     this.episode = epNum
                     this.posterUrl = epImage
-                    this.posterHeaders = refererHeaders(seriesDomain)
                 }
             }.sortedBy { it.episode ?: Int.MAX_VALUE }
 
