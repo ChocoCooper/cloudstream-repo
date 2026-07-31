@@ -11,7 +11,7 @@ import java.net.URI
 import java.util.concurrent.ConcurrentHashMap
 
 class HmaalProvider : MainAPI() {
-    override var mainUrl = "https://hmaal.tv"
+    override var mainUrl = "https://hotott.net"
     override var name = "Hmaal"
     override val hasMainPage = true
     override var lang = "hi"
@@ -25,8 +25,7 @@ class HmaalProvider : MainAPI() {
         "https://hotmaal.xxx",
         "https://ottdude.com",
         "https://serieswala.com",
-        "https://zmaal.net",
-        "https://ymaal.co",
+        "https://ottzone.net",
         "https://hotott.net",
         "https://botmaal.io",
         "https://maaltv.io",
