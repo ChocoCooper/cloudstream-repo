@@ -76,8 +76,9 @@ class Film1kProvider : MainAPI() {
             val mediaUrl = fixUrl(aHeader.attr("href"))
             if (mediaUrl.isBlank()) return@mapNotNull null
 
-            val mediaName = article.selectFirst("header > a > h2")?.text()?.trim()?.takeIf { it.isNotBlank() }
+            val rawName = article.selectFirst("header > a > h2")?.text()?.trim()?.takeIf { it.isNotBlank() }
                 ?: aHeader.text().trim()
+            val mediaName = rawName.replace("movie poster watch online", "", ignoreCase = true).trim()
 
             val imgEl = article.selectFirst("header > a > figure > img")
 
@@ -97,17 +98,6 @@ class Film1kProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url).document
 
-        // Media Name extraction — confirmed identical structure to the
-        // homepage/search listings:
-        // #Ez-Wp > div > div > div > main > section > article > header > a > h2
-        // (article's specific post/category/tag classes vary per movie, but
-        // this generic chain matches consistently across all three contexts.)
-        val mediaName = doc.selectFirst("#Ez-Wp > div > div > div > main > section > article > header > a > h2")
-            ?.text()?.trim()?.takeIf { it.isNotBlank() }
-            ?: doc.selectFirst("h1.entry-title, h2.entry-title")?.text()?.trim()?.takeIf { it.isNotBlank() }
-            ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.takeIf { it.isNotBlank() }
-            ?: doc.title()
-
         // Poster extraction — the aside poster <img> is often lazy-loaded, so the
         // real image lives in data-src/data-lazy-src while src is just a blank
         // placeholder (e.g. src="data:image/svg+xml;base64,..."). Check those first.
@@ -119,6 +109,16 @@ class Film1kProvider : MainAPI() {
         }
         val ogPoster = doc.selectFirst("meta[property=og:image]")?.attr("content")?.takeIf { it.isNotBlank() }
         val posterUrl = (realPoster ?: ogPoster)?.let { fixUrl(it) }
+
+        // FIXED: Media Name extraction.
+        // Use the alt tag from the main aside image (which contains the accurate title),
+        // or fallback to h1/og:title. Remove the "movie poster watch online" suffix.
+        val rawName = imgEl?.attr("alt")?.takeIf { it.isNotBlank() }
+            ?: doc.selectFirst("h1.entry-title, h2.entry-title")?.text()?.trim()?.takeIf { it.isNotBlank() }
+            ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.takeIf { it.isNotBlank() }
+            ?: doc.title()
+            
+        val mediaName = rawName.replace("movie poster watch online", "", ignoreCase = true).trim()
 
         // Description extraction — instead of relying on a fragile nth-child
         // position (which shifts between pages), find the <strong>/<h3> label
@@ -246,12 +246,6 @@ class Film1kProvider : MainAPI() {
         }
 
         // Process all extracted URLs.
-        // IMPORTANT: URLs under an "/e/" path are embed PAGES (HTML), not raw
-        // media files — even if the filename ends in ".mp4"/".m3u8". Treating
-        // them as direct links makes the player try to parse an HTML page as
-        // a video container, which fails with UnrecognizedInputFormatException
-        // ("sniff failures: NoDeclaredBrand"). Only treat a URL as a direct
-        // playable file if it's NOT an embed path.
         for (videoUrl in extractedUrls) {
             val isEmbedPage = videoUrl.contains("/e/") || videoUrl.contains("/embed/")
 
