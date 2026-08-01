@@ -5,8 +5,6 @@ import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.jsoup.nodes.TextNode
-import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
 
 class Film1kProvider : MainAPI() {
     override var mainUrl = "https://www.film1k.com"
@@ -32,33 +30,6 @@ class Film1kProvider : MainAPI() {
             .trim()
     }
 
-    // Used only for the Top 10 widget (#custom_html-4), whose <li><a> entries
-    // don't carry an inline poster image, so we still need to visit the media
-    // page for those. Home/search article listings get their poster directly
-    // from the listing markup instead (see parseArticles below).
-    // #Ez-Wp > div > div.Container > div > aside > div > div > img
-    // Falls back to og:image / og:title meta tags if that selector doesn't
-    // match (theme markup can vary slightly between pages).
-    private suspend fun extractPosterAndTitle(mediaUrl: String, fallbackTitle: String): Pair<String, String?> {
-        return try {
-            val mediaDoc = app.get(mediaUrl).document
-            val imgEl = mediaDoc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div > img")
-
-            val altTitle = imgEl?.attr("alt")?.takeIf { it.isNotBlank() }
-            val ogTitle = mediaDoc.selectFirst("meta[property=og:title]")?.attr("content")?.takeIf { it.isNotBlank() }
-            val rawName = altTitle ?: ogTitle ?: fallbackTitle
-            val mediaName = cleanTitle(rawName)
-
-            val srcPoster = imgEl?.attr("src")?.takeIf { it.isNotBlank() }
-            val ogPoster = mediaDoc.selectFirst("meta[property=og:image]")?.attr("content")?.takeIf { it.isNotBlank() }
-            val posterUrl = (srcPoster ?: ogPoster)?.let { fixUrl(it) }
-
-            mediaName to posterUrl
-        } catch (e: Exception) {
-            cleanTitle(fallbackTitle) to null
-        }
-    }
-
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
@@ -69,53 +40,32 @@ class Film1kProvider : MainAPI() {
 
         val homePageList = mutableListOf<HomePageList>()
 
-        // 1. Top 10 Popular Section
-        val top10Title = homeDoc.selectFirst("#custom_html-4 > div > div > h3")?.text() ?: "Top 10 Popular"
-        val top10Elements = homeDoc.select("#custom_html-4 > div > div > ul > li > a")
-
-        val top10Items = coroutineScope {
-            top10Elements.map { aTag ->
-                async {
-                    val mediaUrl = fixUrl(aTag.attr("href"))
-                    if (mediaUrl.isBlank()) return@async null
-                    val (mediaName, posterUrl) = extractPosterAndTitle(mediaUrl, aTag.text())
-
-                    newMovieSearchResponse(mediaName, mediaUrl, TvType.Movie) {
-                        this.posterUrl = posterUrl
-                    }
-                }
-            }.mapNotNull { it.await() }
-        }
-        if (top10Items.isNotEmpty()) {
-            homePageList.add(HomePageList(top10Title, top10Items))
-        }
-
-        // 2. Latest Movies Section
+        // 1. Latest Movies Section
         val latestTitle = homeDoc.selectFirst("#Ez-Wp > div > div > div > main > section > div.page-top > h3")?.text() ?: "Latest Movies"
         val latestItems = parseArticles(homeDoc)
         if (latestItems.isNotEmpty()) {
-            homePageList.add(HomePageList(latestTitle, latestItems))
+            homePageList.add(HomePageList(latestTitle, latestItems, isHorizontalImages = true))
         }
 
-        // 3. USA Movies Section
+        // 2. USA Movies Section
         val usaTitle = usaDoc.selectFirst("#Ez-Wp > div > div > div > main > section > div.page-top > h3")?.text() ?: "USA Movies"
         val usaItems = parseArticles(usaDoc)
         if (usaItems.isNotEmpty()) {
-            homePageList.add(HomePageList(usaTitle, usaItems))
+            homePageList.add(HomePageList(usaTitle, usaItems, isHorizontalImages = true))
         }
 
-        // 4. 1990s Movies Section
+        // 3. 1990s Movies Section
         val nintiesTitle = nintiesDoc.selectFirst("#Ez-Wp > div > div > div > main > section > div.page-top > h3")?.text() ?: "1990s Movies"
         val nintiesItems = parseArticles(nintiesDoc)
         if (nintiesItems.isNotEmpty()) {
-            homePageList.add(HomePageList(nintiesTitle, nintiesItems))
+            homePageList.add(HomePageList(nintiesTitle, nintiesItems, isHorizontalImages = true))
         }
 
-        // 5. 1990s USA Movies Section (Intersection of USA and 1990s)
+        // 4. 1990s USA Movies Section (Intersection of USA and 1990s)
         val usaUrls = usaItems.map { it.url }.toSet()
         val intersectionItems = nintiesItems.filter { usaUrls.contains(it.url) }
         if (intersectionItems.isNotEmpty()) {
-            homePageList.add(HomePageList("1990s USA Movies", intersectionItems))
+            homePageList.add(HomePageList("1990s USA Movies", intersectionItems, isHorizontalImages = true))
         }
 
         return newHomePageResponse(homePageList)
@@ -171,39 +121,70 @@ class Film1kProvider : MainAPI() {
         val ogPoster = doc.selectFirst("meta[property=og:image]")?.attr("content")?.takeIf { it.isNotBlank() }
         val posterUrl = (srcPoster ?: ogPoster)?.let { fixUrl(it) }
 
-        // Description / Plot extraction
+        // Description extraction
+        // Structure: aside > div > div > p:nth-child(4) contains
+        // <strong>Movie Title</strong>, followed by inline text/links that
+        // form the actual description, then a trailing Film1k promo sentence
+        // we don't want ("Stream this ... on Film1k in high quality!").
         var plot: String? = null
 
-        // Primary: exact structural selector for the Plot <strong> tag.
-        // Falls back to text-based matches in case the position shifts
-        // (nth-child is fragile across pages with slightly different meta rows).
-        val plotStrong = doc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div > strong:nth-child(14)")
-            ?.takeIf { it.text().contains("Plot", ignoreCase = true) }
-            ?: doc.selectFirst("#Ez-Wp > div > div.Container > div > aside strong:contains(Plot)")
-            ?: doc.selectFirst("#Ez-Wp > div > div.Container > div > aside b:contains(Plot)")
-            ?: doc.selectFirst("strong:contains(Plot)")
+        val descP = doc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div > p:nth-child(4)")
+        val descStrong = descP?.selectFirst("strong")
 
-        if (plotStrong != null) {
-            val builder = StringBuilder()
-            var sibling = plotStrong.nextSibling()
-            while (sibling != null) {
-                if (sibling is Element) {
-                    val tagName = sibling.tagName().lowercase()
-                    if (tagName in listOf("h1", "h2", "h3", "h4", "p", "div", "strong", "b") && tagName != "a") {
-                        break
-                    }
-                    builder.append(sibling.text()).append(" ")
-                } else if (sibling is TextNode) {
-                    builder.append(sibling.text()).append(" ")
-                }
-                sibling = sibling.nextSibling()
+        if (descP != null) {
+            var descText = descP.text()
+
+            // Strip the leading movie-title strong text if present.
+            val titleText = descStrong?.text()
+            if (!titleText.isNullOrBlank() && descText.startsWith(titleText)) {
+                descText = descText.removePrefix(titleText)
             }
-            val extracted = builder.toString().trim()
-            if (extracted.isNotBlank()) {
-                plot = extracted
+
+            // Drop the leading ", " (or ": ") left after removing the title.
+            descText = descText.trim().removePrefix(",").removePrefix(":").trim()
+
+            // Drop any trailing sentence(s) that mention the site name (self-promo).
+            val sentences = descText.split(Regex("(?<=[.!?])\\s+"))
+            descText = sentences.filterNot { it.contains("Film1k", ignoreCase = true) }
+                .joinToString(" ")
+                .trim()
+
+            if (descText.isNotBlank()) {
+                plot = descText
             }
         }
 
+        // Fallback: older "Plot" labeled layout, in case a page uses it instead.
+        if (plot.isNullOrBlank()) {
+            val plotStrong = doc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div > strong:nth-child(14)")
+                ?.takeIf { it.text().contains("Plot", ignoreCase = true) }
+                ?: doc.selectFirst("#Ez-Wp > div > div.Container > div > aside strong:contains(Plot)")
+                ?: doc.selectFirst("#Ez-Wp > div > div.Container > div > aside b:contains(Plot)")
+                ?: doc.selectFirst("strong:contains(Plot)")
+
+            if (plotStrong != null) {
+                val builder = StringBuilder()
+                var sibling = plotStrong.nextSibling()
+                while (sibling != null) {
+                    if (sibling is Element) {
+                        val tagName = sibling.tagName().lowercase()
+                        if (tagName in listOf("h1", "h2", "h3", "h4", "p", "div", "strong", "b") && tagName != "a") {
+                            break
+                        }
+                        builder.append(sibling.text()).append(" ")
+                    } else if (sibling is TextNode) {
+                        builder.append(sibling.text()).append(" ")
+                    }
+                    sibling = sibling.nextSibling()
+                }
+                val extracted = builder.toString().trim()
+                if (extracted.isNotBlank()) {
+                    plot = extracted
+                }
+            }
+        }
+
+        // Final fallback: whole aside text block minus its heading.
         if (plot.isNullOrBlank()) {
             val asideDiv = doc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div")
             val h3Text = asideDiv?.selectFirst("h3")?.text() ?: ""
