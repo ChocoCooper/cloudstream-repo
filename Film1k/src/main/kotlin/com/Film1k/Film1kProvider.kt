@@ -21,6 +21,32 @@ class Film1kProvider : MainAPI() {
         "$mainUrl/tag/1990s" to "1990s Movies"
     )
 
+    // Central place to strip junk phrases from any extracted title/alt text.
+    private fun cleanTitle(raw: String): String {
+        return raw
+            .replace("movie poster watch online", "", ignoreCase = true)
+            .replace("movie thumbnail", "", ignoreCase = true)
+            .replace("Full Movie Download", "", ignoreCase = true)
+            .replace("full movie online", "", ignoreCase = true)
+            .replace("\\s+".toRegex(), " ")
+            .trim()
+    }
+
+    // Visits a media page and extracts the poster + cleaned title from:
+    // #Ez-Wp > div > div.Container > div > aside > div > div > img
+    private suspend fun extractPosterAndTitle(mediaUrl: String, fallbackTitle: String): Pair<String, String?> {
+        return try {
+            val mediaDoc = app.get(mediaUrl).document
+            val imgEl = mediaDoc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div > img")
+            val rawName = imgEl?.attr("alt")?.takeIf { it.isNotBlank() } ?: fallbackTitle
+            val mediaName = cleanTitle(rawName)
+            val posterUrl = imgEl?.attr("src")?.takeIf { it.isNotBlank() }?.let { fixUrl(it) }
+            mediaName to posterUrl
+        } catch (e: Exception) {
+            cleanTitle(fallbackTitle) to null
+        }
+    }
+
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
@@ -34,23 +60,16 @@ class Film1kProvider : MainAPI() {
         // 1. Top 10 Popular Section
         val top10Title = homeDoc.selectFirst("#custom_html-4 > div > div > h3")?.text() ?: "Top 10 Popular"
         val top10Elements = homeDoc.select("#custom_html-4 > div > div > ul > li > a")
-        
+
         val top10Items = coroutineScope {
             top10Elements.map { aTag ->
                 async {
                     val mediaUrl = fixUrl(aTag.attr("href"))
-                    try {
-                        val mediaDoc = app.get(mediaUrl).document
-                        val imgEl = mediaDoc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div > img")
-                        val rawName = imgEl?.attr("alt")?.takeIf { it.isNotBlank() } ?: aTag.text()
-                        val mediaName = rawName.replace("movie poster watch online", "", ignoreCase = true).trim()
-                        val posterUrl = imgEl?.attr("src")?.takeIf { it.isNotBlank() }?.let { fixUrl(it) }
+                    if (mediaUrl.isBlank()) return@async null
+                    val (mediaName, posterUrl) = extractPosterAndTitle(mediaUrl, aTag.text())
 
-                        newMovieSearchResponse(mediaName, mediaUrl, TvType.Movie) {
-                            this.posterUrl = posterUrl
-                        }
-                    } catch (e: Exception) {
-                        null
+                    newMovieSearchResponse(mediaName, mediaUrl, TvType.Movie) {
+                        this.posterUrl = posterUrl
                     }
                 }
             }.mapNotNull { it.await() }
@@ -96,6 +115,10 @@ class Film1kProvider : MainAPI() {
         return parseArticles(doc)
     }
 
+    // Crawl pattern:
+    // #Ez-Wp > div > div > div > main > section > article > header > a  -> mediaPageUrl
+    // then on mediaPageUrl:
+    // #Ez-Wp > div > div.Container > div > aside > div > div > img -> poster + alt(title)
     private suspend fun parseArticles(doc: Document): List<SearchResponse> = coroutineScope {
         val articles = doc.select("#Ez-Wp > div > div > div > main > section > article")
         articles.map { article ->
@@ -105,21 +128,10 @@ class Film1kProvider : MainAPI() {
                 if (mediaUrl.isBlank()) return@async null
 
                 val fallbackTitle = article.selectFirst("header > a > h2")?.text() ?: aHeader.text()
+                val (mediaName, posterUrl) = extractPosterAndTitle(mediaUrl, fallbackTitle)
 
-                // Visit media page to extract poster image directly
-                try {
-                    val mediaDoc = app.get(mediaUrl).document
-                    val imgEl = mediaDoc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div > img")
-                    val rawName = imgEl?.attr("alt")?.takeIf { it.isNotBlank() } ?: fallbackTitle
-                    val mediaName = rawName.replace("movie poster watch online", "", ignoreCase = true).trim()
-                    val posterUrl = imgEl?.attr("src")?.takeIf { it.isNotBlank() }?.let { fixUrl(it) }
-
-                    newMovieSearchResponse(mediaName, mediaUrl, TvType.Movie) {
-                        this.posterUrl = posterUrl
-                    }
-                } catch (e: Exception) {
-                    val mediaName = fallbackTitle.replace("movie poster watch online", "", ignoreCase = true).trim()
-                    newMovieSearchResponse(mediaName, mediaUrl, TvType.Movie)
+                newMovieSearchResponse(mediaName, mediaUrl, TvType.Movie) {
+                    this.posterUrl = posterUrl
                 }
             }
         }.mapNotNull { it.await() }
@@ -128,11 +140,12 @@ class Film1kProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url).document
 
-        // Image & Media Name extraction
+        // Image & Media Name extraction (same selector as poster crawl above,
+        // so media page poster/title stay consistent with home/search listings)
         val imgEl = doc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div > img")
-        val rawName = imgEl?.attr("alt") ?: doc.title()
-        val mediaName = rawName.replace("movie poster watch online", "", ignoreCase = true).trim()
-        val posterUrl = imgEl?.attr("src")?.let { fixUrl(it) }
+        val rawName = imgEl?.attr("alt")?.takeIf { it.isNotBlank() } ?: doc.title()
+        val mediaName = cleanTitle(rawName)
+        val posterUrl = imgEl?.attr("src")?.takeIf { it.isNotBlank() }?.let { fixUrl(it) }
 
         // Description / Plot extraction
         var plot: String? = null
