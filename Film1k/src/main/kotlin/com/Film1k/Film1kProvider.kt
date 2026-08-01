@@ -66,9 +66,6 @@ class Film1kProvider : MainAPI() {
         return parseArticles(doc)
     }
 
-    // Crawl pattern (no per-article network request needed):
-    // #Ez-Wp > div > div > div > main > section > article > header > a > h2 -> title
-    // #Ez-Wp > div > div > div > main > section > article > header > a > figure > img -> poster
     private fun parseArticles(doc: Document): List<SearchResponse> {
         val articles = doc.select("#Ez-Wp > div > div > div > main > section > article")
         return articles.mapNotNull { article ->
@@ -82,7 +79,6 @@ class Film1kProvider : MainAPI() {
 
             val imgEl = article.selectFirst("header > a > figure > img")
 
-            // Handles lazy-loaded images too (data-src/data-lazy-src commonly used before src).
             val posterUrl = imgEl?.let { el ->
                 el.attr("data-src").takeIf { it.isNotBlank() }
                     ?: el.attr("data-lazy-src").takeIf { it.isNotBlank() }
@@ -98,9 +94,7 @@ class Film1kProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url).document
 
-        // Poster extraction — the aside poster <img> is often lazy-loaded, so the
-        // real image lives in data-src/data-lazy-src while src is just a blank
-        // placeholder (e.g. src="data:image/svg+xml;base64,..."). Check those first.
+        // Poster extraction
         val imgEl = doc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div > img")
         val realPoster = imgEl?.let { el ->
             el.attr("data-src").takeIf { it.isNotBlank() }
@@ -110,9 +104,7 @@ class Film1kProvider : MainAPI() {
         val ogPoster = doc.selectFirst("meta[property=og:image]")?.attr("content")?.takeIf { it.isNotBlank() }
         val posterUrl = (realPoster ?: ogPoster)?.let { fixUrl(it) }
 
-        // FIXED: Media Name extraction.
-        // Use the alt tag from the main aside image (which contains the accurate title),
-        // or fallback to h1/og:title. Remove the "movie poster watch online" suffix.
+        // Media Name extraction
         val rawName = imgEl?.attr("alt")?.takeIf { it.isNotBlank() }
             ?: doc.selectFirst("h1.entry-title, h2.entry-title")?.text()?.trim()?.takeIf { it.isNotBlank() }
             ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.takeIf { it.isNotBlank() }
@@ -120,13 +112,8 @@ class Film1kProvider : MainAPI() {
             
         val mediaName = rawName.replace("movie poster watch online", "", ignoreCase = true).trim()
 
-        // Description extraction — instead of relying on a fragile nth-child
-        // position (which shifts between pages), find the <strong>/<h3> label
-        // whose own text is "Plot" or "Description" (with or without a colon),
-        // then collect the text that follows it up to the next label/heading.
-        // Inline <a> links are kept as plain text (href dropped, words kept).
+        // Description / Plot extraction
         var plot: String? = null
-
         val descContainer = doc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div")
 
         fun extractAfterLabel(label: String): String? {
@@ -139,7 +126,6 @@ class Film1kProvider : MainAPI() {
             while (sibling != null) {
                 if (sibling is Element) {
                     val tagName = sibling.tagName().lowercase()
-                    // Stop once we hit another label/heading — that belongs to the next field.
                     if (tagName in listOf("h1", "h2", "h3", "h4", "strong", "b")) break
                     builder.append(sibling.text()).append(" ")
                 } else if (sibling is TextNode) {
@@ -148,11 +134,9 @@ class Film1kProvider : MainAPI() {
                 sibling = sibling.nextSibling()
             }
 
-            var extracted = builder.toString().trim()
-                .removePrefix(",").removePrefix(":").trim()
+            var extracted = builder.toString().trim().removePrefix(",").removePrefix(":").trim()
             if (extracted.isBlank()) return null
 
-            // Drop any trailing self-promo sentence (e.g. "Stream this ... on Film1k ...").
             val sentences = extracted.split(Regex("(?<=[.!?])\\s+"))
             val filtered = sentences.filterNot { it.contains("Film1k", ignoreCase = true) }
                 .joinToString(" ").trim()
@@ -162,9 +146,6 @@ class Film1kProvider : MainAPI() {
         }
 
         fun extractTitleLeadParagraph(): String? {
-            // Some pages have no literal "Plot"/"Description" label text at all —
-            // the first <p> just starts with the movie title in <strong>, e.g.
-            // "<strong>Dinosaur Island</strong>, an adventure comedy movie...".
             val firstP = descContainer?.selectFirst("p") ?: return null
             val leadStrong = firstP.selectFirst("strong") ?: return null
             var text = firstP.text()
@@ -183,7 +164,6 @@ class Film1kProvider : MainAPI() {
 
         plot = extractAfterLabel("Description") ?: extractAfterLabel("Plot") ?: extractTitleLeadParagraph()
 
-        // Final fallback: whole aside text block minus its heading.
         if (plot.isNullOrBlank()) {
             val h3Text = descContainer?.selectFirst("h3")?.text() ?: ""
             var rawPlot = descContainer?.text() ?: ""
@@ -220,32 +200,27 @@ class Film1kProvider : MainAPI() {
         val doc = app.get(data).document
         val extractedUrls = mutableSetOf<String>()
 
-        // Helper: prefer real (possibly lazy-loaded) src over a blank/placeholder one.
         fun realSrc(el: Element): String? {
             return el.attr("data-src").takeIf { it.isNotBlank() }
                 ?: el.attr("data-lazy-src").takeIf { it.isNotBlank() }
                 ?: el.attr("src").takeIf { it.isNotBlank() && !it.startsWith("data:") }
         }
 
-        // Path 1: #my-video > source
         doc.select("#my-video > source").forEach { source ->
             val src = realSrc(source)
             if (!src.isNullOrBlank()) extractedUrls.add(fixUrl(src))
         }
 
-        // Path 2: #video-op-a > div > iframe
         doc.select("#video-op-a > div > iframe").forEach { iframe ->
             val src = realSrc(iframe)
             if (!src.isNullOrBlank()) extractedUrls.add(fixUrl(src))
         }
 
-        // Path 3: #Eroz > div > ul > li:nth-child(1) > a
         doc.select("#Eroz > div > ul > li > a").forEach { aTag ->
             val href = aTag.attr("href").ifBlank { aTag.attr("data-link") }
             if (href.isNotBlank()) extractedUrls.add(fixUrl(href))
         }
 
-        // Process all extracted URLs.
         for (videoUrl in extractedUrls) {
             val isEmbedPage = videoUrl.contains("/e/") || videoUrl.contains("/embed/")
 
@@ -274,12 +249,92 @@ class Film1kProvider : MainAPI() {
                     }
                 )
             } else {
-                // Embed provider page (e.g. film1k.xyz/e/...) — needs a real
-                // extractor to fetch the page and pull the actual source out.
-                loadExtractor(videoUrl, data, subtitleCallback, callback)
+                // Passes embed links to the Extractor logic
+                loadExtractor(videoUrl, mainUrl, subtitleCallback, callback)
             }
         }
 
         return extractedUrls.isNotEmpty()
+    }
+}
+
+// ---------------------------------------------------------------------
+// EXTRACTOR TO BYPASS THE FAKE PLAYER & EXTRACT THE M3U8
+// ---------------------------------------------------------------------
+
+class Film1kExtractor : ExtractorApi() {
+    override var mainUrl = "https://film1k.xyz"
+    override var name = "Film1k Embed"
+    override val requiresReferer = false
+
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        // Fetch the raw HTML of the embed page
+        val response = app.get(url, referer = referer)
+        val html = response.text
+
+        // Attempt 1: Search the raw HTML/Scripts for standard m3u8 patterns
+        val m3u8Regex = Regex("(?<=[\"'])(https?://[^\"']+\\.m3u8[^\"']*)(?=[\"'])")
+        val match = m3u8Regex.find(html)
+        
+        if (match != null) {
+            val streamUrl = match.value.replace("\\/", "/")
+            callback.invoke(
+                ExtractorLink(
+                    name = this.name,
+                    source = this.name,
+                    url = streamUrl,
+                    referer = url,
+                    quality = Qualities.Unknown.value,
+                    isM3u8 = true
+                )
+            )
+            return
+        }
+
+        // Attempt 2: If the m3u8 is not directly in the HTML, check for iframes
+        val document = response.document
+        val iframeSrc = document.selectFirst("iframe")?.attr("src")
+        if (!iframeSrc.isNullOrBlank()) {
+            val fixedIframe = if (iframeSrc.startsWith("//")) "https:$iframeSrc" else iframeSrc
+            loadExtractor(fixedIframe, url, subtitleCallback, callback)
+            return
+        }
+
+        // Attempt 3: If it's heavily obfuscated via API (React Single Page App), 
+        // we can attempt a lightweight API interception (using the video ID).
+        // For example, if url is "https://film1k.xyz/e/f69hykwic7jp"
+        val videoId = url.substringAfterLast("/")
+        if (videoId.isNotBlank()) {
+            try {
+                // Often, these React video hosts make a POST/GET request to a backend endpoint like /api/source/
+                val apiResponse = app.post(
+                    "https://film1k.xyz/api/source/$videoId",
+                    referer = url,
+                    headers = mapOf("Accept" to "application/json", "X-Requested-With" to "XMLHttpRequest")
+                ).text
+
+                val apiMatch = m3u8Regex.find(apiResponse)
+                if (apiMatch != null) {
+                    val streamUrl = apiMatch.value.replace("\\/", "/")
+                    callback.invoke(
+                        ExtractorLink(
+                            name = this.name,
+                            source = this.name,
+                            url = streamUrl,
+                            referer = url,
+                            quality = Qualities.Unknown.value,
+                            isM3u8 = true
+                        )
+                    )
+                }
+            } catch (e: Exception) {
+                // API endpoint might be different; fail silently to prevent crashes
+            }
+        }
     }
 }
