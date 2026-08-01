@@ -32,11 +32,13 @@ class Film1kProvider : MainAPI() {
             .trim()
     }
 
-    // Visits a media page and extracts the poster + cleaned title from:
+    // Used only for the Top 10 widget (#custom_html-4), whose <li><a> entries
+    // don't carry an inline poster image, so we still need to visit the media
+    // page for those. Home/search article listings get their poster directly
+    // from the listing markup instead (see parseArticles below).
     // #Ez-Wp > div > div.Container > div > aside > div > div > img
     // Falls back to og:image / og:title meta tags if that selector doesn't
-    // match (theme markup can vary slightly between pages), so home page
-    // and search result posters don't end up blank.
+    // match (theme markup can vary slightly between pages).
     private suspend fun extractPosterAndTitle(mediaUrl: String, fallbackTitle: String): Pair<String, String?> {
         return try {
             val mediaDoc = app.get(mediaUrl).document
@@ -125,26 +127,33 @@ class Film1kProvider : MainAPI() {
         return parseArticles(doc)
     }
 
-    // Crawl pattern:
-    // #Ez-Wp > div > div > div > main > section > article > header > a  -> mediaPageUrl
-    // then on mediaPageUrl:
-    // #Ez-Wp > div > div.Container > div > aside > div > div > img -> poster + alt(title)
-    private suspend fun parseArticles(doc: Document): List<SearchResponse> = coroutineScope {
+    // Crawl pattern (no per-article network request needed):
+    // #Ez-Wp > div > div > div > main > section > article > header > a > figure > img
+    // -> src (poster) + alt (title fallback)
+    private fun parseArticles(doc: Document): List<SearchResponse> {
         val articles = doc.select("#Ez-Wp > div > div > div > main > section > article")
-        articles.map { article ->
-            async {
-                val aHeader = article.selectFirst("header > a") ?: return@async null
-                val mediaUrl = fixUrl(aHeader.attr("href"))
-                if (mediaUrl.isBlank()) return@async null
+        return articles.mapNotNull { article ->
+            val aHeader = article.selectFirst("header > a") ?: return@mapNotNull null
+            val mediaUrl = fixUrl(aHeader.attr("href"))
+            if (mediaUrl.isBlank()) return@mapNotNull null
 
-                val fallbackTitle = article.selectFirst("header > a > h2")?.text() ?: aHeader.text()
-                val (mediaName, posterUrl) = extractPosterAndTitle(mediaUrl, fallbackTitle)
+            val imgEl = article.selectFirst("header > a > figure > img")
 
-                newMovieSearchResponse(mediaName, mediaUrl, TvType.Movie) {
-                    this.posterUrl = posterUrl
-                }
+            val fallbackTitle = article.selectFirst("header > a > h2")?.text() ?: aHeader.text()
+            val rawName = imgEl?.attr("alt")?.takeIf { it.isNotBlank() } ?: fallbackTitle
+            val mediaName = cleanTitle(rawName)
+
+            // Handles lazy-loaded images too (data-src/data-lazy-src commonly used before src).
+            val posterUrl = imgEl?.let { el ->
+                el.attr("data-src").takeIf { it.isNotBlank() }
+                    ?: el.attr("data-lazy-src").takeIf { it.isNotBlank() }
+                    ?: el.attr("src").takeIf { it.isNotBlank() }
+            }?.let { fixUrl(it) }
+
+            newMovieSearchResponse(mediaName, mediaUrl, TvType.Movie) {
+                this.posterUrl = posterUrl
             }
-        }.mapNotNull { it.await() }
+        }
     }
 
     override suspend fun load(url: String): LoadResponse {
