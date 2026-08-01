@@ -19,17 +19,6 @@ class Film1kProvider : MainAPI() {
         "$mainUrl/tag/1990s" to "1990s Movies"
     )
 
-    // Central place to strip junk phrases from any extracted title/alt text.
-    private fun cleanTitle(raw: String): String {
-        return raw
-            .replace("movie poster watch online", "", ignoreCase = true)
-            .replace("movie thumbnail", "", ignoreCase = true)
-            .replace("Full Movie Download", "", ignoreCase = true)
-            .replace("full movie online", "", ignoreCase = true)
-            .replace("\\s+".toRegex(), " ")
-            .trim()
-    }
-
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
@@ -78,8 +67,8 @@ class Film1kProvider : MainAPI() {
     }
 
     // Crawl pattern (no per-article network request needed):
-    // #Ez-Wp > div > div > div > main > section > article > header > a > figure > img
-    // -> src (poster) + alt (title fallback)
+    // #Ez-Wp > div > div > div > main > section > article > header > a > h2 -> title
+    // #Ez-Wp > div > div > div > main > section > article > header > a > figure > img -> poster
     private fun parseArticles(doc: Document): List<SearchResponse> {
         val articles = doc.select("#Ez-Wp > div > div > div > main > section > article")
         return articles.mapNotNull { article ->
@@ -87,11 +76,10 @@ class Film1kProvider : MainAPI() {
             val mediaUrl = fixUrl(aHeader.attr("href"))
             if (mediaUrl.isBlank()) return@mapNotNull null
 
-            val imgEl = article.selectFirst("header > a > figure > img")
+            val mediaName = article.selectFirst("header > a > h2")?.text()?.trim()?.takeIf { it.isNotBlank() }
+                ?: aHeader.text().trim()
 
-            val fallbackTitle = article.selectFirst("header > a > h2")?.text() ?: aHeader.text()
-            val rawName = imgEl?.attr("alt")?.takeIf { it.isNotBlank() } ?: fallbackTitle
-            val mediaName = cleanTitle(rawName)
+            val imgEl = article.selectFirst("header > a > figure > img")
 
             // Handles lazy-loaded images too (data-src/data-lazy-src commonly used before src).
             val posterUrl = imgEl?.let { el ->
@@ -109,14 +97,15 @@ class Film1kProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url).document
 
-        // Image & Media Name extraction (same selector as poster crawl above,
-        // so media page poster/title stay consistent with home/search listings)
-        val imgEl = doc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div > img")
-        val altTitle = imgEl?.attr("alt")?.takeIf { it.isNotBlank() }
-        val ogTitle = doc.selectFirst("meta[property=og:title]")?.attr("content")?.takeIf { it.isNotBlank() }
-        val rawName = altTitle ?: ogTitle ?: doc.title()
-        val mediaName = cleanTitle(rawName)
+        // Media Name extraction — same h2.entry-title path used on listing pages,
+        // no sentence-trimming needed since this is already the plain title.
+        val mediaName = doc.selectFirst("#Ez-Wp > div > div > div > main > section > article > header > a > h2")
+            ?.text()?.trim()?.takeIf { it.isNotBlank() }
+            ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.takeIf { it.isNotBlank() }
+            ?: doc.title()
 
+        // Poster extraction
+        val imgEl = doc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div > img")
         val srcPoster = imgEl?.attr("src")?.takeIf { it.isNotBlank() }
         val ogPoster = doc.selectFirst("meta[property=og:image]")?.attr("content")?.takeIf { it.isNotBlank() }
         val posterUrl = (srcPoster ?: ogPoster)?.let { fixUrl(it) }
@@ -151,6 +140,42 @@ class Film1kProvider : MainAPI() {
 
             if (descText.isNotBlank()) {
                 plot = descText
+            }
+        }
+
+        // Fallback: alternate layout where a plain <h3>Description:</h3> is
+        // followed directly by sibling text/links (no wrapping <p>/<strong> title).
+        if (plot.isNullOrBlank()) {
+            val descH3 = doc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div > h3")
+                ?.takeIf { it.text().contains("Description", ignoreCase = true) }
+
+            if (descH3 != null) {
+                val builder = StringBuilder()
+                var sibling = descH3.nextSibling()
+                while (sibling != null) {
+                    if (sibling is Element) {
+                        val tagName = sibling.tagName().lowercase()
+                        if (tagName in listOf("h1", "h2", "h3", "h4", "p", "div", "strong", "b") && tagName != "a") {
+                            break
+                        }
+                        builder.append(sibling.text()).append(" ")
+                    } else if (sibling is TextNode) {
+                        builder.append(sibling.text()).append(" ")
+                    }
+                    sibling = sibling.nextSibling()
+                }
+                var extracted = builder.toString().trim()
+
+                // Drop any trailing self-promo sentence, same as the primary path.
+                val sentences = extracted.split(Regex("(?<=[.!?])\\s+"))
+                val filtered = sentences.filterNot { it.contains("Film1k", ignoreCase = true) }
+                    .joinToString(" ")
+                    .trim()
+                extracted = filtered.ifBlank { extracted }
+
+                if (extracted.isNotBlank()) {
+                    plot = extracted
+                }
             }
         }
 
