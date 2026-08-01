@@ -236,7 +236,6 @@ class Film1kProvider : MainAPI() {
                     }
                 )
             } else {
-                // Route all embed pages through the WebViewResolver Extractor
                 Film1kExtractor().getUrl(videoUrl, mainUrl, subtitleCallback, callback)
             }
         }
@@ -262,15 +261,33 @@ class Film1kExtractor : ExtractorApi() {
         callback: (ExtractorLink) -> Unit
     ) {
         try {
-            // Step 1: Create an interceptor that listens for any network request ending in .m3u8 or .mp4
-            val resolver = WebViewResolver(Regex("""\.(m3u8|mp4)"""))
+            // Step 1: Extract the inner player iframe so we completely bypass 
+            // the outer website's malicious pop-up scripts.
+            val responseText = app.get(url, referer = referer, verify = false).text
+            val document = org.jsoup.Jsoup.parse(responseText)
             
-            // Step 2: Load the embed URL in the hidden WebView browser.
-            // The browser will execute the PoW (Proof of Work) script automatically.
-            // When the player inevitably requests the master.m3u8 file, the resolver traps it!
-            val response = app.get(url, interceptor = resolver, verify = false)
+            var iframeSrc = document.selectFirst("iframe")?.attr("src")
+            if (iframeSrc.isNullOrBlank()) {
+                val iframeRegex = Regex("<iframe[^>]+src=[\"']([^\"']+)[\"']")
+                iframeSrc = iframeRegex.find(responseText)?.groupValues?.get(1)
+            }
+
+            val targetUrl = if (!iframeSrc.isNullOrBlank()) {
+                if (iframeSrc.startsWith("//")) {
+                    "https:$iframeSrc"
+                } else if (iframeSrc.startsWith("/")) {
+                    val host = url.split("/").take(3).joinToString("/")
+                    "$host$iframeSrc"
+                } else {
+                    iframeSrc
+                }
+            } else url
+
+            // Step 2: Set the resolver to aggressively catch ONLY the master manifest
+            val resolver = WebViewResolver(Regex("""(master|index)\.m3u8"""))
             
-            // Step 3: Extract the trapped streaming URL from the resolver's response directly
+            // Step 3: Run the hidden browser on the CLEAN target iframe.
+            val response = app.get(targetUrl, interceptor = resolver, verify = false)
             val streamUrl = response.url
 
             if (streamUrl.contains(".m3u8") || streamUrl.contains(".mp4")) {
@@ -283,7 +300,7 @@ class Film1kExtractor : ExtractorApi() {
                         url = streamUrl,
                         type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                     ) {
-                        this.referer = url
+                        this.referer = targetUrl
                         this.quality = Qualities.Unknown.value
                     }
                 )
