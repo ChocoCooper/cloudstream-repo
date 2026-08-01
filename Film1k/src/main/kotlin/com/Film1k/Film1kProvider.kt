@@ -284,14 +284,15 @@ class Film1kExtractor : ExtractorApi() {
         if (match != null) {
             val streamUrl = match.value.replace("\\/", "/")
             callback.invoke(
-                ExtractorLink(
+                newExtractorLink(
                     name = this.name,
                     source = this.name,
                     url = streamUrl,
-                    referer = url,
-                    quality = Qualities.Unknown.value,
-                    isM3u8 = true
-                )
+                    type = ExtractorLinkType.M3U8
+                ) {
+                    this.referer = url
+                    this.quality = Qualities.Unknown.value
+                }
             )
             return
         }
@@ -322,14 +323,15 @@ class Film1kExtractor : ExtractorApi() {
                 if (apiMatch != null) {
                     val streamUrl = apiMatch.value.replace("\\/", "/")
                     callback.invoke(
-                        ExtractorLink(
+                        newExtractorLink(
                             name = this.name,
                             source = this.name,
                             url = streamUrl,
-                            referer = url,
-                            quality = Qualities.Unknown.value,
-                            isM3u8 = true
-                        )
+                            type = ExtractorLinkType.M3U8
+                        ) {
+                            this.referer = url
+                            this.quality = Qualities.Unknown.value
+                        }
                     )
                 }
             } catch (e: Exception) {
