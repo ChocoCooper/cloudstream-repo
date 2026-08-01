@@ -214,34 +214,31 @@ class Film1kProvider : MainAPI() {
         }
 
         for (videoUrl in extractedUrls) {
-            val isEmbedPage = videoUrl.contains("/e/") || videoUrl.contains("/embed/") || videoUrl.contains("film1k.xyz")
+            val isM3u8 = videoUrl.contains(".m3u8")
+            val isMp4 = videoUrl.contains(".mp4")
+            
+            // Check if it's a direct media link and NOT masquerading as an embed path
+            val isDirectMedia = (isM3u8 || isMp4) && 
+                !videoUrl.contains("/e/") && 
+                !videoUrl.contains("/embed/") && 
+                !videoUrl.contains("/v/")
 
-            if (!isEmbedPage && videoUrl.contains(".m3u8")) {
+            if (isDirectMedia) {
                 callback.invoke(
                     newExtractorLink(
                         name = this.name,
                         source = this.name,
                         url = videoUrl,
-                        type = ExtractorLinkType.M3U8
-                    ) {
-                        this.referer = mainUrl
-                        this.quality = Qualities.Unknown.value
-                    }
-                )
-            } else if (!isEmbedPage && videoUrl.contains(".mp4")) {
-                callback.invoke(
-                    newExtractorLink(
-                        name = this.name,
-                        source = this.name,
-                        url = videoUrl,
-                        type = ExtractorLinkType.VIDEO
+                        type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                     ) {
                         this.referer = mainUrl
                         this.quality = Qualities.Unknown.value
                     }
                 )
             } else {
-                loadExtractor(videoUrl, mainUrl, subtitleCallback, callback)
+                // FORCE the link through our custom extractor to ensure verify = false is used.
+                // Do NOT use Cloudstream's generic loadExtractor() here, as it will crash on blocked ISPs.
+                Film1kExtractor().getUrl(videoUrl, mainUrl, subtitleCallback, callback)
             }
         }
 
@@ -251,6 +248,7 @@ class Film1kProvider : MainAPI() {
 
 // ---------------------------------------------------------------------
 // EXTRACTOR TO BYPASS THE FAKE PLAYER & EXTRACT THE M3U8
+// (Manually bypasses SSL to prevent crashes caused by ISP blocking)
 // ---------------------------------------------------------------------
 
 class Film1kExtractor : ExtractorApi() {
@@ -258,7 +256,6 @@ class Film1kExtractor : ExtractorApi() {
     override var name = "Film1k Embed"
     override val requiresReferer = false
 
-    // FIXED: Added `suspend` keyword here!
     private suspend fun invokeCallback(
         streamUrl: String, 
         referer: String, 
@@ -286,10 +283,10 @@ class Film1kExtractor : ExtractorApi() {
         callback: (ExtractorLink) -> Unit
     ) {
         try {
-            // 1. Fetch the main embed page
+            // 1. Fetch the main embed page (ALWAYS USE verify = false)
             val response = app.get(url, referer = referer, verify = false).text
             
-            // 2. Safely find the iframe without triggering loadExtractor()
+            // 2. Safely find the iframe (like q8y5z.com)
             val document = org.jsoup.Jsoup.parse(response)
             var iframeSrc = document.selectFirst("iframe")?.attr("src")
             if (iframeSrc.isNullOrBlank()) {
@@ -298,10 +295,17 @@ class Film1kExtractor : ExtractorApi() {
             }
 
             val targetUrl = if (!iframeSrc.isNullOrBlank()) {
-                if (iframeSrc.startsWith("//")) "https:$iframeSrc" else iframeSrc
+                if (iframeSrc.startsWith("//")) {
+                    "https:$iframeSrc"
+                } else if (iframeSrc.startsWith("/")) {
+                    val host = url.split("/").take(3).joinToString("/")
+                    "$host$iframeSrc"
+                } else {
+                    iframeSrc
+                }
             } else url
 
-            // 3. Fetch the iframe target manually
+            // 3. Fetch the iframe target manually (CRITICAL: verify = false prevents the SSL crash)
             val targetHtml = if (targetUrl != url) {
                 app.get(targetUrl, referer = url, verify = false).text
             } else response
@@ -332,18 +336,13 @@ class Film1kExtractor : ExtractorApi() {
             if (videoId.isNotBlank()) {
                 val apiHost = targetUrl.substringBefore("/e/").substringBefore("/v/").substringBefore("/embed/")
                 
-                // Try testing the hidden endpoints
-                val paths = listOf("/api/playback/$videoId", "/playback/$videoId")
+                val paths = listOf("/api/playback/$videoId", "/playback/$videoId", "/api/source/$videoId", "/source/$videoId")
                 for (path in paths) {
                     try {
-                        // Test GET request
-                        val apiResponseGet = app.get(
-                            "$apiHost$path", 
-                            referer = targetUrl, 
-                            headers = mapOf("X-Requested-With" to "XMLHttpRequest"), 
-                            verify = false
-                        ).text
+                        val headers = mapOf("X-Requested-With" to "XMLHttpRequest")
                         
+                        // Test GET request
+                        val apiResponseGet = app.get("$apiHost$path", referer = targetUrl, headers = headers, verify = false).text
                         val apiMatchGet = mediaRegex.find(apiResponseGet)
                         if (apiMatchGet != null) {
                             invokeCallback(apiMatchGet.value, targetUrl, callback)
@@ -351,13 +350,7 @@ class Film1kExtractor : ExtractorApi() {
                         }
 
                         // Test POST request
-                        val apiResponsePost = app.post(
-                            "$apiHost$path", 
-                            referer = targetUrl, 
-                            headers = mapOf("X-Requested-With" to "XMLHttpRequest"), 
-                            verify = false
-                        ).text
-                        
+                        val apiResponsePost = app.post("$apiHost$path", referer = targetUrl, headers = headers, verify = false).text
                         val apiMatchPost = mediaRegex.find(apiResponsePost)
                         if (apiMatchPost != null) {
                             invokeCallback(apiMatchPost.value, targetUrl, callback)
