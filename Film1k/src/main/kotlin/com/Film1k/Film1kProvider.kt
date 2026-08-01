@@ -97,15 +97,12 @@ class Film1kProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url).document
 
-        // Media Name extraction — scoped to the FIRST <article> under the main
-        // content section (the actual post), not a bare global ".entry-title"
-        // query. A global query can accidentally match a different post's
-        // title first (e.g. a "related movies" grid rendered further down
-        // the same page reuses the same article/entry-title markup), which
-        // is what was causing the title shown here to differ from the one on
-        // the homepage/search listing.
-        val mainArticle = doc.selectFirst("#Ez-Wp > div > div > div > main > section > article")
-        val mediaName = mainArticle?.selectFirst("h1.entry-title, h2.entry-title, header h1, header h2")
+        // Media Name extraction — confirmed identical structure to the
+        // homepage/search listings:
+        // #Ez-Wp > div > div > div > main > section > article > header > a > h2
+        // (article's specific post/category/tag classes vary per movie, but
+        // this generic chain matches consistently across all three contexts.)
+        val mediaName = doc.selectFirst("#Ez-Wp > div > div > div > main > section > article > header > a > h2")
             ?.text()?.trim()?.takeIf { it.isNotBlank() }
             ?: doc.selectFirst("h1.entry-title, h2.entry-title")?.text()?.trim()?.takeIf { it.isNotBlank() }
             ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.takeIf { it.isNotBlank() }
