@@ -2,6 +2,7 @@ package com.film1k
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.network.WebViewResolver
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.jsoup.nodes.TextNode
@@ -217,7 +218,6 @@ class Film1kProvider : MainAPI() {
             val isM3u8 = videoUrl.contains(".m3u8")
             val isMp4 = videoUrl.contains(".mp4")
             
-            // Check if it's a direct media link and NOT masquerading as an embed path
             val isDirectMedia = (isM3u8 || isMp4) && 
                 !videoUrl.contains("/e/") && 
                 !videoUrl.contains("/embed/") && 
@@ -236,8 +236,7 @@ class Film1kProvider : MainAPI() {
                     }
                 )
             } else {
-                // FORCE the link through our custom extractor to ensure verify = false is used.
-                // Do NOT use Cloudstream's generic loadExtractor() here, as it will crash on blocked ISPs.
+                // Route all embed pages through the WebViewResolver Extractor
                 Film1kExtractor().getUrl(videoUrl, mainUrl, subtitleCallback, callback)
             }
         }
@@ -247,34 +246,14 @@ class Film1kProvider : MainAPI() {
 }
 
 // ---------------------------------------------------------------------
-// EXTRACTOR TO BYPASS THE FAKE PLAYER & EXTRACT THE M3U8
-// (Manually bypasses SSL to prevent crashes caused by ISP blocking)
+// WEBVIEW RESOLVER EXTRACTOR 
+// Instantiates a hidden browser to solve the Javascript Math Challenge
 // ---------------------------------------------------------------------
 
 class Film1kExtractor : ExtractorApi() {
     override var mainUrl = "https://film1k.xyz"
     override var name = "Film1k Embed"
     override val requiresReferer = false
-
-    private suspend fun invokeCallback(
-        streamUrl: String, 
-        referer: String, 
-        callback: (ExtractorLink) -> Unit
-    ) {
-        val cleanUrl = streamUrl.replace("\\/", "/")
-        val isM3u8 = cleanUrl.contains(".m3u8")
-        callback.invoke(
-            newExtractorLink(
-                name = this.name,
-                source = this.name,
-                url = cleanUrl,
-                type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-            ) {
-                this.referer = referer
-                this.quality = Qualities.Unknown.value
-            }
-        )
-    }
 
     override suspend fun getUrl(
         url: String,
@@ -283,84 +262,34 @@ class Film1kExtractor : ExtractorApi() {
         callback: (ExtractorLink) -> Unit
     ) {
         try {
-            // 1. Fetch the main embed page (ALWAYS USE verify = false)
-            val response = app.get(url, referer = referer, verify = false).text
+            // Step 1: Create an interceptor that listens for any network request ending in .m3u8 or .mp4
+            val resolver = WebViewResolver(Regex("""\.(m3u8|mp4)"""))
             
-            // 2. Safely find the iframe (like q8y5z.com)
-            val document = org.jsoup.Jsoup.parse(response)
-            var iframeSrc = document.selectFirst("iframe")?.attr("src")
-            if (iframeSrc.isNullOrBlank()) {
-                val iframeRegex = Regex("<iframe[^>]+src=[\"']([^\"']+)[\"']")
-                iframeSrc = iframeRegex.find(response)?.groupValues?.get(1)
-            }
+            // Step 2: Load the embed URL in the hidden WebView browser.
+            // The browser will execute the PoW (Proof of Work) script automatically.
+            // When the player inevitably requests the master.m3u8 file, the resolver traps it!
+            val response = app.get(url, interceptor = resolver, verify = false)
+            
+            // Step 3: Extract the trapped streaming URL from the resolver's response
+            val streamUrl = response.request.url.toString()
 
-            val targetUrl = if (!iframeSrc.isNullOrBlank()) {
-                if (iframeSrc.startsWith("//")) {
-                    "https:$iframeSrc"
-                } else if (iframeSrc.startsWith("/")) {
-                    val host = url.split("/").take(3).joinToString("/")
-                    "$host$iframeSrc"
-                } else {
-                    iframeSrc
-                }
-            } else url
-
-            // 3. Fetch the iframe target manually (CRITICAL: verify = false prevents the SSL crash)
-            val targetHtml = if (targetUrl != url) {
-                app.get(targetUrl, referer = url, verify = false).text
-            } else response
-
-            val mediaRegex = Regex("(?<=[\"'])(https?://[^\"']+(?:\\.m3u8|\\.mp4)[^\"']*)(?=[\"'])")
-
-            // Method A: Standard Regex search in HTML
-            var match = mediaRegex.find(targetHtml)
-            if (match != null) {
-                invokeCallback(match.value, targetUrl, callback)
-                return
-            }
-
-            // Method B: Unpack Obfuscated JS (Dean Edwards eval packer)
-            val packedRegex = Regex("eval\\(function\\(p,a,c,k,e,d\\).*?split\\('\\|'\\).*?\\)\\)")
-            val packedMatch = packedRegex.find(targetHtml)
-            if (packedMatch != null) {
-                val unpacked = getAndUnpack(packedMatch.value)
-                val unpackedMatch = mediaRegex.find(unpacked)
-                if (unpackedMatch != null) {
-                    invokeCallback(unpackedMatch.value, targetUrl, callback)
-                    return
-                }
-            }
-
-            // Method C: API Bypass (Intercepting XHR requests)
-            val videoId = targetUrl.substringAfterLast("/").substringBefore("?")
-            if (videoId.isNotBlank()) {
-                val apiHost = targetUrl.substringBefore("/e/").substringBefore("/v/").substringBefore("/embed/")
+            if (streamUrl.contains(".m3u8") || streamUrl.contains(".mp4")) {
+                val isM3u8 = streamUrl.contains(".m3u8")
                 
-                val paths = listOf("/api/playback/$videoId", "/playback/$videoId", "/api/source/$videoId", "/source/$videoId")
-                for (path in paths) {
-                    try {
-                        val headers = mapOf("X-Requested-With" to "XMLHttpRequest")
-                        
-                        // Test GET request
-                        val apiResponseGet = app.get("$apiHost$path", referer = targetUrl, headers = headers, verify = false).text
-                        val apiMatchGet = mediaRegex.find(apiResponseGet)
-                        if (apiMatchGet != null) {
-                            invokeCallback(apiMatchGet.value, targetUrl, callback)
-                            return
-                        }
-
-                        // Test POST request
-                        val apiResponsePost = app.post("$apiHost$path", referer = targetUrl, headers = headers, verify = false).text
-                        val apiMatchPost = mediaRegex.find(apiResponsePost)
-                        if (apiMatchPost != null) {
-                            invokeCallback(apiMatchPost.value, targetUrl, callback)
-                            return
-                        }
-                    } catch (e: Exception) {}
-                }
+                callback.invoke(
+                    newExtractorLink(
+                        name = this.name,
+                        source = this.name,
+                        url = streamUrl,
+                        type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                    ) {
+                        this.referer = url
+                        this.quality = Qualities.Unknown.value
+                    }
+                )
             }
         } catch (e: Exception) {
-            // Silently swallow errors so the app doesn't panic
+            // Fail silently to prevent app crashes
         }
     }
 }
