@@ -251,7 +251,6 @@ class Film1kProvider : MainAPI() {
 
 // ---------------------------------------------------------------------
 // EXTRACTOR TO BYPASS THE FAKE PLAYER & EXTRACT THE M3U8
-// (Manually bypasses SSL to prevent crashes caused by ISP blocking)
 // ---------------------------------------------------------------------
 
 class Film1kExtractor : ExtractorApi() {
@@ -259,8 +258,8 @@ class Film1kExtractor : ExtractorApi() {
     override var name = "Film1k Embed"
     override val requiresReferer = false
 
-    // Helper function to safely send the link back to the player
-    private fun invokeCallback(
+    // FIXED: Added `suspend` keyword here!
+    private suspend fun invokeCallback(
         streamUrl: String, 
         referer: String, 
         callback: (ExtractorLink) -> Unit
@@ -287,10 +286,10 @@ class Film1kExtractor : ExtractorApi() {
         callback: (ExtractorLink) -> Unit
     ) {
         try {
-            // 1. Fetch the main embed page (ALWAYS USE verify = false)
+            // 1. Fetch the main embed page
             val response = app.get(url, referer = referer, verify = false).text
             
-            // 2. Safely find the iframe (like q8y5z.com) without triggering loadExtractor()
+            // 2. Safely find the iframe without triggering loadExtractor()
             val document = org.jsoup.Jsoup.parse(response)
             var iframeSrc = document.selectFirst("iframe")?.attr("src")
             if (iframeSrc.isNullOrBlank()) {
@@ -302,7 +301,7 @@ class Film1kExtractor : ExtractorApi() {
                 if (iframeSrc.startsWith("//")) "https:$iframeSrc" else iframeSrc
             } else url
 
-            // 3. Fetch the iframe target manually (CRITICAL: verify = false prevents the SSL crash)
+            // 3. Fetch the iframe target manually
             val targetHtml = if (targetUrl != url) {
                 app.get(targetUrl, referer = url, verify = false).text
             } else response
@@ -333,7 +332,7 @@ class Film1kExtractor : ExtractorApi() {
             if (videoId.isNotBlank()) {
                 val apiHost = targetUrl.substringBefore("/e/").substringBefore("/v/").substringBefore("/embed/")
                 
-                // Try testing the hidden endpoints seen in your screenshot
+                // Try testing the hidden endpoints
                 val paths = listOf("/api/playback/$videoId", "/playback/$videoId")
                 for (path in paths) {
                     try {
