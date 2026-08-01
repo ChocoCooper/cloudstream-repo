@@ -104,116 +104,85 @@ class Film1kProvider : MainAPI() {
             ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.takeIf { it.isNotBlank() }
             ?: doc.title()
 
-        // Poster extraction
+        // Poster extraction — the aside poster <img> is often lazy-loaded, so the
+        // real image lives in data-src/data-lazy-src while src is just a blank
+        // placeholder (e.g. src="data:image/svg+xml;base64,..."). Check those first.
         val imgEl = doc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div > img")
-        val srcPoster = imgEl?.attr("src")?.takeIf { it.isNotBlank() }
+        val realPoster = imgEl?.let { el ->
+            el.attr("data-src").takeIf { it.isNotBlank() }
+                ?: el.attr("data-lazy-src").takeIf { it.isNotBlank() }
+                ?: el.attr("src").takeIf { it.isNotBlank() && !it.startsWith("data:") }
+        }
         val ogPoster = doc.selectFirst("meta[property=og:image]")?.attr("content")?.takeIf { it.isNotBlank() }
-        val posterUrl = (srcPoster ?: ogPoster)?.let { fixUrl(it) }
+        val posterUrl = (realPoster ?: ogPoster)?.let { fixUrl(it) }
 
-        // Description extraction
-        // Structure: aside > div > div > p:nth-child(4) contains
-        // <strong>Movie Title</strong>, followed by inline text/links that
-        // form the actual description, then a trailing Film1k promo sentence
-        // we don't want ("Stream this ... on Film1k in high quality!").
+        // Description extraction — instead of relying on a fragile nth-child
+        // position (which shifts between pages), find the <strong>/<h3> label
+        // whose own text is "Plot" or "Description" (with or without a colon),
+        // then collect the text that follows it up to the next label/heading.
+        // Inline <a> links are kept as plain text (href dropped, words kept).
         var plot: String? = null
 
-        val descP = doc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div > p:nth-child(4)")
-        val descStrong = descP?.selectFirst("strong")
+        val descContainer = doc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div")
 
-        if (descP != null) {
-            var descText = descP.text()
+        fun extractAfterLabel(label: String): String? {
+            val labelEl = descContainer?.select("strong, h3, b")?.firstOrNull {
+                it.text().trim().removeSuffix(":").trim().equals(label, ignoreCase = true)
+            } ?: return null
 
-            // Strip the leading movie-title strong text if present.
-            val titleText = descStrong?.text()
-            if (!titleText.isNullOrBlank() && descText.startsWith(titleText)) {
-                descText = descText.removePrefix(titleText)
+            val builder = StringBuilder()
+            var sibling = labelEl.nextSibling()
+            while (sibling != null) {
+                if (sibling is Element) {
+                    val tagName = sibling.tagName().lowercase()
+                    // Stop once we hit another label/heading — that belongs to the next field.
+                    if (tagName in listOf("h1", "h2", "h3", "h4", "strong", "b")) break
+                    builder.append(sibling.text()).append(" ")
+                } else if (sibling is TextNode) {
+                    builder.append(sibling.text()).append(" ")
+                }
+                sibling = sibling.nextSibling()
             }
 
-            // Drop the leading ", " (or ": ") left after removing the title.
-            descText = descText.trim().removePrefix(",").removePrefix(":").trim()
+            var extracted = builder.toString().trim()
+                .removePrefix(",").removePrefix(":").trim()
+            if (extracted.isBlank()) return null
 
-            // Drop any trailing sentence(s) that mention the site name (self-promo).
-            val sentences = descText.split(Regex("(?<=[.!?])\\s+"))
-            descText = sentences.filterNot { it.contains("Film1k", ignoreCase = true) }
-                .joinToString(" ")
-                .trim()
+            // Drop any trailing self-promo sentence (e.g. "Stream this ... on Film1k ...").
+            val sentences = extracted.split(Regex("(?<=[.!?])\\s+"))
+            val filtered = sentences.filterNot { it.contains("Film1k", ignoreCase = true) }
+                .joinToString(" ").trim()
+            extracted = filtered.ifBlank { extracted }
 
-            if (descText.isNotBlank()) {
-                plot = descText
-            }
+            return extracted.ifBlank { null }
         }
 
-        // Fallback: alternate layout where a plain <h3>Description:</h3> is
-        // followed directly by sibling text/links (no wrapping <p>/<strong> title).
-        if (plot.isNullOrBlank()) {
-            val descH3 = doc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div > h3")
-                ?.takeIf { it.text().contains("Description", ignoreCase = true) }
-
-            if (descH3 != null) {
-                val builder = StringBuilder()
-                var sibling = descH3.nextSibling()
-                while (sibling != null) {
-                    if (sibling is Element) {
-                        val tagName = sibling.tagName().lowercase()
-                        if (tagName in listOf("h1", "h2", "h3", "h4", "p", "div", "strong", "b") && tagName != "a") {
-                            break
-                        }
-                        builder.append(sibling.text()).append(" ")
-                    } else if (sibling is TextNode) {
-                        builder.append(sibling.text()).append(" ")
-                    }
-                    sibling = sibling.nextSibling()
-                }
-                var extracted = builder.toString().trim()
-
-                // Drop any trailing self-promo sentence, same as the primary path.
-                val sentences = extracted.split(Regex("(?<=[.!?])\\s+"))
-                val filtered = sentences.filterNot { it.contains("Film1k", ignoreCase = true) }
-                    .joinToString(" ")
-                    .trim()
-                extracted = filtered.ifBlank { extracted }
-
-                if (extracted.isNotBlank()) {
-                    plot = extracted
-                }
+        fun extractTitleLeadParagraph(): String? {
+            // Some pages have no literal "Plot"/"Description" label text at all —
+            // the first <p> just starts with the movie title in <strong>, e.g.
+            // "<strong>Dinosaur Island</strong>, an adventure comedy movie...".
+            val firstP = descContainer?.selectFirst("p") ?: return null
+            val leadStrong = firstP.selectFirst("strong") ?: return null
+            var text = firstP.text()
+            val titleText = leadStrong.text()
+            if (text.startsWith(titleText)) {
+                text = text.removePrefix(titleText)
             }
+            text = text.trim().removePrefix(",").removePrefix(":").trim()
+            if (text.isBlank()) return null
+
+            val sentences = text.split(Regex("(?<=[.!?])\\s+"))
+            val filtered = sentences.filterNot { it.contains("Film1k", ignoreCase = true) }
+                .joinToString(" ").trim()
+            return filtered.ifBlank { text }.ifBlank { null }
         }
 
-        // Fallback: older "Plot" labeled layout, in case a page uses it instead.
-        if (plot.isNullOrBlank()) {
-            val plotStrong = doc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div > strong:nth-child(14)")
-                ?.takeIf { it.text().contains("Plot", ignoreCase = true) }
-                ?: doc.selectFirst("#Ez-Wp > div > div.Container > div > aside strong:contains(Plot)")
-                ?: doc.selectFirst("#Ez-Wp > div > div.Container > div > aside b:contains(Plot)")
-                ?: doc.selectFirst("strong:contains(Plot)")
-
-            if (plotStrong != null) {
-                val builder = StringBuilder()
-                var sibling = plotStrong.nextSibling()
-                while (sibling != null) {
-                    if (sibling is Element) {
-                        val tagName = sibling.tagName().lowercase()
-                        if (tagName in listOf("h1", "h2", "h3", "h4", "p", "div", "strong", "b") && tagName != "a") {
-                            break
-                        }
-                        builder.append(sibling.text()).append(" ")
-                    } else if (sibling is TextNode) {
-                        builder.append(sibling.text()).append(" ")
-                    }
-                    sibling = sibling.nextSibling()
-                }
-                val extracted = builder.toString().trim()
-                if (extracted.isNotBlank()) {
-                    plot = extracted
-                }
-            }
-        }
+        plot = extractAfterLabel("Description") ?: extractAfterLabel("Plot") ?: extractTitleLeadParagraph()
 
         // Final fallback: whole aside text block minus its heading.
         if (plot.isNullOrBlank()) {
-            val asideDiv = doc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div")
-            val h3Text = asideDiv?.selectFirst("h3")?.text() ?: ""
-            var rawPlot = asideDiv?.text() ?: ""
+            val h3Text = descContainer?.selectFirst("h3")?.text() ?: ""
+            var rawPlot = descContainer?.text() ?: ""
             if (h3Text.isNotBlank()) {
                 rawPlot = rawPlot.replace(h3Text, "").trim()
             }
