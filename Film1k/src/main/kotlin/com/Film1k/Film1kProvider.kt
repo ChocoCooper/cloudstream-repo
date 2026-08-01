@@ -97,13 +97,17 @@ class Film1kProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url).document
 
-        // Media Name extraction — use the entry-title class directly (WordPress
-        // standard), since the single media page doesn't always wrap the h2 in
-        // the same "article > header > a" chain the listing pages use. This is
-        // what keeps the title identical to what's shown on the homepage/search.
-        val mediaName = doc.selectFirst("h1.entry-title, h2.entry-title")?.text()?.trim()?.takeIf { it.isNotBlank() }
-            ?: doc.selectFirst("#Ez-Wp > div > div > div > main > section > article > header > a > h2")
-                ?.text()?.trim()?.takeIf { it.isNotBlank() }
+        // Media Name extraction — scoped to the FIRST <article> under the main
+        // content section (the actual post), not a bare global ".entry-title"
+        // query. A global query can accidentally match a different post's
+        // title first (e.g. a "related movies" grid rendered further down
+        // the same page reuses the same article/entry-title markup), which
+        // is what was causing the title shown here to differ from the one on
+        // the homepage/search listing.
+        val mainArticle = doc.selectFirst("#Ez-Wp > div > div > div > main > section > article")
+        val mediaName = mainArticle?.selectFirst("h1.entry-title, h2.entry-title, header h1, header h2")
+            ?.text()?.trim()?.takeIf { it.isNotBlank() }
+            ?: doc.selectFirst("h1.entry-title, h2.entry-title")?.text()?.trim()?.takeIf { it.isNotBlank() }
             ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.takeIf { it.isNotBlank() }
             ?: doc.title()
 
@@ -244,9 +248,17 @@ class Film1kProvider : MainAPI() {
             if (href.isNotBlank()) extractedUrls.add(fixUrl(href))
         }
 
-        // Process all extracted URLs
+        // Process all extracted URLs.
+        // IMPORTANT: URLs under an "/e/" path are embed PAGES (HTML), not raw
+        // media files — even if the filename ends in ".mp4"/".m3u8". Treating
+        // them as direct links makes the player try to parse an HTML page as
+        // a video container, which fails with UnrecognizedInputFormatException
+        // ("sniff failures: NoDeclaredBrand"). Only treat a URL as a direct
+        // playable file if it's NOT an embed path.
         for (videoUrl in extractedUrls) {
-            if (videoUrl.contains(".m3u8")) {
+            val isEmbedPage = videoUrl.contains("/e/") || videoUrl.contains("/embed/")
+
+            if (!isEmbedPage && videoUrl.contains(".m3u8")) {
                 callback.invoke(
                     newExtractorLink(
                         name = this.name,
@@ -258,7 +270,7 @@ class Film1kProvider : MainAPI() {
                         this.quality = Qualities.Unknown.value
                     }
                 )
-            } else if (videoUrl.contains(".mp4")) {
+            } else if (!isEmbedPage && videoUrl.contains(".mp4")) {
                 callback.invoke(
                     newExtractorLink(
                         name = this.name,
@@ -271,7 +283,8 @@ class Film1kProvider : MainAPI() {
                     }
                 )
             } else {
-                // If it's an embed provider link (e.g. film1k.xyz/e/...)
+                // Embed provider page (e.g. film1k.xyz/e/...) — needs a real
+                // extractor to fetch the page and pull the actual source out.
                 loadExtractor(videoUrl, data, subtitleCallback, callback)
             }
         }
