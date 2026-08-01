@@ -39,29 +39,18 @@ class Film1kProvider : MainAPI() {
             top10Elements.map { aTag ->
                 async {
                     val mediaUrl = fixUrl(aTag.attr("href"))
-                    val imgInTag = aTag.selectFirst("img")
-
-                    if (imgInTag != null) {
-                        val rawName = imgInTag.attr("alt").ifBlank { aTag.text() }
+                    try {
+                        val mediaDoc = app.get(mediaUrl).document
+                        val imgEl = mediaDoc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div > img")
+                        val rawName = imgEl?.attr("alt")?.takeIf { it.isNotBlank() } ?: aTag.text()
                         val mediaName = rawName.replace("movie poster watch online", "", ignoreCase = true).trim()
-                        val posterUrl = imgInTag.attr("src").ifBlank { imgInTag.attr("data-src") }.let { fixUrl(it) }
+                        val posterUrl = imgEl?.attr("src")?.takeIf { it.isNotBlank() }?.let { fixUrl(it) }
+
                         newMovieSearchResponse(mediaName, mediaUrl, TvType.Movie) {
                             this.posterUrl = posterUrl
                         }
-                    } else {
-                        try {
-                            val mediaDoc = app.get(mediaUrl).document
-                            val imgEl = mediaDoc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div > img")
-                            val rawName = imgEl?.attr("alt") ?: aTag.text()
-                            val mediaName = rawName.replace("movie poster watch online", "", ignoreCase = true).trim()
-                            val posterUrl = imgEl?.attr("src")?.let { fixUrl(it) }
-
-                            newMovieSearchResponse(mediaName, mediaUrl, TvType.Movie) {
-                                this.posterUrl = posterUrl
-                            }
-                        } catch (e: Exception) {
-                            null
-                        }
+                    } catch (e: Exception) {
+                        null
                     }
                 }
             }.mapNotNull { it.await() }
@@ -107,34 +96,33 @@ class Film1kProvider : MainAPI() {
         return parseArticles(doc)
     }
 
-    private fun parseArticles(doc: Document): List<SearchResponse> {
+    private suspend fun parseArticles(doc: Document): List<SearchResponse> = coroutineScope {
         val articles = doc.select("#Ez-Wp > div > div > div > main > section > article")
-        return articles.mapNotNull { article ->
-            val aHeader = article.selectFirst("header > a") ?: return@mapNotNull null
-            val mediaUrl = fixUrl(aHeader.attr("href"))
-            if (mediaUrl.isBlank()) return@mapNotNull null
+        articles.map { article ->
+            async {
+                val aHeader = article.selectFirst("header > a") ?: return@async null
+                val mediaUrl = fixUrl(aHeader.attr("href"))
+                if (mediaUrl.isBlank()) return@async null
 
-            val imgEl = article.selectFirst("header > a > figure > img")
-                ?: article.selectFirst("figure > img")
-                ?: article.selectFirst("img")
+                val fallbackTitle = article.selectFirst("header > a > h2")?.text() ?: aHeader.text()
 
-            val rawTitle = article.selectFirst("header > a > h2")?.text()
-                ?: imgEl?.attr("alt")
-                ?: aHeader.text()
+                // Visit media page to extract poster image directly
+                try {
+                    val mediaDoc = app.get(mediaUrl).document
+                    val imgEl = mediaDoc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div > img")
+                    val rawName = imgEl?.attr("alt")?.takeIf { it.isNotBlank() } ?: fallbackTitle
+                    val mediaName = rawName.replace("movie poster watch online", "", ignoreCase = true).trim()
+                    val posterUrl = imgEl?.attr("src")?.takeIf { it.isNotBlank() }?.let { fixUrl(it) }
 
-            val mediaName = rawTitle.replace("movie poster watch online", "", ignoreCase = true).trim()
-
-            val posterUrl = imgEl?.let {
-                val src = it.attr("src")
-                    .ifBlank { it.attr("data-src") }
-                    .ifBlank { it.attr("data-lazy-src") }
-                if (src.isNotBlank()) fixUrl(src) else null
+                    newMovieSearchResponse(mediaName, mediaUrl, TvType.Movie) {
+                        this.posterUrl = posterUrl
+                    }
+                } catch (e: Exception) {
+                    val mediaName = fallbackTitle.replace("movie poster watch online", "", ignoreCase = true).trim()
+                    newMovieSearchResponse(mediaName, mediaUrl, TvType.Movie)
+                }
             }
-
-            newMovieSearchResponse(mediaName, mediaUrl, TvType.Movie) {
-                this.posterUrl = posterUrl
-            }
-        }
+        }.mapNotNull { it.await() }
     }
 
     override suspend fun load(url: String): LoadResponse {
