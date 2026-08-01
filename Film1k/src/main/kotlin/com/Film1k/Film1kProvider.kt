@@ -270,8 +270,8 @@ class Film1kExtractor : ExtractorApi() {
             // When the player inevitably requests the master.m3u8 file, the resolver traps it!
             val response = app.get(url, interceptor = resolver, verify = false)
             
-            // Step 3: Extract the trapped streaming URL from the resolver's response
-            val streamUrl = response.request.url.toString()
+            // Step 3: Extract the trapped streaming URL from the resolver's response directly
+            val streamUrl = response.url
 
             if (streamUrl.contains(".m3u8") || streamUrl.contains(".mp4")) {
                 val isM3u8 = streamUrl.contains(".m3u8")
