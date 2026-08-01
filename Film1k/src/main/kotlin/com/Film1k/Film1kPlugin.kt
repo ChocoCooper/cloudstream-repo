@@ -8,5 +8,6 @@ import com.lagradost.cloudstream3.plugins.Plugin
 class Film1kPlugin : Plugin() {
     override fun load(context: Context) {
         registerMainAPI(Film1kProvider())
+        registerExtractorAPI(Film1kExtractor())
     }
 }
