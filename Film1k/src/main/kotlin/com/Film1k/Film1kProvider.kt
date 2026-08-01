@@ -23,7 +23,6 @@ class Film1kProvider : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-        // verify = false added everywhere to bypass SSL handshake errors
         val homeDoc = app.get("$mainUrl/", verify = false).document
         val usaDoc = app.get("$mainUrl/tag/usa", verify = false).document
         val nintiesDoc = app.get("$mainUrl/tag/1990s", verify = false).document
@@ -190,7 +189,6 @@ class Film1kProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // verify = false is CRITICAL here, this is where it was crashing!
         val doc = app.get(data, verify = false).document
         val extractedUrls = mutableSetOf<String>()
 
@@ -253,6 +251,7 @@ class Film1kProvider : MainAPI() {
 
 // ---------------------------------------------------------------------
 // EXTRACTOR TO BYPASS THE FAKE PLAYER & EXTRACT THE M3U8
+// (Manually bypasses SSL to prevent crashes caused by ISP blocking)
 // ---------------------------------------------------------------------
 
 class Film1kExtractor : ExtractorApi() {
@@ -260,92 +259,116 @@ class Film1kExtractor : ExtractorApi() {
     override var name = "Film1k Embed"
     override val requiresReferer = false
 
+    // Helper function to safely send the link back to the player
+    private fun invokeCallback(
+        streamUrl: String, 
+        referer: String, 
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val cleanUrl = streamUrl.replace("\\/", "/")
+        val isM3u8 = cleanUrl.contains(".m3u8")
+        callback.invoke(
+            newExtractorLink(
+                name = this.name,
+                source = this.name,
+                url = cleanUrl,
+                type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+            ) {
+                this.referer = referer
+                this.quality = Qualities.Unknown.value
+            }
+        )
+    }
+
     override suspend fun getUrl(
         url: String,
         referer: String?,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        val videoId = url.substringAfterLast("/")
-        if (videoId.isBlank()) return
-
-        // Regex that captures both m3u8 and mp4 video URLs reliably
-        val mediaRegex = Regex("(https?://[^\"\\s'<>]+(?:\\.m3u8|\\.mp4)[^\"\\s'<>]*)")
-
-        // Helper function to hit hidden APIs found in your network trace
-        suspend fun testEndpoint(apiUrl: String, isPost: Boolean): Boolean {
-            try {
-                val headers = mapOf(
-                    "X-Requested-With" to "XMLHttpRequest",
-                    "Accept" to "application/json, text/plain, */*"
-                )
-                
-                val response = if (isPost) {
-                    app.post(apiUrl, referer = url, headers = headers, verify = false).text
-                } else {
-                    app.get(apiUrl, referer = url, headers = headers, verify = false).text
-                }
-                
-                val match = mediaRegex.find(response)
-                if (match != null) {
-                    val streamUrl = match.value.replace("\\/", "/")
-                    val isM3u8 = streamUrl.contains(".m3u8")
-                    
-                    callback.invoke(
-                        newExtractorLink(
-                            name = this@Film1kExtractor.name,
-                            source = this@Film1kExtractor.name,
-                            url = streamUrl,
-                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                        ) {
-                            this.referer = url
-                            this.quality = Qualities.Unknown.value
-                        }
-                    )
-                    return true
-                }
-            } catch (e: Exception) { 
-                // Ignore API failures and move to next
-            }
-            return false
-        }
-
-        // Test the known API routes spotted in your screenshot (playback/settings)
-        val paths = listOf(
-            "/api/playback/$videoId",
-            "/playback/$videoId",
-            "/api/settings/$videoId",
-            "/settings/$videoId",
-            "/api/source/$videoId",
-            "/source/$videoId"
-        )
-
-        for (path in paths) {
-            // Test both GET and POST for each known Byse Frontend route
-            if (testEndpoint("$mainUrl$path", isPost = false)) return
-            if (testEndpoint("$mainUrl$path", isPost = true)) return
-        }
-
-        // Fallback: If APIs fail, load the raw page to see if it's hardcoded
         try {
-            val html = app.get(url, referer = referer, verify = false).text
-            val match = mediaRegex.find(html)
-            if (match != null) {
-                val streamUrl = match.value.replace("\\/", "/")
-                val isM3u8 = streamUrl.contains(".m3u8")
-                
-                callback.invoke(
-                    newExtractorLink(
-                        name = this.name,
-                        source = this.name,
-                        url = streamUrl,
-                        type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                    ) {
-                        this.referer = url
-                        this.quality = Qualities.Unknown.value
-                    }
-                )
+            // 1. Fetch the main embed page (ALWAYS USE verify = false)
+            val response = app.get(url, referer = referer, verify = false).text
+            
+            // 2. Safely find the iframe (like q8y5z.com) without triggering loadExtractor()
+            val document = org.jsoup.Jsoup.parse(response)
+            var iframeSrc = document.selectFirst("iframe")?.attr("src")
+            if (iframeSrc.isNullOrBlank()) {
+                val iframeRegex = Regex("<iframe[^>]+src=[\"']([^\"']+)[\"']")
+                iframeSrc = iframeRegex.find(response)?.groupValues?.get(1)
             }
-        } catch (e: Exception) {}
+
+            val targetUrl = if (!iframeSrc.isNullOrBlank()) {
+                if (iframeSrc.startsWith("//")) "https:$iframeSrc" else iframeSrc
+            } else url
+
+            // 3. Fetch the iframe target manually (CRITICAL: verify = false prevents the SSL crash)
+            val targetHtml = if (targetUrl != url) {
+                app.get(targetUrl, referer = url, verify = false).text
+            } else response
+
+            val mediaRegex = Regex("(?<=[\"'])(https?://[^\"']+(?:\\.m3u8|\\.mp4)[^\"']*)(?=[\"'])")
+
+            // Method A: Standard Regex search in HTML
+            var match = mediaRegex.find(targetHtml)
+            if (match != null) {
+                invokeCallback(match.value, targetUrl, callback)
+                return
+            }
+
+            // Method B: Unpack Obfuscated JS (Dean Edwards eval packer)
+            val packedRegex = Regex("eval\\(function\\(p,a,c,k,e,d\\).*?split\\('\\|'\\).*?\\)\\)")
+            val packedMatch = packedRegex.find(targetHtml)
+            if (packedMatch != null) {
+                val unpacked = getAndUnpack(packedMatch.value)
+                val unpackedMatch = mediaRegex.find(unpacked)
+                if (unpackedMatch != null) {
+                    invokeCallback(unpackedMatch.value, targetUrl, callback)
+                    return
+                }
+            }
+
+            // Method C: API Bypass (Intercepting XHR requests)
+            val videoId = targetUrl.substringAfterLast("/").substringBefore("?")
+            if (videoId.isNotBlank()) {
+                val apiHost = targetUrl.substringBefore("/e/").substringBefore("/v/").substringBefore("/embed/")
+                
+                // Try testing the hidden endpoints seen in your screenshot
+                val paths = listOf("/api/playback/$videoId", "/playback/$videoId")
+                for (path in paths) {
+                    try {
+                        // Test GET request
+                        val apiResponseGet = app.get(
+                            "$apiHost$path", 
+                            referer = targetUrl, 
+                            headers = mapOf("X-Requested-With" to "XMLHttpRequest"), 
+                            verify = false
+                        ).text
+                        
+                        val apiMatchGet = mediaRegex.find(apiResponseGet)
+                        if (apiMatchGet != null) {
+                            invokeCallback(apiMatchGet.value, targetUrl, callback)
+                            return
+                        }
+
+                        // Test POST request
+                        val apiResponsePost = app.post(
+                            "$apiHost$path", 
+                            referer = targetUrl, 
+                            headers = mapOf("X-Requested-With" to "XMLHttpRequest"), 
+                            verify = false
+                        ).text
+                        
+                        val apiMatchPost = mediaRegex.find(apiResponsePost)
+                        if (apiMatchPost != null) {
+                            invokeCallback(apiMatchPost.value, targetUrl, callback)
+                            return
+                        }
+                    } catch (e: Exception) {}
+                }
+            }
+        } catch (e: Exception) {
+            // Silently swallow errors so the app doesn't panic
+        }
     }
 }
