@@ -97,10 +97,13 @@ class Film1kProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url).document
 
-        // Media Name extraction — same h2.entry-title path used on listing pages,
-        // no sentence-trimming needed since this is already the plain title.
-        val mediaName = doc.selectFirst("#Ez-Wp > div > div > div > main > section > article > header > a > h2")
-            ?.text()?.trim()?.takeIf { it.isNotBlank() }
+        // Media Name extraction — use the entry-title class directly (WordPress
+        // standard), since the single media page doesn't always wrap the h2 in
+        // the same "article > header > a" chain the listing pages use. This is
+        // what keeps the title identical to what's shown on the homepage/search.
+        val mediaName = doc.selectFirst("h1.entry-title, h2.entry-title")?.text()?.trim()?.takeIf { it.isNotBlank() }
+            ?: doc.selectFirst("#Ez-Wp > div > div > div > main > section > article > header > a > h2")
+                ?.text()?.trim()?.takeIf { it.isNotBlank() }
             ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.takeIf { it.isNotBlank() }
             ?: doc.title()
 
@@ -216,16 +219,23 @@ class Film1kProvider : MainAPI() {
         val doc = app.get(data).document
         val extractedUrls = mutableSetOf<String>()
 
+        // Helper: prefer real (possibly lazy-loaded) src over a blank/placeholder one.
+        fun realSrc(el: Element): String? {
+            return el.attr("data-src").takeIf { it.isNotBlank() }
+                ?: el.attr("data-lazy-src").takeIf { it.isNotBlank() }
+                ?: el.attr("src").takeIf { it.isNotBlank() && !it.startsWith("data:") }
+        }
+
         // Path 1: #my-video > source
         doc.select("#my-video > source").forEach { source ->
-            val src = source.attr("src")
-            if (src.isNotBlank()) extractedUrls.add(fixUrl(src))
+            val src = realSrc(source)
+            if (!src.isNullOrBlank()) extractedUrls.add(fixUrl(src))
         }
 
         // Path 2: #video-op-a > div > iframe
         doc.select("#video-op-a > div > iframe").forEach { iframe ->
-            val src = iframe.attr("src")
-            if (src.isNotBlank()) extractedUrls.add(fixUrl(src))
+            val src = realSrc(iframe)
+            if (!src.isNullOrBlank()) extractedUrls.add(fixUrl(src))
         }
 
         // Path 3: #Eroz > div > ul > li:nth-child(1) > a
@@ -236,13 +246,25 @@ class Film1kProvider : MainAPI() {
 
         // Process all extracted URLs
         for (videoUrl in extractedUrls) {
-            if (videoUrl.endsWith(".mp4") || videoUrl.contains(".m3u8")) {
+            if (videoUrl.contains(".m3u8")) {
                 callback.invoke(
                     newExtractorLink(
                         name = this.name,
                         source = this.name,
                         url = videoUrl,
-                        type = if (videoUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                        type = ExtractorLinkType.M3U8
+                    ) {
+                        this.referer = mainUrl
+                        this.quality = Qualities.Unknown.value
+                    }
+                )
+            } else if (videoUrl.contains(".mp4")) {
+                callback.invoke(
+                    newExtractorLink(
+                        name = this.name,
+                        source = this.name,
+                        url = videoUrl,
+                        type = ExtractorLinkType.VIDEO
                     ) {
                         this.referer = mainUrl
                         this.quality = Qualities.Unknown.value
