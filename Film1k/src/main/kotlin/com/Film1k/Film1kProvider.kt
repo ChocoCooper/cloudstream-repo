@@ -273,8 +273,9 @@ class Film1kExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        // Fetch the raw HTML of the embed page
-        val response = app.get(url, referer = referer)
+        // Fetch the raw HTML of the embed page. 
+        // We add 'verify = false' to bypass the "Trust anchor not found" SSL error.
+        val response = app.get(url, referer = referer, verify = false)
         val html = response.text
 
         // Attempt 1: Search the raw HTML/Scripts for standard m3u8 patterns
@@ -306,17 +307,16 @@ class Film1kExtractor : ExtractorApi() {
             return
         }
 
-        // Attempt 3: If it's heavily obfuscated via API (React Single Page App), 
-        // we can attempt a lightweight API interception (using the video ID).
-        // For example, if url is "https://film1k.xyz/e/f69hykwic7jp"
+        // Attempt 3: If it's heavily obfuscated via API (React Single Page App)
         val videoId = url.substringAfterLast("/")
         if (videoId.isNotBlank()) {
             try {
-                // Often, these React video hosts make a POST/GET request to a backend endpoint like /api/source/
+                // Add 'verify = false' here as well
                 val apiResponse = app.post(
                     "https://film1k.xyz/api/source/$videoId",
                     referer = url,
-                    headers = mapOf("Accept" to "application/json", "X-Requested-With" to "XMLHttpRequest")
+                    headers = mapOf("Accept" to "application/json", "X-Requested-With" to "XMLHttpRequest"),
+                    verify = false
                 ).text
 
                 val apiMatch = m3u8Regex.find(apiResponse)
