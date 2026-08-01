@@ -23,34 +23,31 @@ class Film1kProvider : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-        val homeDoc = app.get("$mainUrl/").document
-        val usaDoc = app.get("$mainUrl/tag/usa").document
-        val nintiesDoc = app.get("$mainUrl/tag/1990s").document
+        // verify = false added everywhere to bypass SSL handshake errors
+        val homeDoc = app.get("$mainUrl/", verify = false).document
+        val usaDoc = app.get("$mainUrl/tag/usa", verify = false).document
+        val nintiesDoc = app.get("$mainUrl/tag/1990s", verify = false).document
 
         val homePageList = mutableListOf<HomePageList>()
 
-        // 1. Latest Movies Section
         val latestTitle = homeDoc.selectFirst("#Ez-Wp > div > div > div > main > section > div.page-top > h3")?.text() ?: "Latest Movies"
         val latestItems = parseArticles(homeDoc)
         if (latestItems.isNotEmpty()) {
             homePageList.add(HomePageList(latestTitle, latestItems, isHorizontalImages = true))
         }
 
-        // 2. USA Movies Section
         val usaTitle = usaDoc.selectFirst("#Ez-Wp > div > div > div > main > section > div.page-top > h3")?.text() ?: "USA Movies"
         val usaItems = parseArticles(usaDoc)
         if (usaItems.isNotEmpty()) {
             homePageList.add(HomePageList(usaTitle, usaItems, isHorizontalImages = true))
         }
 
-        // 3. 1990s Movies Section
         val nintiesTitle = nintiesDoc.selectFirst("#Ez-Wp > div > div > div > main > section > div.page-top > h3")?.text() ?: "1990s Movies"
         val nintiesItems = parseArticles(nintiesDoc)
         if (nintiesItems.isNotEmpty()) {
             homePageList.add(HomePageList(nintiesTitle, nintiesItems, isHorizontalImages = true))
         }
 
-        // 4. 1990s USA Movies Section (Intersection of USA and 1990s)
         val usaUrls = usaItems.map { it.url }.toSet()
         val intersectionItems = nintiesItems.filter { usaUrls.contains(it.url) }
         if (intersectionItems.isNotEmpty()) {
@@ -62,7 +59,7 @@ class Film1kProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         val searchUrl = "$mainUrl/?s=$query"
-        val doc = app.get(searchUrl).document
+        val doc = app.get(searchUrl, verify = false).document
         return parseArticles(doc)
     }
 
@@ -92,9 +89,8 @@ class Film1kProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val doc = app.get(url).document
+        val doc = app.get(url, verify = false).document
 
-        // Poster extraction
         val imgEl = doc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div > img")
         val realPoster = imgEl?.let { el ->
             el.attr("data-src").takeIf { it.isNotBlank() }
@@ -104,7 +100,6 @@ class Film1kProvider : MainAPI() {
         val ogPoster = doc.selectFirst("meta[property=og:image]")?.attr("content")?.takeIf { it.isNotBlank() }
         val posterUrl = (realPoster ?: ogPoster)?.let { fixUrl(it) }
 
-        // Media Name extraction
         val rawName = imgEl?.attr("alt")?.takeIf { it.isNotBlank() }
             ?: doc.selectFirst("h1.entry-title, h2.entry-title")?.text()?.trim()?.takeIf { it.isNotBlank() }
             ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.takeIf { it.isNotBlank() }
@@ -112,7 +107,6 @@ class Film1kProvider : MainAPI() {
             
         val mediaName = rawName.replace("movie poster watch online", "", ignoreCase = true).trim()
 
-        // Description / Plot extraction
         var plot: String? = null
         val descContainer = doc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div")
 
@@ -179,7 +173,6 @@ class Film1kProvider : MainAPI() {
             ?.replace("\\s+".toRegex(), " ")
             ?.trim()
 
-        // Meta Tags extraction
         val tags1 = doc.select("#Ez-Wp > div > div.Container > div > aside > div > p:nth-child(4) > a").map { it.text() }
         val tags2 = doc.select("#Ez-Wp > div > div.Container > div > aside > div > p:nth-child(6) > a").map { it.text() }
         val allTags = (tags1 + tags2).filter { it.isNotBlank() }.distinct()
@@ -197,7 +190,8 @@ class Film1kProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val doc = app.get(data).document
+        // verify = false is CRITICAL here, this is where it was crashing!
+        val doc = app.get(data, verify = false).document
         val extractedUrls = mutableSetOf<String>()
 
         fun realSrc(el: Element): String? {
@@ -222,7 +216,7 @@ class Film1kProvider : MainAPI() {
         }
 
         for (videoUrl in extractedUrls) {
-            val isEmbedPage = videoUrl.contains("/e/") || videoUrl.contains("/embed/")
+            val isEmbedPage = videoUrl.contains("/e/") || videoUrl.contains("/embed/") || videoUrl.contains("film1k.xyz")
 
             if (!isEmbedPage && videoUrl.contains(".m3u8")) {
                 callback.invoke(
@@ -249,7 +243,6 @@ class Film1kProvider : MainAPI() {
                     }
                 )
             } else {
-                // Passes embed links to the Extractor logic
                 loadExtractor(videoUrl, mainUrl, subtitleCallback, callback)
             }
         }
@@ -273,70 +266,86 @@ class Film1kExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        // Fetch the raw HTML of the embed page. 
-        // We add 'verify = false' to bypass the "Trust anchor not found" SSL error.
-        val response = app.get(url, referer = referer, verify = false)
-        val html = response.text
-
-        // Attempt 1: Search the raw HTML/Scripts for standard m3u8 patterns
-        val m3u8Regex = Regex("(?<=[\"'])(https?://[^\"']+\\.m3u8[^\"']*)(?=[\"'])")
-        val match = m3u8Regex.find(html)
-        
-        if (match != null) {
-            val streamUrl = match.value.replace("\\/", "/")
-            callback.invoke(
-                newExtractorLink(
-                    name = this.name,
-                    source = this.name,
-                    url = streamUrl,
-                    type = ExtractorLinkType.M3U8
-                ) {
-                    this.referer = url
-                    this.quality = Qualities.Unknown.value
-                }
-            )
-            return
-        }
-
-        // Attempt 2: If the m3u8 is not directly in the HTML, check for iframes
-        val document = response.document
-        val iframeSrc = document.selectFirst("iframe")?.attr("src")
-        if (!iframeSrc.isNullOrBlank()) {
-            val fixedIframe = if (iframeSrc.startsWith("//")) "https:$iframeSrc" else iframeSrc
-            loadExtractor(fixedIframe, url, subtitleCallback, callback)
-            return
-        }
-
-        // Attempt 3: If it's heavily obfuscated via API (React Single Page App)
         val videoId = url.substringAfterLast("/")
-        if (videoId.isNotBlank()) {
-            try {
-                // Add 'verify = false' here as well
-                val apiResponse = app.post(
-                    "https://film1k.xyz/api/source/$videoId",
-                    referer = url,
-                    headers = mapOf("Accept" to "application/json", "X-Requested-With" to "XMLHttpRequest"),
-                    verify = false
-                ).text
+        if (videoId.isBlank()) return
 
-                val apiMatch = m3u8Regex.find(apiResponse)
-                if (apiMatch != null) {
-                    val streamUrl = apiMatch.value.replace("\\/", "/")
+        // Regex that captures both m3u8 and mp4 video URLs reliably
+        val mediaRegex = Regex("(https?://[^\"\\s'<>]+(?:\\.m3u8|\\.mp4)[^\"\\s'<>]*)")
+
+        // Helper function to hit hidden APIs found in your network trace
+        suspend fun testEndpoint(apiUrl: String, isPost: Boolean): Boolean {
+            try {
+                val headers = mapOf(
+                    "X-Requested-With" to "XMLHttpRequest",
+                    "Accept" to "application/json, text/plain, */*"
+                )
+                
+                val response = if (isPost) {
+                    app.post(apiUrl, referer = url, headers = headers, verify = false).text
+                } else {
+                    app.get(apiUrl, referer = url, headers = headers, verify = false).text
+                }
+                
+                val match = mediaRegex.find(response)
+                if (match != null) {
+                    val streamUrl = match.value.replace("\\/", "/")
+                    val isM3u8 = streamUrl.contains(".m3u8")
+                    
                     callback.invoke(
                         newExtractorLink(
-                            name = this.name,
-                            source = this.name,
+                            name = this@Film1kExtractor.name,
+                            source = this@Film1kExtractor.name,
                             url = streamUrl,
-                            type = ExtractorLinkType.M3U8
+                            type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                         ) {
                             this.referer = url
                             this.quality = Qualities.Unknown.value
                         }
                     )
+                    return true
                 }
-            } catch (e: Exception) {
-                // API endpoint might be different; fail silently to prevent crashes
+            } catch (e: Exception) { 
+                // Ignore API failures and move to next
             }
+            return false
         }
+
+        // Test the known API routes spotted in your screenshot (playback/settings)
+        val paths = listOf(
+            "/api/playback/$videoId",
+            "/playback/$videoId",
+            "/api/settings/$videoId",
+            "/settings/$videoId",
+            "/api/source/$videoId",
+            "/source/$videoId"
+        )
+
+        for (path in paths) {
+            // Test both GET and POST for each known Byse Frontend route
+            if (testEndpoint("$mainUrl$path", isPost = false)) return
+            if (testEndpoint("$mainUrl$path", isPost = true)) return
+        }
+
+        // Fallback: If APIs fail, load the raw page to see if it's hardcoded
+        try {
+            val html = app.get(url, referer = referer, verify = false).text
+            val match = mediaRegex.find(html)
+            if (match != null) {
+                val streamUrl = match.value.replace("\\/", "/")
+                val isM3u8 = streamUrl.contains(".m3u8")
+                
+                callback.invoke(
+                    newExtractorLink(
+                        name = this.name,
+                        source = this.name,
+                        url = streamUrl,
+                        type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                    ) {
+                        this.referer = url
+                        this.quality = Qualities.Unknown.value
+                    }
+                )
+            }
+        } catch (e: Exception) {}
     }
 }
