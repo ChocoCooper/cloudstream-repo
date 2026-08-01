@@ -34,13 +34,23 @@ class Film1kProvider : MainAPI() {
 
     // Visits a media page and extracts the poster + cleaned title from:
     // #Ez-Wp > div > div.Container > div > aside > div > div > img
+    // Falls back to og:image / og:title meta tags if that selector doesn't
+    // match (theme markup can vary slightly between pages), so home page
+    // and search result posters don't end up blank.
     private suspend fun extractPosterAndTitle(mediaUrl: String, fallbackTitle: String): Pair<String, String?> {
         return try {
             val mediaDoc = app.get(mediaUrl).document
             val imgEl = mediaDoc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div > img")
-            val rawName = imgEl?.attr("alt")?.takeIf { it.isNotBlank() } ?: fallbackTitle
+
+            val altTitle = imgEl?.attr("alt")?.takeIf { it.isNotBlank() }
+            val ogTitle = mediaDoc.selectFirst("meta[property=og:title]")?.attr("content")?.takeIf { it.isNotBlank() }
+            val rawName = altTitle ?: ogTitle ?: fallbackTitle
             val mediaName = cleanTitle(rawName)
-            val posterUrl = imgEl?.attr("src")?.takeIf { it.isNotBlank() }?.let { fixUrl(it) }
+
+            val srcPoster = imgEl?.attr("src")?.takeIf { it.isNotBlank() }
+            val ogPoster = mediaDoc.selectFirst("meta[property=og:image]")?.attr("content")?.takeIf { it.isNotBlank() }
+            val posterUrl = (srcPoster ?: ogPoster)?.let { fixUrl(it) }
+
             mediaName to posterUrl
         } catch (e: Exception) {
             cleanTitle(fallbackTitle) to null
@@ -143,14 +153,24 @@ class Film1kProvider : MainAPI() {
         // Image & Media Name extraction (same selector as poster crawl above,
         // so media page poster/title stay consistent with home/search listings)
         val imgEl = doc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div > img")
-        val rawName = imgEl?.attr("alt")?.takeIf { it.isNotBlank() } ?: doc.title()
+        val altTitle = imgEl?.attr("alt")?.takeIf { it.isNotBlank() }
+        val ogTitle = doc.selectFirst("meta[property=og:title]")?.attr("content")?.takeIf { it.isNotBlank() }
+        val rawName = altTitle ?: ogTitle ?: doc.title()
         val mediaName = cleanTitle(rawName)
-        val posterUrl = imgEl?.attr("src")?.takeIf { it.isNotBlank() }?.let { fixUrl(it) }
+
+        val srcPoster = imgEl?.attr("src")?.takeIf { it.isNotBlank() }
+        val ogPoster = doc.selectFirst("meta[property=og:image]")?.attr("content")?.takeIf { it.isNotBlank() }
+        val posterUrl = (srcPoster ?: ogPoster)?.let { fixUrl(it) }
 
         // Description / Plot extraction
         var plot: String? = null
 
-        val plotStrong = doc.selectFirst("#Ez-Wp > div > div.Container > div > aside strong:contains(Plot)")
+        // Primary: exact structural selector for the Plot <strong> tag.
+        // Falls back to text-based matches in case the position shifts
+        // (nth-child is fragile across pages with slightly different meta rows).
+        val plotStrong = doc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div > strong:nth-child(14)")
+            ?.takeIf { it.text().contains("Plot", ignoreCase = true) }
+            ?: doc.selectFirst("#Ez-Wp > div > div.Container > div > aside strong:contains(Plot)")
             ?: doc.selectFirst("#Ez-Wp > div > div.Container > div > aside b:contains(Plot)")
             ?: doc.selectFirst("strong:contains(Plot)")
 
