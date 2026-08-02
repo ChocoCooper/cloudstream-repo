@@ -32,25 +32,25 @@ class Film1kProvider : MainAPI() {
         val latestTitle = homeDoc.selectFirst("#Ez-Wp > div > div > div > main > section > div.page-top > h3")?.text() ?: "Latest Movies"
         val latestItems = parseArticles(homeDoc)
         if (latestItems.isNotEmpty()) {
-            homePageList.add(HomePageList(latestTitle, latestItems, isHorizontalImages = true))
+            homePageList.add(HomePageList(latestTitle, latestItems, isHorizontalImages = false))
         }
 
         val usaTitle = usaDoc.selectFirst("#Ez-Wp > div > div > div > main > section > div.page-top > h3")?.text() ?: "USA Movies"
         val usaItems = parseArticles(usaDoc)
         if (usaItems.isNotEmpty()) {
-            homePageList.add(HomePageList(usaTitle, usaItems, isHorizontalImages = true))
+            homePageList.add(HomePageList(usaTitle, usaItems, isHorizontalImages = false))
         }
 
         val nintiesTitle = nintiesDoc.selectFirst("#Ez-Wp > div > div > div > main > section > div.page-top > h3")?.text() ?: "1990s Movies"
         val nintiesItems = parseArticles(nintiesDoc)
         if (nintiesItems.isNotEmpty()) {
-            homePageList.add(HomePageList(nintiesTitle, nintiesItems, isHorizontalImages = true))
+            homePageList.add(HomePageList(nintiesTitle, nintiesItems, isHorizontalImages = false))
         }
 
         val usaUrls = usaItems.map { it.url }.toSet()
         val intersectionItems = nintiesItems.filter { usaUrls.contains(it.url) }
         if (intersectionItems.isNotEmpty()) {
-            homePageList.add(HomePageList("1990s USA Movies", intersectionItems, isHorizontalImages = true))
+            homePageList.add(HomePageList("1990s USA Movies", intersectionItems, isHorizontalImages = false))
         }
 
         return newHomePageResponse(homePageList)
