@@ -57,8 +57,8 @@ class Film1kProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        // Fetch first 3 pages concurrently to get more results without a long delay
-        return apmap(1..3) { page ->
+        // Fetch first 2 pages concurrently. If page 2 doesn't exist, it handles the exception gracefully.
+        return listOf(1, 2).apmap { page ->
             val searchUrl = if (page == 1) {
                 "$mainUrl/?s=$query"
             } else {
@@ -70,7 +70,7 @@ class Film1kProvider : MainAPI() {
                 parseArticles(doc)
             } catch (e: Exception) {
                 // If a page doesn't exist (e.g. 404), return an empty list for that page
-                emptyList()
+                emptyList<SearchResponse>()
             }
         }.flatten().distinctBy { it.url } // Prevent duplicates if site loops page 1 for missing pages
     }
@@ -124,7 +124,7 @@ class Film1kProvider : MainAPI() {
 
         fun cleanupText(text: String): String {
             return text
-                .replace(Regex("\\s+([.,;:!?])"), "$1") 
+                .replace(Regex("\\s+([.,;:!?])"), "$1") // "marriage ." -> "marriage."
                 .replace(Regex("\\s+"), " ")
                 .trim()
         }
