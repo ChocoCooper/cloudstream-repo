@@ -57,23 +57,26 @@ class Film1kProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        // Fetch first 2 pages concurrently using amap (async map for suspended contexts).
-        // If page 2 doesn't exist, it handles the exception gracefully and returns what it found on page 1.
-        return listOf(1, 2).amap { page ->
-            val searchUrl = if (page == 1) {
-                "$mainUrl/?s=$query"
-            } else {
-                "$mainUrl/page/$page?s=$query"
-            }
-            
-            try {
-                val doc = app.get(searchUrl, verify = false).document
-                parseArticles(doc)
-            } catch (e: Exception) {
-                // If a page doesn't exist (e.g. 404), return an empty list for that page
-                emptyList<SearchResponse>()
-            }
-        }.flatten().distinctBy { it.url } // Prevent duplicates if site loops page 1 for missing pages
+        val page1Url = "$mainUrl/?s=$query"
+        val page2Url = "$mainUrl/page/2?s=$query"
+
+        val page1Items = try {
+            parseArticles(app.get(page1Url, verify = false).document)
+        } catch (e: Exception) {
+            emptyList()
+        }
+
+        // Page 2 may not exist for queries with few results (404, or a page
+        // with no <article> elements) — treat that as "no more results"
+        // rather than a hard failure.
+        val page2Items = try {
+            parseArticles(app.get(page2Url, verify = false).document)
+        } catch (e: Exception) {
+            emptyList()
+        }
+
+        val seenUrls = mutableSetOf<String>()
+        return (page1Items + page2Items).filter { seenUrls.add(it.url) }
     }
 
     private fun parseArticles(doc: Document): List<SearchResponse> {
@@ -176,6 +179,12 @@ class Film1kProvider : MainAPI() {
             return filtered.ifBlank { text }.ifBlank { null }
         }
 
+        // No further fallback beyond this — if neither an explicit
+        // "Description"/"Plot" label nor a title-lead paragraph is found,
+        // leave plot unset (null) rather than dumping the whole metadata
+        // block (runtime/genres/director/etc). Some pages genuinely have an
+        // empty <h3>Description:</h3> with nothing after it; Cloudstream's
+        // own "no plot found" UI handles that case better than a garbled dump.
         plot = extractAfterLabel("Description") ?: extractAfterLabel("Plot") ?: extractTitleLeadParagraph()
 
         plot = plot?.let { cleanupText(it) }
