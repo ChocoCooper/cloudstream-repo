@@ -4,6 +4,11 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 
@@ -68,6 +73,49 @@ class SkyBapProvider : MainAPI() {
         }
     }
 
+    /**
+     * Runs [transform] over the receiver with at most [concurrency] requests
+     * in flight at once. Used so homepage/search listings (which need one
+     * extra request per item to fetch a real poster) don't fire dozens of
+     * simultaneous requests at the target site.
+     */
+    private suspend fun <T, R> List<T>.mapConcurrent(
+        concurrency: Int = 8,
+        transform: suspend (T) -> R
+    ): List<R> = coroutineScope {
+        val semaphore = Semaphore(concurrency)
+        map { item ->
+            async { semaphore.withPermit { transform(item) } }
+        }.awaitAll()
+    }
+
+    // Per-detail-page poster cache, so re-opening a section or re-searching
+    // the same term doesn't refetch posters we already resolved.
+    private val posterCache = HashMap<String, String?>()
+
+    /**
+     * Category/search listing pages only expose a small decorative arrow
+     * icon next to each title (/images/arw.gif), not a real poster — the
+     * actual poster only lives on the detail page (div.movielist img). To
+     * show real posters in list views we fetch the detail page once per
+     * item (cached) and pull the poster from there.
+     */
+    private suspend fun fetchPosterForDetailPage(detailUrl: String): String? {
+        if (posterCache.containsKey(detailUrl)) return posterCache[detailUrl]
+
+        val poster = try {
+            val base = getActiveBaseUrl()
+            val doc = app.get(detailUrl, timeout = 10).document
+            val src = doc.selectFirst("div.movielist img")?.attr("src")
+            absolute(base, src)
+        } catch (_: Exception) {
+            null
+        }
+
+        posterCache[detailUrl] = poster
+        return poster
+    }
+
     // ---------------------------------------------------------------------
     // Home page
     // ---------------------------------------------------------------------
@@ -97,20 +145,26 @@ class SkyBapProvider : MainAPI() {
      * `div.L` block, e.g.
      *   <div class="L"><b><a href="/movie/....html">Title</a></b></div>
      */
-    private fun parseFolderListing(doc: Document, base: String): List<SearchResponse> {
+    private suspend fun parseFolderListing(doc: Document, base: String): List<SearchResponse> {
         val anchors = doc.select("div.L b a[href]")
             .ifEmpty { doc.select("div.L a[href]") } // fallback if <b> wrapper missing
 
-        return anchors.mapNotNull { it.toSearchResult(base) }
+        // Bounded concurrency: each item needs one extra request to its
+        // detail page to resolve a real poster (see fetchPosterForDetailPage).
+        return anchors.mapConcurrent(concurrency = 8) { it.toSearchResult(base) }
+            .filterNotNull()
     }
 
-    private fun Element.toSearchResult(base: String): SearchResponse? {
+    private suspend fun Element.toSearchResult(base: String): SearchResponse? {
         val href = absolute(base, this.attr("href")) ?: return null
 
         // Title = anchor text, stripped of the leading arrow-icon image alt/whitespace.
         val title = this.text().trim().ifBlank { return null }
 
-        val poster = this.selectFirst("img")?.let { absolute(base, it.attr("src")) }
+        // NOTE: the listing page only has a decorative /images/arw.gif icon
+        // next to the title, not a poster — the real poster lives on the
+        // detail page, so we fetch it there instead of reading this <img>.
+        val poster = fetchPosterForDetailPage(href)
 
         val type = when {
             title.contains("Web Series", ignoreCase = true) -> TvType.TvSeries
