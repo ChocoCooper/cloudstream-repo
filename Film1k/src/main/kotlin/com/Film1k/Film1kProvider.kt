@@ -19,17 +19,6 @@ class Film1kProvider : MainAPI() {
         "$mainUrl/tag/1990s" to "1990s Movies"
     )
 
-    // Forces every poster to a consistent 2:3 card shape via wsrv.nl (a free
-    // image-resizing proxy), regardless of the source image's actual
-    // dimensions. fit=fill stretches to exactly WxH (may distort proportions
-    // on images that aren't already close to 2:3 — chosen deliberately over
-    // cropping/letterboxing for perfectly uniform card sizes).
-    private fun resizePoster(url: String?): String? {
-        if (url.isNullOrBlank()) return null
-        val encoded = java.net.URLEncoder.encode(url, "UTF-8")
-        return "https://wsrv.nl/?url=$encoded&w=300&h=450&fit=fill"
-    }
-
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
@@ -90,7 +79,7 @@ class Film1kProvider : MainAPI() {
                 el.attr("data-src").takeIf { it.isNotBlank() }
                     ?: el.attr("data-lazy-src").takeIf { it.isNotBlank() }
                     ?: el.attr("src").takeIf { it.isNotBlank() }
-            }?.let { fixUrl(it) }?.let { resizePoster(it) }
+            }?.let { fixUrl(it) }
 
             newMovieSearchResponse(mediaName, mediaUrl, TvType.Movie) {
                 this.posterUrl = posterUrl
@@ -108,7 +97,7 @@ class Film1kProvider : MainAPI() {
                 ?: el.attr("src").takeIf { it.isNotBlank() && !it.startsWith("data:") }
         }
         val ogPoster = doc.selectFirst("meta[property=og:image]")?.attr("content")?.takeIf { it.isNotBlank() }
-        val posterUrl = (realPoster ?: ogPoster)?.let { fixUrl(it) }?.let { resizePoster(it) }
+        val posterUrl = (realPoster ?: ogPoster)?.let { fixUrl(it) }
 
         val rawName = imgEl?.attr("alt")?.takeIf { it.isNotBlank() }
             ?: doc.selectFirst("h1.entry-title, h2.entry-title")?.text()?.trim()?.takeIf { it.isNotBlank() }
