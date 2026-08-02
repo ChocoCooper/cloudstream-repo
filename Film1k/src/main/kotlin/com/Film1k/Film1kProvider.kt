@@ -1,8 +1,7 @@
-package com.film1k
+package com.Film1k
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.network.WebViewResolver
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.jsoup.nodes.TextNode
@@ -104,7 +103,7 @@ class Film1kProvider : MainAPI() {
             ?: doc.selectFirst("h1.entry-title, h2.entry-title")?.text()?.trim()?.takeIf { it.isNotBlank() }
             ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.takeIf { it.isNotBlank() }
             ?: doc.title()
-            
+
         val mediaName = rawName.replace("movie poster watch online", "", ignoreCase = true).trim()
 
         var plot: String? = null
@@ -217,10 +216,10 @@ class Film1kProvider : MainAPI() {
         for (videoUrl in extractedUrls) {
             val isM3u8 = videoUrl.contains(".m3u8")
             val isMp4 = videoUrl.contains(".mp4")
-            
-            val isDirectMedia = (isM3u8 || isMp4) && 
-                !videoUrl.contains("/e/") && 
-                !videoUrl.contains("/embed/") && 
+
+            val isDirectMedia = (isM3u8 || isMp4) &&
+                !videoUrl.contains("/e/") &&
+                !videoUrl.contains("/embed/") &&
                 !videoUrl.contains("/v/")
 
             if (isDirectMedia) {
@@ -241,72 +240,5 @@ class Film1kProvider : MainAPI() {
         }
 
         return extractedUrls.isNotEmpty()
-    }
-}
-
-// ---------------------------------------------------------------------
-// WEBVIEW RESOLVER EXTRACTOR 
-// Instantiates a hidden browser to solve the Javascript Math Challenge
-// ---------------------------------------------------------------------
-
-class Film1kExtractor : ExtractorApi() {
-    override var mainUrl = "https://film1k.xyz"
-    override var name = "Film1k Embed"
-    override val requiresReferer = false
-
-    override suspend fun getUrl(
-        url: String,
-        referer: String?,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ) {
-        try {
-            // Step 1: Extract the inner player iframe so we completely bypass 
-            // the outer website's malicious pop-up scripts.
-            val responseText = app.get(url, referer = referer, verify = false).text
-            val document = org.jsoup.Jsoup.parse(responseText)
-            
-            var iframeSrc = document.selectFirst("iframe")?.attr("src")
-            if (iframeSrc.isNullOrBlank()) {
-                val iframeRegex = Regex("<iframe[^>]+src=[\"']([^\"']+)[\"']")
-                iframeSrc = iframeRegex.find(responseText)?.groupValues?.get(1)
-            }
-
-            val targetUrl = if (!iframeSrc.isNullOrBlank()) {
-                if (iframeSrc.startsWith("//")) {
-                    "https:$iframeSrc"
-                } else if (iframeSrc.startsWith("/")) {
-                    val host = url.split("/").take(3).joinToString("/")
-                    "$host$iframeSrc"
-                } else {
-                    iframeSrc
-                }
-            } else url
-
-            // Step 2: Set the resolver to aggressively catch ONLY the master manifest
-            val resolver = WebViewResolver(Regex("""(master|index)\.m3u8"""))
-            
-            // Step 3: Run the hidden browser on the CLEAN target iframe.
-            val response = app.get(targetUrl, interceptor = resolver, verify = false)
-            val streamUrl = response.url
-
-            if (streamUrl.contains(".m3u8") || streamUrl.contains(".mp4")) {
-                val isM3u8 = streamUrl.contains(".m3u8")
-                
-                callback.invoke(
-                    newExtractorLink(
-                        name = this.name,
-                        source = this.name,
-                        url = streamUrl,
-                        type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                    ) {
-                        this.referer = targetUrl
-                        this.quality = Qualities.Unknown.value
-                    }
-                )
-            }
-        } catch (e: Exception) {
-            // Fail silently to prevent app crashes
-        }
     }
 }
