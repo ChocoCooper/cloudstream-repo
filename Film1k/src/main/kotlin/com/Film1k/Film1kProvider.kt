@@ -57,8 +57,9 @@ class Film1kProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        // Fetch first 2 pages concurrently. If page 2 doesn't exist, it handles the exception gracefully.
-        return listOf(1, 2).apmap { page ->
+        // Fetch first 2 pages concurrently using amap (async map for suspended contexts).
+        // If page 2 doesn't exist, it handles the exception gracefully and returns what it found on page 1.
+        return listOf(1, 2).amap { page ->
             val searchUrl = if (page == 1) {
                 "$mainUrl/?s=$query"
             } else {
