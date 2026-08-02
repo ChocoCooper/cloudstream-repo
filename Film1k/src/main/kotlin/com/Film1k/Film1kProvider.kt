@@ -32,25 +32,25 @@ class Film1kProvider : MainAPI() {
         val latestTitle = homeDoc.selectFirst("#Ez-Wp > div > div > div > main > section > div.page-top > h3")?.text() ?: "Latest Movies"
         val latestItems = parseArticles(homeDoc)
         if (latestItems.isNotEmpty()) {
-            homePageList.add(HomePageList(latestTitle, latestItems, isHorizontalImages = true))
+            homePageList.add(HomePageList(latestTitle, latestItems, isHorizontalImages = false))
         }
 
         val usaTitle = usaDoc.selectFirst("#Ez-Wp > div > div > div > main > section > div.page-top > h3")?.text() ?: "USA Movies"
         val usaItems = parseArticles(usaDoc)
         if (usaItems.isNotEmpty()) {
-            homePageList.add(HomePageList(usaTitle, usaItems, isHorizontalImages = true))
+            homePageList.add(HomePageList(usaTitle, usaItems, isHorizontalImages = false))
         }
 
         val nintiesTitle = nintiesDoc.selectFirst("#Ez-Wp > div > div > div > main > section > div.page-top > h3")?.text() ?: "1990s Movies"
         val nintiesItems = parseArticles(nintiesDoc)
         if (nintiesItems.isNotEmpty()) {
-            homePageList.add(HomePageList(nintiesTitle, nintiesItems, isHorizontalImages = true))
+            homePageList.add(HomePageList(nintiesTitle, nintiesItems, isHorizontalImages = false))
         }
 
         val usaUrls = usaItems.map { it.url }.toSet()
         val intersectionItems = nintiesItems.filter { usaUrls.contains(it.url) }
         if (intersectionItems.isNotEmpty()) {
-            homePageList.add(HomePageList("1990s USA Movies", intersectionItems, isHorizontalImages = true))
+            homePageList.add(HomePageList("1990s USA Movies", intersectionItems, isHorizontalImages = false))
         }
 
         return newHomePageResponse(homePageList)
@@ -109,6 +109,13 @@ class Film1kProvider : MainAPI() {
         var plot: String? = null
         val descContainer = doc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div")
 
+        fun cleanupText(text: String): String {
+            return text
+                .replace(Regex("\\s+([.,;:!?])"), "$1") // "marriage ." -> "marriage."
+                .replace(Regex("\\s+"), " ")
+                .trim()
+        }
+
         fun extractAfterLabel(label: String): String? {
             val labelEl = descContainer?.select("strong, h3, b")?.firstOrNull {
                 it.text().trim().removeSuffix(":").trim().equals(label, ignoreCase = true)
@@ -127,7 +134,7 @@ class Film1kProvider : MainAPI() {
                 sibling = sibling.nextSibling()
             }
 
-            var extracted = builder.toString().trim().removePrefix(",").removePrefix(":").trim()
+            var extracted = cleanupText(builder.toString()).removePrefix(",").removePrefix(":").trim()
             if (extracted.isBlank()) return null
 
             val sentences = extracted.split(Regex("(?<=[.!?])\\s+"))
@@ -146,7 +153,7 @@ class Film1kProvider : MainAPI() {
             if (text.startsWith(titleText)) {
                 text = text.removePrefix(titleText)
             }
-            text = text.trim().removePrefix(",").removePrefix(":").trim()
+            text = cleanupText(text).removePrefix(",").removePrefix(":").trim()
             if (text.isBlank()) return null
 
             val sentences = text.split(Regex("(?<=[.!?])\\s+"))
@@ -155,22 +162,19 @@ class Film1kProvider : MainAPI() {
             return filtered.ifBlank { text }.ifBlank { null }
         }
 
+        // No further fallback beyond this — if neither an explicit
+        // "Description"/"Plot" label nor a title-lead paragraph is found,
+        // leave plot unset (null) rather than dumping the whole metadata
+        // block (runtime/genres/director/etc). Some pages genuinely have an
+        // empty <h3>Description:</h3> with nothing after it; Cloudstream's
+        // own "no plot found" UI handles that case better than a garbled dump.
         plot = extractAfterLabel("Description") ?: extractAfterLabel("Plot") ?: extractTitleLeadParagraph()
 
-        if (plot.isNullOrBlank()) {
-            val h3Text = descContainer?.selectFirst("h3")?.text() ?: ""
-            var rawPlot = descContainer?.text() ?: ""
-            if (h3Text.isNotBlank()) {
-                rawPlot = rawPlot.replace(h3Text, "").trim()
-            }
-            plot = rawPlot
-        }
-
-        plot = plot
+        plot = plot?.let { cleanupText(it) }
             ?.replace("^\\s*:\\s*".toRegex(), "")
             ?.replace("^\\s*\"|\"\\s*$".toRegex(), "")
-            ?.replace("\\s+".toRegex(), " ")
             ?.trim()
+            ?.takeIf { it.isNotBlank() }
 
         val tags1 = doc.select("#Ez-Wp > div > div.Container > div > aside > div > p:nth-child(4) > a").map { it.text() }
         val tags2 = doc.select("#Ez-Wp > div > div.Container > div > aside > div > p:nth-child(6) > a").map { it.text() }
