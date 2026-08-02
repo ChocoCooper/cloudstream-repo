@@ -1,4 +1,4 @@
-package com.film1k
+package com.Film1k
 
 import android.content.Context
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
