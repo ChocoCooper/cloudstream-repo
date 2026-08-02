@@ -57,9 +57,22 @@ class Film1kProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val searchUrl = "$mainUrl/?s=$query"
-        val doc = app.get(searchUrl, verify = false).document
-        return parseArticles(doc)
+        // Fetch first 3 pages concurrently to get more results without a long delay
+        return apmap(1..3) { page ->
+            val searchUrl = if (page == 1) {
+                "$mainUrl/?s=$query"
+            } else {
+                "$mainUrl/page/$page?s=$query"
+            }
+            
+            try {
+                val doc = app.get(searchUrl, verify = false).document
+                parseArticles(doc)
+            } catch (e: Exception) {
+                // If a page doesn't exist (e.g. 404), return an empty list for that page
+                emptyList()
+            }
+        }.flatten().distinctBy { it.url } // Prevent duplicates if site loops page 1 for missing pages
     }
 
     private fun parseArticles(doc: Document): List<SearchResponse> {
@@ -111,7 +124,7 @@ class Film1kProvider : MainAPI() {
 
         fun cleanupText(text: String): String {
             return text
-                .replace(Regex("\\s+([.,;:!?])"), "$1") // "marriage ." -> "marriage."
+                .replace(Regex("\\s+([.,;:!?])"), "$1") 
                 .replace(Regex("\\s+"), " ")
                 .trim()
         }
@@ -162,12 +175,6 @@ class Film1kProvider : MainAPI() {
             return filtered.ifBlank { text }.ifBlank { null }
         }
 
-        // No further fallback beyond this — if neither an explicit
-        // "Description"/"Plot" label nor a title-lead paragraph is found,
-        // leave plot unset (null) rather than dumping the whole metadata
-        // block (runtime/genres/director/etc). Some pages genuinely have an
-        // empty <h3>Description:</h3> with nothing after it; Cloudstream's
-        // own "no plot found" UI handles that case better than a garbled dump.
         plot = extractAfterLabel("Description") ?: extractAfterLabel("Plot") ?: extractTitleLeadParagraph()
 
         plot = plot?.let { cleanupText(it) }
