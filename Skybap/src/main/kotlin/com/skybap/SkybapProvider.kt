@@ -2,7 +2,9 @@ package com.skybap
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -197,7 +199,7 @@ class SkyBapProvider : MainAPI() {
     }
 
     private suspend fun Element.toSearchResult(base: String): SearchResponse? {
-        val href = absolute(base, this.attr("href")) ?: return null
+        val href = absolute(base, sanitizeHeaderValue(this.attr("href"))) ?: return null
 
         // Title = anchor text, stripped of the leading arrow-icon image alt/whitespace.
         val title = this.text().trim().ifBlank { return null }
@@ -262,7 +264,7 @@ class SkyBapProvider : MainAPI() {
         // is loaded as a playable Movie response; the TvType tag on the
         // search result still reflects Web Series / Short Film for display
         // purposes, it just doesn't drive an empty episode list here.
-        return newMovieLoadResponse(title, cleanUrl, TvType.Movie, data) {
+        return newMovieLoadResponse(title, url, TvType.Movie, data) {
             this.posterUrl = poster
             this.plot = description
             this.tags = tags
@@ -326,7 +328,7 @@ class SkyBapProvider : MainAPI() {
             ?: doc
 
         return container.select("a[href]")
-            .map { it.attr("href").trim() }
+            .map { sanitizeHeaderValue(it.attr("href")) }
             .filter { it.startsWith("http://") || it.startsWith("https://") }
             .distinct()
     }
@@ -344,6 +346,18 @@ class SkyBapProvider : MainAPI() {
      * enough to route every link correctly - including "howblogs" pages,
      * whose own extractor internally re-calls loadExtractor() on whatever
      * real streaming/download links it finds on that page.
+     *
+     * Every resulting ExtractorLink/SubtitleFile is passed through a
+     * sanitizing wrapper before reaching Cloudstream's player. Some source
+     * pages (seen in the wild on StreamTape's own watch page) have a
+     * filename/title with a raw embedded newline, and core extractors that
+     * build their referer from that text pass the newline straight through.
+     * Cronet then rejects the resulting HTTP header outright
+     * ("Invalid header with headername: referer"), which silently kills
+     * playback even though a valid link was actually found. This isn't
+     * something we can fix at the source (it happens inside Cloudstream's
+     * own StreamTape extractor), so we scrub every link that passes through
+     * here regardless of which extractor produced it.
      */
     override suspend fun loadLinks(
         data: String,
@@ -354,9 +368,12 @@ class SkyBapProvider : MainAPI() {
         val rawLinks = data.split("||").map { it.trim() }.filter { it.isNotBlank() }
         if (rawLinks.isEmpty()) return false
 
+        val safeCallback: (ExtractorLink) -> Unit = { callback(sanitizeExtractorLink(it)) }
+        val safeSubtitleCallback: (SubtitleFile) -> Unit = { subtitleCallback(sanitizeSubtitle(it)) }
+
         val outcomes = rawLinks.mapConcurrent(concurrency = 6) { link ->
             try {
-                loadExtractor(link, link, subtitleCallback, callback)
+                loadExtractor(link, link, safeSubtitleCallback, safeCallback)
                 true
             } catch (_: Exception) {
                 false
@@ -364,5 +381,34 @@ class SkyBapProvider : MainAPI() {
         }
 
         return outcomes.any { it }
+    }
+
+    /** Strips control characters (\r, \n, \t) that would otherwise break HTTP headers. */
+    private fun sanitizeHeaderValue(value: String): String =
+        value.replace(Regex("[\\r\\n\\t]+"), "").trim()
+
+    private fun sanitizeExtractorLink(link: ExtractorLink): ExtractorLink {
+        val cleanedUrl = sanitizeHeaderValue(link.url)
+        val cleanedReferer = sanitizeHeaderValue(link.referer)
+
+        // Nothing to fix - return as-is rather than reconstructing needlessly.
+        if (cleanedUrl == link.url && cleanedReferer == link.referer) return link
+
+        return try {
+            newExtractorLink(link.source, link.name, cleanedUrl, link.type) {
+                this.quality = link.quality
+                this.headers = link.headers
+                this.referer = cleanedReferer
+            }
+        } catch (_: Exception) {
+            // If reconstruction ever fails for any reason, fall back to the
+            // original link rather than dropping it entirely.
+            link
+        }
+    }
+
+    private fun sanitizeSubtitle(sub: SubtitleFile): SubtitleFile {
+        val cleanedUrl = sanitizeHeaderValue(sub.url)
+        return if (cleanedUrl == sub.url) sub else SubtitleFile(sub.lang, cleanedUrl)
     }
 }
