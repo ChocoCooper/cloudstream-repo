@@ -147,7 +147,7 @@ class SkyBapProvider : MainAPI() {
                 DetailProbe(reachable = false, poster = null)
             } else {
                 val base = getActiveBaseUrl()
-                val src = response.document.selectFirst("div.movielist img")?.attr("src")
+                val src = response.document.selectFirst("div.movielist img")?.attr("src")?.trim()
                 DetailProbe(reachable = true, poster = absolute(base, src))
             }
         } catch (_: Exception) {
@@ -171,14 +171,36 @@ class SkyBapProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val base = getActiveBaseUrl()
-        val url = "$base/${request.data}"
-        val doc = app.get(url, timeout = 15).document
 
+        // Confirmed from real page HTML: page 1 is the plain category URL
+        // ("category/Tamil-Movies.html"); page 2+ follows the pattern
+        // "category/Tamil-Movies/2.html" (site shows up to ~30 pages per
+        // category via a "Next Page »" link at the bottom).
+        val url = if (page <= 1) {
+            "$base/${request.data}"
+        } else {
+            val slug = request.data.removePrefix("category/").removeSuffix(".html")
+            "$base/category/$slug/$page.html"
+        }
+
+        val doc = app.get(url, timeout = 15).document
         val items = parseFolderListing(doc, base)
+
+        // Confirmed from real page HTML: a "| Page 1 of 30 |" marker sits
+        // above the pagination links. Parsing the total gives an exact
+        // hasNext signal; falling back to "did this page return anything"
+        // only if that marker is ever missing/changed.
+        val totalPages = Regex("Page\\s+\\d+\\s+of\\s+(\\d+)")
+            .find(doc.text())
+            ?.groupValues
+            ?.get(1)
+            ?.toIntOrNull()
+
+        val hasNext = if (totalPages != null) page < totalPages else items.isNotEmpty()
 
         return newHomePageResponse(
             list = HomePageList(request.name, items),
-            hasNext = false
+            hasNext = hasNext
         )
     }
 
@@ -247,7 +269,7 @@ class SkyBapProvider : MainAPI() {
         // in via the URL) over re-deriving it from the detail page's own
         // un-classed markup - keeps the title consistent across both screens.
         val title = embeddedTitle ?: extractTitle(doc)
-        val poster = doc.selectFirst("div.movielist img")?.let { absolute(base, it.attr("src")) }
+        val poster = doc.selectFirst("div.movielist img")?.let { absolute(base, it.attr("src").trim()) }
         val description = extractStory(doc)
         val tags = extractTags(doc)
         val videoLinks = extractRawLinks(doc)
@@ -272,24 +294,22 @@ class SkyBapProvider : MainAPI() {
     }
 
     /**
-     * Title lives in an un-classed `<b>` tag, which is fragile against index
-     * selectors. We instead grab the first reasonably long, non-menu `<b>`
-     * near the top of the page.
-     */
-    /**
      * Only used as a fallback for stale bookmarks/history entries that
      * predate the embedded-title scheme above - normal navigation always
      * supplies embeddedTitle directly, so this path rarely runs.
      *
-     * Verified against a live detail page: the <title> tag reliably holds
-     * "{Movie Title} Full Movie Download" (a fixed, stripped suffix), which
-     * is a far more reliable signal than guessing at an un-classed <b> tag -
-     * that heuristic was actually matching the site's generic banner
-     * tagline ("3GP MKV MP4 HD AVI PC Android Tab HD 300MB...") instead of
-     * the real title, since the tagline also happens to be a bolded,
-     * >8-character line that appears earlier in the page.
+     * Verified against real page HTML: the title lives at
+     * `<div class='Robiul'><b>{title}</b></div>`, appearing first among the
+     * three separate `div.Robiul` elements on the page (the other two are
+     * a "Movie Information" heading and a "Download {title}" line, both of
+     * which come later in document order, so selectFirst naturally lands on
+     * the right one without any extra filtering). The <title> tag (holding
+     * "{title} Full Movie Download") is kept as a second fallback in case
+     * div.Robiul's structure or class name ever changes.
      */
     private fun extractTitle(doc: Document): String {
+        doc.selectFirst("div.Robiul b")?.text()?.trim()?.let { if (it.isNotBlank()) return it }
+
         val titleTag = doc.selectFirst("title")?.text()?.trim()
         if (!titleTag.isNullOrBlank()) {
             val stripped = titleTag
@@ -310,8 +330,12 @@ class SkyBapProvider : MainAPI() {
     }
 
     /**
-     * Story block: <b>Story : </b> followed by plain text in the same
-     * container, e.g. div:nth-child(8) under the info `center` block.
+     * Story block, confirmed against real page HTML:
+     * `<div class='Let'><b>Story : </b>actual description text</div>`
+     * - a flat div, not a numbered/nested one. Note the site itself
+     * truncates long descriptions with a trailing "..." in the source
+     * HTML; that's a site-side limitation, not something a better
+     * selector can recover.
      */
     private fun extractStory(doc: Document): String? {
         val storyLabel = doc.select("b").firstOrNull {
@@ -325,8 +349,13 @@ class SkyBapProvider : MainAPI() {
     }
 
     /**
-     * Genre tags: <a href="/search.php?search= Comedy , Horror , Thriller&cat=All">
-     * Text needs trimming of stray spaces around each comma-separated term.
+     * Genre tags, confirmed against real page HTML:
+     * `<div class='L'><b>Genre :</b><span><a href="/search.php?search=18+, Hot, Romance, Erotic&cat=All"> 18+, Hot, Romance, Erotic</a>, <a href="/search.php?search=&cat=All"> </a>, ...</span></div>`
+     * The real genre text is always the first `search.php` anchor; the
+     * remaining anchors in that span are empty decorative ones. Note a
+     * second, unrelated `div.L` also exists further down the page (wrapping
+     * the screenshot gallery), but since it has no `a[href*=search.php]`
+     * inside it, selectFirst here can't accidentally match it.
      */
     private fun extractTags(doc: Document): List<String> {
         val genreAnchor = doc.selectFirst("div.L span a[href*=search.php]")
