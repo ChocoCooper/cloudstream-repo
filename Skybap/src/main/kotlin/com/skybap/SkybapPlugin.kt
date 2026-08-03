@@ -24,5 +24,7 @@ class SkyBapPlugin : Plugin() {
         registerExtractorAPI(SkyBapDriveseed())
         registerExtractorAPI(SkyBapGofile())
         registerExtractorAPI(SkyBapHowblogs())
+        registerExtractorAPI(SkyBapTpead())
+        registerExtractorAPI(SkyBapAdvtpe())
     }
 }
