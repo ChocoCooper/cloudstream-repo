@@ -10,6 +10,8 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import java.net.URLDecoder
+import java.net.URLEncoder
 
 /**
  * SkyBap provider
@@ -70,6 +72,32 @@ class SkyBapProvider : MainAPI() {
             href.startsWith("/") -> "$base$href"
             else -> "$base/$href"
         }
+    }
+
+    // Marker used to smuggle the listing-page title through the URL that
+    // Cloudstream hands back to load(). This guarantees the title shown on
+    // the detail/media page is always exactly what was shown on the
+    // homepage/search card, instead of being re-derived from the detail
+    // page's own fragile (un-classed) title markup.
+    private val titleMarker = "__sbTitle="
+
+    private fun withEmbeddedTitle(href: String, title: String): String {
+        val separator = if (href.contains("?")) "&" else "?"
+        return "$href$separator$titleMarker${URLEncoder.encode(title, "UTF-8")}"
+    }
+
+    /** Splits an embedded-title URL back into (fetchable URL, title override). */
+    private fun splitEmbeddedTitle(url: String): Pair<String, String?> {
+        val parts = url.split(Regex("[?&]${Regex.escape(titleMarker)}"), limit = 2)
+        val cleanUrl = parts.getOrNull(0) ?: url
+        val title = parts.getOrNull(1)?.let {
+            try {
+                URLDecoder.decode(it, "UTF-8")
+            } catch (_: Exception) {
+                null
+            }
+        }
+        return cleanUrl to title
     }
 
     /**
@@ -188,7 +216,7 @@ class SkyBapProvider : MainAPI() {
             else -> TvType.Movie
         }
 
-        return newMovieSearchResponse(title, href, type) {
+        return newMovieSearchResponse(title, withEmbeddedTitle(href, title), type) {
             this.posterUrl = probe.poster
         }
     }
@@ -209,10 +237,14 @@ class SkyBapProvider : MainAPI() {
     // ---------------------------------------------------------------------
 
     override suspend fun load(url: String): LoadResponse {
+        val (cleanUrl, embeddedTitle) = splitEmbeddedTitle(url)
         val base = getActiveBaseUrl()
-        val doc = app.get(url, timeout = 15).document
+        val doc = app.get(cleanUrl, timeout = 15).document
 
-        val title = extractTitle(doc)
+        // Prefer the title already shown on the homepage/search card (passed
+        // in via the URL) over re-deriving it from the detail page's own
+        // un-classed markup - keeps the title consistent across both screens.
+        val title = embeddedTitle ?: extractTitle(doc)
         val poster = doc.selectFirst("div.movielist img")?.let { absolute(base, it.attr("src")) }
         val description = extractStory(doc)
         val tags = extractTags(doc)
@@ -230,7 +262,7 @@ class SkyBapProvider : MainAPI() {
         // is loaded as a playable Movie response; the TvType tag on the
         // search result still reflects Web Series / Short Film for display
         // purposes, it just doesn't drive an empty episode list here.
-        return newMovieLoadResponse(title, url, TvType.Movie, data) {
+        return newMovieLoadResponse(title, cleanUrl, TvType.Movie, data) {
             this.posterUrl = poster
             this.plot = description
             this.tags = tags
