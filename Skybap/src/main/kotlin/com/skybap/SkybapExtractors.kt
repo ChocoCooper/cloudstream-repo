@@ -571,6 +571,65 @@ class SkyBapGofile : ExtractorApi() {
 // mixed in among ad/payroll-timer redirects.
 // ---------------------------------------------------------------------
 
+// ---------------------------------------------------------------------
+// StreamTape-family rebrand domains (tpead.net, advtpe.*) - these run the
+// exact same backend as streamtape.com but under a different domain name,
+// so Cloudstream's core StreamTape extractor (which matches on the
+// "streamtape" substring) doesn't recognize them at all. This mirrors the
+// long-stable public StreamTape bypass: the watch page embeds a script
+// that builds the final video URL from two JS-concatenated string parts
+// assigned to a "robotlink" element.
+// ---------------------------------------------------------------------
+
+class SkyBapTpead : SkyBapStreamTapeAlias() {
+    override val name = "Tpead"
+    override val mainUrl = "https://tpead.net"
+}
+
+class SkyBapAdvtpe : SkyBapStreamTapeAlias() {
+    override val name = "Advtpe"
+    override val mainUrl = "https://advtpe.*"
+}
+
+open class SkyBapStreamTapeAlias : ExtractorApi() {
+    override val name = "StreamTape"
+    override val mainUrl = "https://tpead.net"
+    override val requiresReferer = false
+
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val doc = app.get(url).document
+        val script = doc.select("script")
+            .map { it.data() }
+            .firstOrNull { it.contains("robotlink") }
+            ?: return
+
+        // The script looks like:
+        //   document.getElementById('robotlink').innerHTML = '//host/get_video?...&token='
+        //   + ('SOME_RANDOM_STRING').substring(SOME, RANGE)
+        // i.e. two concatenated pieces that together form the final path.
+        val firstPart = Regex("robotlink'\\)\\.innerHTML\\s*=\\s*'([^']*)'")
+            .find(script)?.groupValues?.get(1)
+        val secondPart = Regex("\\+\\s*\\('([^']*)'\\)")
+            .find(script)?.groupValues?.get(1)
+
+        if (firstPart.isNullOrBlank()) return
+
+        val fullPath = if (!secondPart.isNullOrBlank()) firstPart + secondPart else firstPart
+        val finalUrl = if (fullPath.startsWith("http")) fullPath else "https:$fullPath"
+
+        callback.invoke(
+            newExtractorLink(name, name, finalUrl, ExtractorLinkType.VIDEO) {
+                this.quality = Qualities.Unknown.value
+            }
+        )
+    }
+}
+
 class SkyBapHowblogs : ExtractorApi() {
     override val name: String = "Howblogs"
     override val mainUrl: String = "https://howblogs.*"
