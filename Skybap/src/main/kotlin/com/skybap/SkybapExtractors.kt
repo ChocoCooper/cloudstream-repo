@@ -2,6 +2,7 @@ package com.skybap
 
 import com.lagradost.api.Log
 import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.Qualities
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.SubtitleFile
 import kotlinx.coroutines.async
@@ -9,7 +10,6 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
-import org.json.JSONObject
 import com.fasterxml.jackson.annotation.JsonProperty
 import java.net.URI
 import java.security.MessageDigest
@@ -25,6 +25,24 @@ import java.security.MessageDigest
 // Toggle for extra "instant download" style branches that resolve a
 // redirect chain rather than a normal stream/download page. Off by default
 // since they add extra requests; flip to true if you want them surfaced.
+// Local replacements for helpers that aren't guaranteed to be visible as
+// top-level symbols across Cloudstream builds - safer to define our own
+// than depend on an import path that may differ between app versions.
+private const val SKYBAP_USER_AGENT =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+
+private fun skybapBase64Decode(str: String): String {
+    return try {
+        String(android.util.Base64.decode(str, android.util.Base64.DEFAULT))
+    } catch (e: Exception) {
+        try {
+            String(java.util.Base64.getDecoder().decode(str))
+        } catch (e2: Exception) {
+            ""
+        }
+    }
+}
+
 object SkyBapSettings {
     var allowDownloadLinks = false
 }
@@ -81,7 +99,7 @@ suspend fun skybapResolveFinalUrl(startUrl: String): String? {
 
     while (loopCount < maxRedirects) {
         try {
-            val res = app.head(currentUrl, allowRedirects = false, timeout = 2500L)
+            val res = app.get(currentUrl, allowRedirects = false, timeout = 2500L)
             if (res.code == 200 || res.code in 300..399) {
                 val location = res.headers["Location"] ?: break
                 currentUrl = location
@@ -137,7 +155,7 @@ open class SkyBapHubCloud : ExtractorApi() {
 
     private fun extractDoubleAtob(html: String): String? {
         val regex = Regex("""var\s+url\s*=\s*atob\s*\(\s*atob\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\)""")
-        return regex.find(html)?.groupValues?.get(1)?.let { base64Decode(base64Decode(it)) }
+        return regex.find(html)?.groupValues?.get(1)?.let { skybapBase64Decode(skybapBase64Decode(it)) }
     }
 
     override suspend fun getUrl(
@@ -482,16 +500,16 @@ class SkyBapGofile : ExtractorApi() {
     ) {
         val id = Regex("/(?:\\?c=|d/)([\\da-zA-Z-]+)").find(url)?.groupValues?.get(1) ?: return
 
-        val websiteToken = generateWebsiteToken(USER_AGENT, "")
+        val websiteToken = generateWebsiteToken(SKYBAP_USER_AGENT, "")
         val token = app.post(
             "$mainApi/accounts",
             headers = mapOf("X-Website-Token" to websiteToken, "X-BL" to browserLanguage)
         ).parsedSafe<AccountResponse>()?.data?.token ?: return
 
-        val hashedToken = generateWebsiteToken(USER_AGENT, token)
+        val hashedToken = generateWebsiteToken(SKYBAP_USER_AGENT, token)
         val headers = mapOf(
             "Referer" to "$mainUrl/",
-            "User-Agent" to USER_AGENT,
+            "User-Agent" to SKYBAP_USER_AGENT,
             "Authorization" to "Bearer $token",
             "X-BL" to browserLanguage,
             "X-Website-Token" to hashedToken
