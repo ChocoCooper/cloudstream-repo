@@ -2,9 +2,7 @@ package com.skybap
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.loadExtractor
-import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -446,11 +444,12 @@ class SkyBapProvider : MainAPI() {
         if (cleanedUrl == link.url && cleanedReferer == link.referer) return link
 
         return try {
-            newExtractorLink(link.source, link.name, cleanedUrl, link.type) {
-                this.quality = link.quality
-                this.headers = link.headers
-                this.referer = cleanedReferer
-            }
+            // .copy() is used instead of the newExtractorLink(...) builder
+            // because that builder is a suspend function, and this
+            // sanitizer runs inside loadExtractor's plain (non-suspend)
+            // callback - copy() only touches the two fields we need to fix
+            // and stays synchronous.
+            link.copy(url = cleanedUrl, referer = cleanedReferer)
         } catch (_: Exception) {
             // If reconstruction ever fails for any reason, fall back to the
             // original link rather than dropping it entirely.
