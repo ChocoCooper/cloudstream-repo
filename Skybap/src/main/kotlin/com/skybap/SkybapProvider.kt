@@ -276,15 +276,37 @@ class SkyBapProvider : MainAPI() {
      * selectors. We instead grab the first reasonably long, non-menu `<b>`
      * near the top of the page.
      */
+    /**
+     * Only used as a fallback for stale bookmarks/history entries that
+     * predate the embedded-title scheme above - normal navigation always
+     * supplies embeddedTitle directly, so this path rarely runs.
+     *
+     * Verified against a live detail page: the <title> tag reliably holds
+     * "{Movie Title} Full Movie Download" (a fixed, stripped suffix), which
+     * is a far more reliable signal than guessing at an un-classed <b> tag -
+     * that heuristic was actually matching the site's generic banner
+     * tagline ("3GP MKV MP4 HD AVI PC Android Tab HD 300MB...") instead of
+     * the real title, since the tagline also happens to be a bolded,
+     * >8-character line that appears earlier in the page.
+     */
     private fun extractTitle(doc: Document): String {
+        val titleTag = doc.selectFirst("title")?.text()?.trim()
+        if (!titleTag.isNullOrBlank()) {
+            val stripped = titleTag
+                .replace(Regex("\\s*Full Movie Download\\s*$", RegexOption.IGNORE_CASE), "")
+                .trim()
+            return stripped.ifBlank { titleTag }
+        }
+
+        // Last-resort fallback if even the <title> tag is missing.
         return doc.select("div b").firstOrNull { b ->
             val t = b.text().trim()
             t.length > 8 &&
                 !t.contains("Story", ignoreCase = true) &&
-                !t.contains("Download", ignoreCase = true)
-        }?.text()?.trim()
-            ?: doc.selectFirst("title")?.text()?.trim()
-            ?: "Unknown title"
+                !t.contains("Download", ignoreCase = true) &&
+                !t.contains("SkymoviesHD", ignoreCase = true) &&
+                !t.contains("Full Movies", ignoreCase = true)
+        }?.text()?.trim() ?: "Unknown title"
     }
 
     /**
