@@ -3,6 +3,7 @@ package com.skybap
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -417,16 +418,35 @@ class SkyBapProvider : MainAPI() {
         val rawLinks = data.split("||").map { it.trim() }.filter { it.isNotBlank() }
         if (rawLinks.isEmpty()) return false
 
-        val safeCallback: (ExtractorLink) -> Unit = { callback(sanitizeExtractorLink(it)) }
-        val safeSubtitleCallback: (SubtitleFile) -> Unit = { subtitleCallback(sanitizeSubtitle(it)) }
+        // loadExtractor's own callbacks are plain (non-suspend) lambdas, but
+        // building a corrected ExtractorLink requires the suspend
+        // newExtractorLink(...) builder (ExtractorLink isn't a data class
+        // here, so .copy() isn't available either). So collection and
+        // sanitization are split into two phases: collect raw results
+        // synchronously first (thread-safe lists, since collection happens
+        // concurrently across links), then sanitize + forward each one
+        // afterward from this suspend function's own body, where calling
+        // newExtractorLink is valid.
+        val collectedLinks = java.util.concurrent.CopyOnWriteArrayList<ExtractorLink>()
+        val collectedSubs = java.util.concurrent.CopyOnWriteArrayList<SubtitleFile>()
+
+        val collectCallback: (ExtractorLink) -> Unit = { collectedLinks.add(it) }
+        val collectSubtitleCallback: (SubtitleFile) -> Unit = { collectedSubs.add(it) }
 
         val outcomes = rawLinks.mapConcurrent(concurrency = 6) { link ->
             try {
-                loadExtractor(link, link, safeSubtitleCallback, safeCallback)
+                loadExtractor(link, link, collectSubtitleCallback, collectCallback)
                 true
             } catch (_: Exception) {
                 false
             }
+        }
+
+        for (sub in collectedSubs) {
+            subtitleCallback(sanitizeSubtitle(sub))
+        }
+        for (link in collectedLinks) {
+            callback(sanitizeExtractorLink(link))
         }
 
         return outcomes.any { it }
@@ -436,7 +456,19 @@ class SkyBapProvider : MainAPI() {
     private fun sanitizeHeaderValue(value: String): String =
         value.replace(Regex("[\\r\\n\\t]+"), "").trim()
 
-    private fun sanitizeExtractorLink(link: ExtractorLink): ExtractorLink {
+    /**
+     * Some source pages (seen in the wild on StreamTape's own watch page)
+     * have a filename/title with a raw embedded newline, and core
+     * extractors that build their referer from that text pass the newline
+     * straight through. Cronet then rejects the resulting HTTP header
+     * outright ("Invalid header with headername: referer"), which silently
+     * kills playback even though a valid link was actually found. This
+     * isn't something we can fix at the source (it happens inside
+     * Cloudstream's own StreamTape extractor), so every link that passes
+     * through loadLinks gets scrubbed here regardless of which extractor
+     * produced it.
+     */
+    private suspend fun sanitizeExtractorLink(link: ExtractorLink): ExtractorLink {
         val cleanedUrl = sanitizeHeaderValue(link.url)
         val cleanedReferer = sanitizeHeaderValue(link.referer)
 
@@ -444,12 +476,11 @@ class SkyBapProvider : MainAPI() {
         if (cleanedUrl == link.url && cleanedReferer == link.referer) return link
 
         return try {
-            // .copy() is used instead of the newExtractorLink(...) builder
-            // because that builder is a suspend function, and this
-            // sanitizer runs inside loadExtractor's plain (non-suspend)
-            // callback - copy() only touches the two fields we need to fix
-            // and stays synchronous.
-            link.copy(url = cleanedUrl, referer = cleanedReferer)
+            newExtractorLink(link.source, link.name, cleanedUrl, link.type) {
+                this.quality = link.quality
+                this.headers = link.headers
+                this.referer = cleanedReferer
+            }
         } catch (_: Exception) {
             // If reconstruction ever fails for any reason, fall back to the
             // original link rather than dropping it entirely.
