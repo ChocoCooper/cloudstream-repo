@@ -2,7 +2,6 @@ package com.skybap
 
 import com.lagradost.api.Log
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.Qualities
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.SubtitleFile
 import kotlinx.coroutines.async
