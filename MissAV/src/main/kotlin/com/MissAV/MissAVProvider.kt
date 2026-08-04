@@ -6,7 +6,10 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import java.net.URLEncoder
+import java.util.concurrent.atomic.AtomicBoolean
 
 // Some titles arrive double HTML-encoded (e.g. "Moody&#039;s" instead of "Moody's").
 // Jsoup's .text()/.attr() only decode entities once during parsing, so a literal
@@ -156,7 +159,7 @@ class MissAVProvider : MainAPI() {
     // ------------------------------------------------------------------
     private suspend fun findMissAvUrl(code: String): String? {
         val encoded = URLEncoder.encode(code, "UTF-8")
-        val document = app.get("$missAvUrl/en/search/$encoded").document
+        val document = app.get("$missAvUrl/en/search/$encoded", timeout = 15).document
 
         val card = document.selectFirst(".thumbnail, .max-w-sm, .w-full.truncate") ?: return null
         val aTag = card.selectFirst(".text-secondary") ?: card.selectFirst("a") ?: return null
@@ -176,7 +179,7 @@ class MissAVProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         // `data` is the 123AV video page URL (from load()).
-        val document = app.get(data).document
+        val document = app.get(data, timeout = 15).document
 
         val title = (document.selectFirst("meta[property=og:title]")?.attr("content")
             ?.substringBeforeLast(" — 123AV")?.trim()
@@ -187,98 +190,117 @@ class MissAVProvider : MainAPI() {
             ?.text()?.trim()?.decodeHtmlEntities()
             ?: extractCode(title)
 
-        var foundStream = false
+        val foundStream = AtomicBoolean(false)
 
-        // ---- 123AV's own stream (Alpine.js x-data on the watch page) -------------------
-        // The player is driven by Alpine.js. The raw stream data lives inside the
-        // `x-data` attribute of div.watch-main > div.watch__main as a JS object literal
-        // (not strict JSON). We regex-scan it for any m3u8/mp4 URL rather than strictly
-        // parsing it as JSON, with a full-page fallback if the attribute is empty.
-        runCatching {
-            val xData = document.selectFirst("div.watch-main > div.watch__main")?.attr("x-data").orEmpty()
-            val streamRegex = Regex("""https?:\\?/\\?/[^\s"'\\]+?\.(?:m3u8|mp4)[^\s"'\\]*""")
+        // Run the 123AV stream, the MissAV stream, and the subtitle lookup all in parallel
+        // instead of sequentially — previously the subtitle fetches (one per matching row)
+        // ran *after* both stream lookups and blocked the player from starting until every
+        // single one finished, which is what was causing the long stall.
+        coroutineScope {
+            // ---- 123AV's own stream (Alpine.js x-data on the watch page) ---------------
+            // The player is driven by Alpine.js. The raw stream data lives inside the
+            // `x-data` attribute of div.watch-main > div.watch__main as a JS object literal
+            // (not strict JSON). We regex-scan it for any m3u8/mp4 URL rather than strictly
+            // parsing it as JSON, with a full-page fallback if the attribute is empty.
+            launch {
+                runCatching {
+                    val xData = document.selectFirst("div.watch-main > div.watch__main")?.attr("x-data").orEmpty()
+                    val streamRegex = Regex("""https?:\\?/\\?/[^\s"'\\]+?\.(?:m3u8|mp4)[^\s"'\\]*""")
 
-            var av123Links = streamRegex.findAll(xData)
-                .map { it.value.replace("\\/", "/") }
-                .distinct()
-                .toList()
+                    var av123Links = streamRegex.findAll(xData)
+                        .map { it.value.replace("\\/", "/") }
+                        .distinct()
+                        .toList()
 
-            if (av123Links.isEmpty()) {
-                av123Links = streamRegex.findAll(document.html())
-                    .map { it.value.replace("\\/", "/") }
-                    .distinct()
-                    .toList()
-            }
-
-            av123Links.forEach { link ->
-                val isM3u8 = link.contains(".m3u8")
-                callback.invoke(
-                    newExtractorLink(
-                        "123AV",
-                        "123AV",
-                        link,
-                        if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                    ) {
-                        this.referer = mainUrl
-                        this.quality = Qualities.Unknown.value
+                    if (av123Links.isEmpty()) {
+                        av123Links = streamRegex.findAll(document.html())
+                            .map { it.value.replace("\\/", "/") }
+                            .distinct()
+                            .toList()
                     }
-                )
-                foundStream = true
-            }
-        }
 
-        if (!code.isNullOrBlank()) {
-            // ---- Cross-reference to MissAV for the actual stream -----------------------
-            runCatching {
-                val missAvVideoUrl = findMissAvUrl(code) ?: return@runCatching
-                val response = app.get(missAvVideoUrl)
-
-                val unpackedText = getAndUnpack(response.text)
-                val finalLink = Regex("""source=['"](.*?)['"]""").find(unpackedText)?.groupValues?.get(1)
-
-                if (!finalLink.isNullOrBlank()) {
-                    callback.invoke(
-                        newExtractorLink(
-                            "MissAV",
-                            "MissAV",
-                            finalLink,
-                            ExtractorLinkType.M3U8
-                        ) {
-                            this.referer = missAvUrl
-                            this.quality = Qualities.P1080.value
-                        }
-                    )
-                    foundStream = true
+                    av123Links.forEach { link ->
+                        val isM3u8 = link.contains(".m3u8")
+                        callback.invoke(
+                            newExtractorLink(
+                                "123AV",
+                                "123AV",
+                                link,
+                                if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                            ) {
+                                this.referer = mainUrl
+                                this.quality = Qualities.Unknown.value
+                            }
+                        )
+                        foundStream.set(true)
+                    }
                 }
             }
 
-            // ---- Subtitles via SubtitleCat (English only) -------------------------------
-            runCatching {
-                val searchDoc = app.get("$subtitleCatUrl/index.php?search=$code").document
-
-                val subtitlePageLinks = searchDoc.select(
-                    "table.sub-table > tbody > tr > td > a[href^=\"subs/\"]"
-                ).mapNotNull { el ->
-                    el.attr("href").let { href ->
-                        if (href.startsWith("http")) href else "$subtitleCatUrl/$href"
-                    }
-                }.distinct()
-
-                subtitlePageLinks.forEach { subPageUrl ->
+            if (!code.isNullOrBlank()) {
+                // ---- Cross-reference to MissAV for the actual stream ---------------------
+                launch {
                     runCatching {
-                        val subPageDoc = app.get(subPageUrl).document
-                        val enHref = subPageDoc.selectFirst("div.sub-single > span > a#download_en")
-                            ?.attr("href")
+                        val missAvVideoUrl = findMissAvUrl(code) ?: return@runCatching
+                        val response = app.get(missAvVideoUrl, timeout = 15)
 
-                        if (!enHref.isNullOrBlank()) {
-                            val fullEnUrl = if (enHref.startsWith("http")) enHref else "$subtitleCatUrl/$enHref"
-                            subtitleCallback(SubtitleFile("English", fullEnUrl))
+                        val unpackedText = getAndUnpack(response.text)
+                        val finalLink = Regex("""source=['"](.*?)['"]""").find(unpackedText)?.groupValues?.get(1)
+
+                        if (!finalLink.isNullOrBlank()) {
+                            callback.invoke(
+                                newExtractorLink(
+                                    "MissAV",
+                                    "MissAV",
+                                    finalLink,
+                                    ExtractorLinkType.M3U8
+                                ) {
+                                    this.referer = missAvUrl
+                                    this.quality = Qualities.P1080.value
+                                }
+                            )
+                            foundStream.set(true)
+                        }
+                    }
+                }
+
+                // ---- Subtitles via SubtitleCat (English only) -----------------------------
+                launch {
+                    runCatching {
+                        val searchDoc = app.get("$subtitleCatUrl/index.php?search=$code", timeout = 15).document
+
+                        val subtitlePageLinks = searchDoc.select(
+                            "table.sub-table > tbody > tr > td > a[href^=\"subs/\"]"
+                        )
+                            // Only follow rows that actually mention our code — the search
+                            // can return loosely related results, and blindly following all
+                            // of them both wastes time and can attach the wrong subtitles.
+                            .filter { it.text().contains(code, ignoreCase = true) }
+                            .mapNotNull { el ->
+                                el.attr("href").let { href ->
+                                    if (href.startsWith("http")) href else "$subtitleCatUrl/$href"
+                                }
+                            }
+                            .distinct()
+                            .take(5) // hard cap so a noisy search page can't stall playback
+
+                        subtitlePageLinks.forEach { subPageUrl ->
+                            runCatching {
+                                val subPageDoc = app.get(subPageUrl, timeout = 10).document
+                                val enHref = subPageDoc.selectFirst("div.sub-single > span > a#download_en")
+                                    ?.attr("href")
+
+                                if (!enHref.isNullOrBlank()) {
+                                    val fullEnUrl = if (enHref.startsWith("http")) enHref else "$subtitleCatUrl/$enHref"
+                                    subtitleCallback(SubtitleFile("English", fullEnUrl))
+                                }
+                            }
                         }
                     }
                 }
             }
         }
 
-        return foundStream
+        return foundStream.get()
     }
 }
