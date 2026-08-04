@@ -178,14 +178,12 @@ class MissAVProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // `data` is the 123AV video page URL (from load()).
         val document = app.get(data, timeout = 15).document
 
         val title = (document.selectFirst("meta[property=og:title]")?.attr("content")
             ?.substringBeforeLast(" — 123AV")?.trim()
             ?: document.title()).decodeHtmlEntities()
 
-        // Prefer the dedicated "Code" field, fall back to regex on the title.
         val code = document.selectFirst("dl.watch__info > div.watch__info-row:nth-child(1) > dd")
             ?.text()?.trim()?.decodeHtmlEntities()
             ?: extractCode(title)
@@ -195,21 +193,25 @@ class MissAVProvider : MainAPI() {
         coroutineScope {
             // ---- 123AV's own stream (Alpine.js x-data on the watch page) ---------------
             launch {
-                runCatching {
+                try {
                     val xData = document.selectFirst("div.watch-main > div.watch__main")?.attr("x-data").orEmpty()
                     
-                    // 1. Safely extract the ID ignoring the messy escaped slashes (e.g., "\/\/\/")
-                    val embedId = Regex("""javplayer\.cc[\\/]+e[\\/]+([a-zA-Z0-9]+)""").find(xData)?.groupValues?.get(1)
+                    // 1. Safely extract just the ID, ignoring the messy \/\/\/ escaping
+                    val embedIdMatch = Regex("""javplayer\.cc[\\/]+e[\\/]+([a-zA-Z0-9]+)""").find(xData)
+                    val embedId = embedIdMatch?.groupValues?.get(1)
+                    
+                    println("123AV_DEBUG: Extracted Embed ID -> $embedId")
 
                     if (!embedId.isNullOrBlank()) {
                         // Rebuild the clean URL manually
                         val embedUrl = "https://javplayer.cc/e/$embedId"
+                        println("123AV_DEBUG: Fetching URL -> $embedUrl")
                         
-                        // 2. Fetch the JavPlayer embed page via HTTP
+                        // 2. Fetch the JavPlayer embed page
                         val embedHtml = app.get(embedUrl, referer = mainUrl).text
+                        println("123AV_DEBUG: Downloaded HTML length -> ${embedHtml.length}")
                         
-                        // 3. Unpack the obfuscated JavaScript. Wrap in runCatching so if unpacking fails, 
-                        // it falls back to the raw HTML instead of quietly crashing the whole coroutine.
+                        // 3. Unpack the obfuscated JavaScript. 
                         val unpackedHtml = runCatching { getAndUnpack(embedHtml) }.getOrDefault(embedHtml)
                         
                         // 4. Extract the hidden .m3u8 link from the decrypted JS
@@ -217,46 +219,30 @@ class MissAVProvider : MainAPI() {
                         val match = m3u8Regex.find(unpackedHtml) ?: m3u8Regex.find(embedHtml)
                         
                         val m3u8Url = match?.groupValues?.get(1)
+                        println("123AV_DEBUG: Found M3U8 URL -> $m3u8Url")
 
                         if (!m3u8Url.isNullOrBlank()) {
                             callback.invoke(
                                 newExtractorLink(
                                     "123AV",
-                                    "123AV", // <--- Renamed to just "123AV"
+                                    "123AV", // Renamed to just "123AV"
                                     m3u8Url,
                                     ExtractorLinkType.M3U8
                                 ) {
-                                    // JavPlayer CDNs require the javplayer domain as referer to stream
                                     this.referer = "https://javplayer.cc/" 
-                                    this.quality = Qualities.Unknown.value // <--- Set to Unknown so it doesn't append "1080p"
+                                    this.quality = Qualities.Unknown.value // Removes the "1080p" tag
                                 }
                             )
                             foundStream.set(true)
+                            println("123AV_DEBUG: Success! Stream sent to ExoPlayer.")
+                        } else {
+                            println("123AV_DEBUG: Failed to find .m3u8 string in the HTML.")
                         }
                     } else {
-                        // Fallback: Just in case older videos have direct .mp4/.m3u8 links in the HTML
-                        val streamRegex = Regex("""https?:\\?/\\?/[^\s"'\\]+?\.(?:m3u8|mp4)[^\s"'\\]*""")
-                        val directLinks = streamRegex.findAll(document.html())
-                            .map { it.value.replace("\\/", "/") }
-                            .distinct()
-                            .toList()
-
-                        directLinks.forEach { link ->
-                            val isM3u8 = link.contains(".m3u8")
-                            callback.invoke(
-                                newExtractorLink(
-                                    "123AV",
-                                    "123AV Direct",
-                                    link,
-                                    if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                ) {
-                                    this.referer = mainUrl
-                                    this.quality = Qualities.Unknown.value
-                                }
-                            )
-                            foundStream.set(true)
-                        }
+                        println("123AV_DEBUG: Regex failed to extract embed ID from x-data.")
                     }
+                } catch (e: Exception) {
+                    println("123AV_DEBUG: CRASHED -> ${e.message}")
                 }
             }
 
@@ -275,13 +261,12 @@ class MissAVProvider : MainAPI() {
                             callback.invoke(
                                 newExtractorLink(
                                     "MissAV",
-                                    "MissAV", // <--- Renamed to just "MissAV"
+                                    "MissAV", // Renamed to just "MissAV"
                                     finalLink,
                                     ExtractorLinkType.M3U8
                                 ) {
                                     this.referer = missAvUrl
-                                    // <--- Set to Unknown to remove "1080p" from the title
-                                    this.quality = Qualities.Unknown.value 
+                                    this.quality = Qualities.Unknown.value // Removes the "1080p" tag
                                 }
                             )
                             foundStream.set(true)
