@@ -192,32 +192,25 @@ class MissAVProvider : MainAPI() {
 
         val foundStream = AtomicBoolean(false)
 
-        // Run the 123AV stream, the MissAV stream, and the subtitle lookup all in parallel
-        // instead of sequentially — previously the subtitle fetches (one per matching row)
-        // ran *after* both stream lookups and blocked the player from starting until every
-        // single one finished, which is what was causing the long stall.
         coroutineScope {
-            // ---- 123AV's own stream (Alpine.js x-data on the watch page) ---------------
-            // The player is driven by Alpine.js. The raw stream data lives inside the
-            // `x-data` attribute of div.watch-main > div.watch__main as a JS object literal
-            // (not strict JSON). We regex-scan it for any m3u8/mp4 URL rather than strictly
-            // parsing it as JSON, with a full-page fallback if the attribute is empty.
-            // ---- 123AV's own stream (Alpine.js x-data on the watch page) ---------------
             // ---- 123AV's own stream (Alpine.js x-data on the watch page) ---------------
             launch {
                 runCatching {
                     val xData = document.selectFirst("div.watch-main > div.watch__main")?.attr("x-data").orEmpty()
                     
-                    // 1. Extract the JavPlayer embed link
-                    val javPlayerMatch = Regex("""https:\\?/\\?/javplayer\.cc\\?/[a-zA-Z0-9/]+""").find(xData)
-                    val embedUrl = javPlayerMatch?.value?.replace("\\/", "/")
+                    // 1. Safely extract the ID ignoring the messy escaped slashes (e.g., "\/\/\/")
+                    val embedId = Regex("""javplayer\.cc[\\/]+e[\\/]+([a-zA-Z0-9]+)""").find(xData)?.groupValues?.get(1)
 
-                    if (!embedUrl.isNullOrBlank()) {
+                    if (!embedId.isNullOrBlank()) {
+                        // Rebuild the clean URL manually
+                        val embedUrl = "https://javplayer.cc/e/$embedId"
+                        
                         // 2. Fetch the JavPlayer embed page via HTTP
                         val embedHtml = app.get(embedUrl, referer = mainUrl).text
                         
-                        // 3. Unpack the obfuscated JavaScript instantly (No WebView needed!)
-                        val unpackedHtml = getAndUnpack(embedHtml)
+                        // 3. Unpack the obfuscated JavaScript. Wrap in runCatching so if unpacking fails, 
+                        // it falls back to the raw HTML instead of quietly crashing the whole coroutine.
+                        val unpackedHtml = runCatching { getAndUnpack(embedHtml) }.getOrDefault(embedHtml)
                         
                         // 4. Extract the hidden .m3u8 link from the decrypted JS
                         val m3u8Regex = Regex("""(?:file|src|url|source)\s*[:=]\s*['"](https?://[^'"]+\.m3u8[^'"]*)['"]""")
@@ -229,13 +222,13 @@ class MissAVProvider : MainAPI() {
                             callback.invoke(
                                 newExtractorLink(
                                     "123AV",
-                                    "123AV (JavPlayer)",
+                                    "123AV", // <--- Renamed to just "123AV"
                                     m3u8Url,
                                     ExtractorLinkType.M3U8
                                 ) {
                                     // JavPlayer CDNs require the javplayer domain as referer to stream
                                     this.referer = "https://javplayer.cc/" 
-                                    this.quality = Qualities.Unknown.value
+                                    this.quality = Qualities.Unknown.value // <--- Set to Unknown so it doesn't append "1080p"
                                 }
                             )
                             foundStream.set(true)
@@ -282,12 +275,13 @@ class MissAVProvider : MainAPI() {
                             callback.invoke(
                                 newExtractorLink(
                                     "MissAV",
-                                    "MissAV",
+                                    "MissAV", // <--- Renamed to just "MissAV"
                                     finalLink,
                                     ExtractorLinkType.M3U8
                                 ) {
                                     this.referer = missAvUrl
-                                    this.quality = Qualities.P1080.value
+                                    // <--- Set to Unknown to remove "1080p" from the title
+                                    this.quality = Qualities.Unknown.value 
                                 }
                             )
                             foundStream.set(true)
@@ -303,9 +297,6 @@ class MissAVProvider : MainAPI() {
                         val subtitlePageLinks = searchDoc.select(
                             "table.sub-table > tbody > tr > td > a[href^=\"subs/\"]"
                         )
-                            // Only follow rows that actually mention our code — the search
-                            // can return loosely related results, and blindly following all
-                            // of them both wastes time and can attach the wrong subtitles.
                             .filter { it.text().contains(code, ignoreCase = true) }
                             .mapNotNull { el ->
                                 el.attr("href").let { href ->
@@ -313,7 +304,7 @@ class MissAVProvider : MainAPI() {
                                 }
                             }
                             .distinct()
-                            .take(5) // hard cap so a noisy search page can't stall playback
+                            .take(5)
 
                         subtitlePageLinks.forEach { subPageUrl ->
                             runCatching {
