@@ -210,6 +210,7 @@ class MissAVProvider : MainAPI() {
                         // 2. Fetch the JavPlayer embed page
                         val embedHtml = app.get(embedUrl, referer = mainUrl).text
                         println("123AV_DEBUG: Downloaded HTML length -> ${embedHtml.length}")
+                        println("123AV_DEBUG: HTML CONTENT -> \n$embedHtml\n------------------")
                         
                         // 3. Unpack the obfuscated JavaScript. 
                         val unpackedHtml = runCatching { getAndUnpack(embedHtml) }.getOrDefault(embedHtml)
