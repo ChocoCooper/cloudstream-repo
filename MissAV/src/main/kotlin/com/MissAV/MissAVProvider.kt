@@ -202,40 +202,65 @@ class MissAVProvider : MainAPI() {
             // `x-data` attribute of div.watch-main > div.watch__main as a JS object literal
             // (not strict JSON). We regex-scan it for any m3u8/mp4 URL rather than strictly
             // parsing it as JSON, with a full-page fallback if the attribute is empty.
+            // ---- 123AV's own stream (Alpine.js x-data on the watch page) ---------------
             launch {
                 runCatching {
                     val xData = document.selectFirst("div.watch-main > div.watch__main")?.attr("x-data").orEmpty()
-                    val streamRegex = Regex("""https?:\\?/\\?/[^\s"'\\]+?\.(?:m3u8|mp4)[^\s"'\\]*""")
+                    
+                    // 1. Extract the JavPlayer embed link (It usually doesn't end in .m3u8)
+                    val javPlayerMatch = Regex("""https:\\?/\\?/javplayer\.cc\\?/[a-zA-Z0-9/]+""").find(xData)
+                    val embedUrl = javPlayerMatch?.value?.replace("\\/", "/")
 
-                    var av123Links = streamRegex.findAll(xData)
-                        .map { it.value.replace("\\/", "/") }
-                        .distinct()
-                        .toList()
-
-                    if (av123Links.isEmpty()) {
-                        av123Links = streamRegex.findAll(document.html())
+                    if (!embedUrl.isNullOrBlank()) {
+                        // 2. Use Cloudstream's built-in WebView interceptor to sniff the .m3u8!
+                        // This loads the embed URL invisibly and returns the first request ending in .m3u8
+                        val interceptor = WebViewResolver(Regex("""\.m3u8"""))
+                        val response = app.get(embedUrl, referer = mainUrl, interceptor = interceptor)
+                        
+                        val m3u8Url = response.request.url.toString()
+                        
+                        if (m3u8Url.contains(".m3u8")) {
+                            callback.invoke(
+                                newExtractorLink(
+                                    "123AV",
+                                    "123AV (JavPlayer)",
+                                    m3u8Url,
+                                    ExtractorLinkType.M3U8
+                                ) {
+                                    // JavPlayer CDNs usually require the javplayer domain as referer
+                                    this.referer = "https://javplayer.cc/" 
+                                    this.quality = Qualities.Unknown.value
+                                }
+                            )
+                            foundStream.set(true)
+                        }
+                    } else {
+                        // Fallback: Just in case older videos have direct .mp4/.m3u8 links in the HTML
+                        val streamRegex = Regex("""https?:\\?/\\?/[^\s"'\\]+?\.(?:m3u8|mp4)[^\s"'\\]*""")
+                        val directLinks = streamRegex.findAll(document.html())
                             .map { it.value.replace("\\/", "/") }
                             .distinct()
                             .toList()
-                    }
 
-                    av123Links.forEach { link ->
-                        val isM3u8 = link.contains(".m3u8")
-                        callback.invoke(
-                            newExtractorLink(
-                                "123AV",
-                                "123AV",
-                                link,
-                                if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                            ) {
-                                this.referer = mainUrl
-                                this.quality = Qualities.Unknown.value
-                            }
-                        )
-                        foundStream.set(true)
+                        directLinks.forEach { link ->
+                            val isM3u8 = link.contains(".m3u8")
+                            callback.invoke(
+                                newExtractorLink(
+                                    "123AV",
+                                    "123AV Direct",
+                                    link,
+                                    if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                ) {
+                                    this.referer = mainUrl
+                                    this.quality = Qualities.Unknown.value
+                                }
+                            )
+                            foundStream.set(true)
+                        }
                     }
                 }
             }
+
 
             if (!code.isNullOrBlank()) {
                 // ---- Cross-reference to MissAV for the actual stream ---------------------
