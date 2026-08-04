@@ -203,23 +203,29 @@ class MissAVProvider : MainAPI() {
             // (not strict JSON). We regex-scan it for any m3u8/mp4 URL rather than strictly
             // parsing it as JSON, with a full-page fallback if the attribute is empty.
             // ---- 123AV's own stream (Alpine.js x-data on the watch page) ---------------
+            // ---- 123AV's own stream (Alpine.js x-data on the watch page) ---------------
             launch {
                 runCatching {
                     val xData = document.selectFirst("div.watch-main > div.watch__main")?.attr("x-data").orEmpty()
                     
-                    // 1. Extract the JavPlayer embed link (It usually doesn't end in .m3u8)
+                    // 1. Extract the JavPlayer embed link
                     val javPlayerMatch = Regex("""https:\\?/\\?/javplayer\.cc\\?/[a-zA-Z0-9/]+""").find(xData)
                     val embedUrl = javPlayerMatch?.value?.replace("\\/", "/")
 
                     if (!embedUrl.isNullOrBlank()) {
-                        // 2. Use Cloudstream's built-in WebView interceptor to sniff the .m3u8!
-                        // This loads the embed URL invisibly and returns the first request ending in .m3u8
-                        val interceptor = WebViewResolver(Regex("""\.m3u8"""))
-                        val response = app.get(embedUrl, referer = mainUrl, interceptor = interceptor)
+                        // 2. Fetch the JavPlayer embed page via HTTP
+                        val embedHtml = app.get(embedUrl, referer = mainUrl).text
                         
-                        val m3u8Url = response.request.url.toString()
+                        // 3. Unpack the obfuscated JavaScript instantly (No WebView needed!)
+                        val unpackedHtml = getAndUnpack(embedHtml)
                         
-                        if (m3u8Url.contains(".m3u8")) {
+                        // 4. Extract the hidden .m3u8 link from the decrypted JS
+                        val m3u8Regex = Regex("""(?:file|src|url|source)\s*[:=]\s*['"](https?://[^'"]+\.m3u8[^'"]*)['"]""")
+                        val match = m3u8Regex.find(unpackedHtml) ?: m3u8Regex.find(embedHtml)
+                        
+                        val m3u8Url = match?.groupValues?.get(1)
+
+                        if (!m3u8Url.isNullOrBlank()) {
                             callback.invoke(
                                 newExtractorLink(
                                     "123AV",
@@ -227,7 +233,7 @@ class MissAVProvider : MainAPI() {
                                     m3u8Url,
                                     ExtractorLinkType.M3U8
                                 ) {
-                                    // JavPlayer CDNs usually require the javplayer domain as referer
+                                    // JavPlayer CDNs require the javplayer domain as referer to stream
                                     this.referer = "https://javplayer.cc/" 
                                     this.quality = Qualities.Unknown.value
                                 }
