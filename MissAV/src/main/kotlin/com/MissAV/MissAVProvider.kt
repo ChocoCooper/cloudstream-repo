@@ -1,9 +1,25 @@
 package com.MissAv
 
 import org.jsoup.nodes.Element
+import org.jsoup.parser.Parser
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.utils.AppUtils.parseJson
+import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import java.net.URLEncoder
+
+// Some titles arrive double HTML-encoded (e.g. "Moody&#039;s" instead of "Moody's").
+// Jsoup's .text()/.attr() only decode entities once during parsing, so a literal
+// "&#039;" left in the text still needs one more manual unescape pass.
+private fun String.decodeHtmlEntities(): String = Parser.unescapeEntities(this, false)
+
+// Carries the poster scraped from the search/homepage card through to load(), since
+// the 123AV video page's own og:image often falls back to the generic site logo
+// (it's only filled in client-side by Alpine.js, which our static fetch never runs).
+data class LoadData(
+    val url: String,
+    val poster: String? = null
+)
 
 class MissAVProvider : MainAPI() {
     // NOTE: mainUrl stays on 123av.com because ALL browsing (home page + search + video
@@ -46,7 +62,7 @@ class MissAVProvider : MainAPI() {
     // ------------------------------------------------------------------
     private fun Element.toSearchResult(): SearchResponse? {
         val linkEl = this.selectFirst("div.card__body > h3.card__title > a.card__link") ?: return null
-        val title = linkEl.text().trim()
+        val title = linkEl.text().trim().decodeHtmlEntities()
         val href = fixUrl(linkEl.attr("href"))
 
         val posterEl = this.selectFirst("div.card__poster > a.card__cover > img.card__img")
@@ -54,7 +70,12 @@ class MissAVProvider : MainAPI() {
             it.attr("src").ifBlank { it.attr("data-src") }
         }?.let { fixUrlNull(it) }
 
-        return newMovieSearchResponse(title, href, TvType.NSFW) {
+        // Bundle the href + poster together so load() can reuse the exact same poster
+        // shown here, instead of re-scraping (and possibly getting the wrong) image
+        // from the video page itself.
+        val loadUrl = LoadData(href, posterUrl).toJson()
+
+        return newMovieSearchResponse(title, loadUrl, TvType.NSFW) {
             this.posterUrl = posterUrl
         }
     }
@@ -72,43 +93,50 @@ class MissAVProvider : MainAPI() {
     // Video / detail page — 123AV metadata
     // ------------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
-        val document = app.get(url).document
+        // `url` is normally a LoadData JSON blob (href + poster) produced in toSearchResult().
+        // Fall back gracefully to treating it as a plain page URL (e.g. deep links) if parsing fails.
+        val loadData = runCatching { parseJson<LoadData>(url) }.getOrNull() ?: LoadData(url, null)
 
-        val title = document.selectFirst("meta[property=og:title]")?.attr("content")
+        val document = app.get(loadData.url).document
+
+        val title = (document.selectFirst("meta[property=og:title]")?.attr("content")
             ?.substringBeforeLast(" — 123AV")
             ?.trim()
             ?: document.selectFirst("h1")?.text()?.trim()
-            ?: "Unknown"
+            ?: "Unknown").decodeHtmlEntities()
 
-        val poster = document.selectFirst("meta[property=og:image]")?.attr("content")
-            ?.let { fixUrlNull(it) }
+        // Reuse the poster carried over from the search/homepage card. Only fall back to
+        // scraping og:image (which is often just the generic site logo) if we somehow
+        // don't have one already.
+        val poster = loadData.poster
+            ?: document.selectFirst("meta[property=og:image]")?.attr("content")?.let { fixUrlNull(it) }
 
         val genres = document.select(
             "dl.watch__info > div.watch__info-row > dd.chips > a[href^=\"/en/genres/\"]"
-        ).map { it.text().trim() }
+        ).map { it.text().trim().decodeHtmlEntities() }
 
         val tags = document.select(
             "dl.watch__info > div.watch__info-row > dd.chips > a[href^=\"/en/tags/\"]"
-        ).map { it.text().trim() }
+        ).map { it.text().trim().decodeHtmlEntities() }
 
         val cast = document.select(
             "dl.watch__info > div.watch__info-row > dd.chips > a[href^=\"/en/actresses/\"]"
-        ).map { it.text().trim() }
+        ).map { it.text().trim().decodeHtmlEntities() }
 
         val maker = document.select(
             "dl.watch__info > div.watch__info-row > dd.chips > a[href^=\"/en/makers/\"]"
-        ).map { it.text().trim() }.firstOrNull()
+        ).map { it.text().trim().decodeHtmlEntities() }.firstOrNull()
 
         val code = document.selectFirst(
             "dl.watch__info > div.watch__info-row:nth-child(1) > dd"
-        )?.text()?.trim()
+        )?.text()?.trim()?.decodeHtmlEntities()
 
         val plot = buildString {
             if (!code.isNullOrBlank()) appendLine("Code: $code")
             if (!maker.isNullOrBlank()) appendLine("Maker: $maker")
         }.trim().ifBlank { null }
 
-        return newMovieLoadResponse(title, url, TvType.NSFW, url) {
+        return newMovieLoadResponse(title, loadData.url, TvType.NSFW, loadData.url) {
             this.posterUrl = poster
             this.plot = plot
             this.tags = (genres + tags).distinct()
@@ -150,13 +178,13 @@ class MissAVProvider : MainAPI() {
         // `data` is the 123AV video page URL (from load()).
         val document = app.get(data).document
 
-        val title = document.selectFirst("meta[property=og:title]")?.attr("content")
+        val title = (document.selectFirst("meta[property=og:title]")?.attr("content")
             ?.substringBeforeLast(" — 123AV")?.trim()
-            ?: document.title()
+            ?: document.title()).decodeHtmlEntities()
 
         // Prefer the dedicated "Code" field, fall back to regex on the title.
         val code = document.selectFirst("dl.watch__info > div.watch__info-row:nth-child(1) > dd")
-            ?.text()?.trim()
+            ?.text()?.trim()?.decodeHtmlEntities()
             ?: extractCode(title)
 
         var foundStream = false
@@ -211,8 +239,8 @@ class MissAVProvider : MainAPI() {
                 if (!finalLink.isNullOrBlank()) {
                     callback.invoke(
                         newExtractorLink(
-                            name,
-                            name,
+                            "MissAV",
+                            "MissAV",
                             finalLink,
                             ExtractorLinkType.M3U8
                         ) {
