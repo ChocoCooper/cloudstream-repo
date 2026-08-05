@@ -6,6 +6,7 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
+import com.lagradost.cloudstream3.network.CloudflareKiller
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import java.net.URLEncoder
@@ -191,62 +192,55 @@ class MissAVProvider : MainAPI() {
         val foundStream = AtomicBoolean(false)
 
         coroutineScope {
-            // ---- 123AV's own stream (Alpine.js x-data on the watch page) ---------------
+            // ---- 123AV's own stream (JavPlayer Embed) ---------------
             launch {
                 try {
                     val xData = document.selectFirst("div.watch-main > div.watch__main")?.attr("x-data").orEmpty()
                     
-                    // 1. Safely extract just the ID, ignoring the messy \/\/\/ escaping
+                    // 1. Safely extract the JavPlayer ID
                     val embedIdMatch = Regex("""javplayer\.cc[\\/]+e[\\/]+([a-zA-Z0-9]+)""").find(xData)
                     val embedId = embedIdMatch?.groupValues?.get(1)
-                    
-                    println("123AV_DEBUG: Extracted Embed ID -> $embedId")
 
                     if (!embedId.isNullOrBlank()) {
-                        // Rebuild the clean URL manually
                         val embedUrl = "https://javplayer.cc/e/$embedId"
-                        println("123AV_DEBUG: Fetching URL -> $embedUrl")
                         
-                        // 2. Fetch the JavPlayer embed page
-                        val embedHtml = app.get(embedUrl, referer = mainUrl).text
-                        println("123AV_DEBUG: Downloaded HTML length -> ${embedHtml.length}")
-                        println("123AV_DEBUG: HTML CONTENT -> \n$embedHtml\n------------------")
+                        // 2. Fetch the embed page WITH CloudflareKiller interceptor!
+                        // This bypasses the 1.6KB Turnstile wall and grabs the actual player HTML.
+                        val embedHtml = app.get(
+                            embedUrl, 
+                            referer = mainUrl, 
+                            interceptor = CloudflareKiller()
+                        ).text
                         
-                        // 3. Unpack the obfuscated JavaScript. 
+                        // 3. Unpack the decrypted Javascript
                         val unpackedHtml = runCatching { getAndUnpack(embedHtml) }.getOrDefault(embedHtml)
                         
-                        // 4. Extract the hidden .m3u8 link from the decrypted JS
+                        // 4. Rip the direct .m3u8 stream from the script
                         val m3u8Regex = Regex("""(?:file|src|url|source)\s*[:=]\s*['"](https?://[^'"]+\.m3u8[^'"]*)['"]""")
                         val match = m3u8Regex.find(unpackedHtml) ?: m3u8Regex.find(embedHtml)
                         
                         val m3u8Url = match?.groupValues?.get(1)
-                        println("123AV_DEBUG: Found M3U8 URL -> $m3u8Url")
 
                         if (!m3u8Url.isNullOrBlank()) {
                             callback.invoke(
                                 newExtractorLink(
                                     "123AV",
-                                    "123AV", // Renamed to just "123AV"
+                                    "123AV",
                                     m3u8Url,
                                     ExtractorLinkType.M3U8
                                 ) {
                                     this.referer = "https://javplayer.cc/" 
-                                    this.quality = Qualities.Unknown.value // Removes the "1080p" tag
+                                    this.quality = Qualities.Unknown.value 
                                 }
                             )
                             foundStream.set(true)
-                            println("123AV_DEBUG: Success! Stream sent to ExoPlayer.")
-                        } else {
-                            println("123AV_DEBUG: Failed to find .m3u8 string in the HTML.")
                         }
-                    } else {
-                        println("123AV_DEBUG: Regex failed to extract embed ID from x-data.")
                     }
                 } catch (e: Exception) {
-                    println("123AV_DEBUG: CRASHED -> ${e.message}")
+                    // Fail silently so it doesn't crash the other concurrent extractors
+                    e.printStackTrace()
                 }
             }
-
 
             if (!code.isNullOrBlank()) {
                 // ---- Cross-reference to MissAV for the actual stream ---------------------
