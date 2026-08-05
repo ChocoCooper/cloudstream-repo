@@ -20,6 +20,13 @@ data class LoadData(
     val poster: String? = null
 )
 
+// Data class to parse Javtiful's inline playerSources JSON
+data class JavtifulSource(
+    val src: String,
+    val type: String?,
+    val size: Int?
+)
+
 class MissAVProvider : MainAPI() {
     override var mainUrl              = "https://123av.com"
     override var name                 = "MissAV"
@@ -29,8 +36,9 @@ class MissAVProvider : MainAPI() {
     override val hasChromecastSupport = true
     override val supportedTypes       = setOf(TvType.NSFW)
 
-    private val missAvUrl = "https://missav.ws"
+    private val missAvUrl      = "https://missav.ws"
     private val subtitleCatUrl = "https://www.subtitlecat.com"
+    private val javtifulUrl    = "https://javtiful.com"
 
     override val mainPage = mainPageOf(
         "$mainUrl/en/makers/madonna" to "Madonna",
@@ -74,14 +82,10 @@ class MissAVProvider : MainAPI() {
     }
 
     // ------------------------------------------------------------------
-    // Helper: Highly Aggressive JAV Code Sanitizer
+    // Helper: JAV Code Sanitizer (Stops capturing at the digits)
     // ------------------------------------------------------------------
     private fun extractCode(text: String?): String? {
         if (text.isNullOrBlank()) return null
-        
-        // Matches standard codes (ADN-528) and complex codes (FC2-PPV-12345)
-        // Stops capturing immediately after the numbers, effectively chopping off
-        // "-uncensored", "-leaked", or any other junk appended to the end.
         val regex = Regex("""([a-zA-Z0-9]{2,8}(?:-[a-zA-Z0-9]{2,8})?-\d{2,6})""")
         return regex.find(text)?.value?.uppercase()
     }
@@ -111,7 +115,6 @@ class MissAVProvider : MainAPI() {
         val maker = document.select("dl.watch__info > div.watch__info-row > dd.chips > a[href^=\"/en/makers/\"]")
             .map { it.text().trim().decodeHtmlEntities() }.firstOrNull()
 
-        // Extract and strictly sanitize the code for the plot description
         val rawCode = document.selectFirst("dl.watch__info > div.watch__info-row:nth-child(1) > dd")
             ?.text()?.trim()?.decodeHtmlEntities()
         val cleanCode = extractCode(rawCode) ?: rawCode
@@ -129,6 +132,7 @@ class MissAVProvider : MainAPI() {
         }
     }
 
+    // Helper: Find MissAV Video URL
     private suspend fun findMissAvUrl(code: String): String? {
         val encoded = URLEncoder.encode(code, "UTF-8")
         val document = app.get("$missAvUrl/en/search/$encoded", timeout = 15).document
@@ -143,6 +147,24 @@ class MissAVProvider : MainAPI() {
         return null
     }
 
+    // Helper: Find Javtiful Video URL
+    private suspend fun findJavtifulUrl(code: String): String? {
+        val encoded = URLEncoder.encode(code, "UTF-8")
+        val document = app.get("$javtifulUrl/search?q=$encoded", timeout = 15).document
+
+        val articles = document.select("body > main > section.front-section > div > div.front-video-grid > article > a[href]")
+        for (a in articles) {
+            val href = a.attr("href")
+            val title = a.attr("title").ifBlank { a.selectFirst("img")?.attr("alt").orEmpty() }
+            if (href.contains(code, ignoreCase = true) || title.contains(code, ignoreCase = true)) {
+                return if (href.startsWith("http")) href else "$javtifulUrl$href"
+            }
+        }
+        // Fallback to first article link if specific match wasn't found
+        val firstHref = articles.firstOrNull()?.attr("href") ?: return null
+        return if (firstHref.startsWith("http")) firstHref else "$javtifulUrl$firstHref"
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -155,18 +177,16 @@ class MissAVProvider : MainAPI() {
             ?.substringBeforeLast(" — 123AV")?.trim()
             ?: document.title()).decodeHtmlEntities()
 
-        // 1. Grab whatever 123AV claims the code is (e.g., "ADN-528-uncensored") or fallback to title
         val rawCodeText = document.selectFirst("dl.watch__info > div.watch__info-row:nth-child(1) > dd")
             ?.text()?.trim()?.decodeHtmlEntities()
             ?: title
 
-        // 2. FORCIBLY pass it through the Regex to sanitize junk. Result: "ADN-528"
         val code = extractCode(rawCodeText)
 
         val foundStream = AtomicBoolean(false)
 
         coroutineScope {
-            // ---- 123AV's own stream (JavPlayer /stream?id= API) ---------------
+            // ---- SOURCE 1: 123AV (JavPlayer /stream?id= API) --------------------------
             launch {
                 try {
                     val xData = document.selectFirst("div.watch-main > div.watch__main")?.attr("x-data").orEmpty()
@@ -175,9 +195,8 @@ class MissAVProvider : MainAPI() {
 
                     if (!embedId.isNullOrBlank()) {
                         val embedUrl = "https://javplayer.cc/e/$embedId"
-                        
-                        // Try the newly discovered /stream API first!
                         val apiUrl = "https://javplayer.cc/stream?id=$embedId"
+                        
                         val apiRes = app.get(
                             apiUrl, 
                             headers = mapOf(
@@ -188,7 +207,6 @@ class MissAVProvider : MainAPI() {
 
                         var m3u8Url = Regex("""https?://[^"'\s]+?\.m3u8[^"'\s]*""").find(apiRes.replace("\\/", "/"))?.value
 
-                        // Fall back to Cloudflare HTML bypass if the API fails
                         if (m3u8Url.isNullOrBlank()) {
                             val embedHtml = app.get(embedUrl, referer = mainUrl, interceptor = CloudflareKiller()).text
                             val unpackedHtml = runCatching { getAndUnpack(embedHtml) }.getOrDefault(embedHtml)
@@ -224,7 +242,7 @@ class MissAVProvider : MainAPI() {
             }
 
             if (!code.isNullOrBlank()) {
-                // ---- Cross-reference to MissAV for the actual stream ---------------------
+                // ---- SOURCE 2: MissAV --------------------------------------------------
                 launch {
                     runCatching {
                         val missAvVideoUrl = findMissAvUrl(code) ?: return@runCatching
@@ -268,7 +286,67 @@ class MissAVProvider : MainAPI() {
                     }
                 }
 
-                // ---- Subtitles via SubtitleCat (English only) -----------------------------
+                // ---- SOURCE 3: Javtiful ------------------------------------------------
+                launch {
+                    runCatching {
+                        val javtifulVideoUrl = findJavtifulUrl(code) ?: return@runCatching
+                        val javDoc = app.get(javtifulVideoUrl, timeout = 15).document
+
+                        val iframeSrc = javDoc.selectFirst("div.player iframe, #player iframe")?.attr("src")
+                        if (iframeSrc.isNullOrBlank()) return@runCatching
+
+                        val embedUrl = if (iframeSrc.startsWith("http")) iframeSrc else "$javtifulUrl$iframeSrc"
+                        val embedHtml = app.get(embedUrl, referer = javtifulVideoUrl, timeout = 15).text
+
+                        val sourcesJsonMatch = Regex("""\"playerSources\"\s*:\s*(\[.*?\])""").find(embedHtml)
+                        var javtifulFound = false
+
+                        if (sourcesJsonMatch != null) {
+                            val sourcesJson = sourcesJsonMatch.groupValues[1]
+                            val sources = runCatching { parseJson<List<JavtifulSource>>(sourcesJson) }.getOrNull()
+
+                            sources?.forEach { source ->
+                                if (source.src.isNotBlank()) {
+                                    val isM3u8 = source.type?.contains("mpegURL") == true || source.src.contains(".m3u8")
+                                    callback.invoke(
+                                        ExtractorLink(
+                                            source = "Javtiful",
+                                            name = "Javtiful",
+                                            url = source.src,
+                                            referer = embedUrl,
+                                            quality = source.size ?: Qualities.Unknown.value,
+                                            isM3u8 = isM3u8
+                                        )
+                                    )
+                                    javtifulFound = true
+                                    foundStream.set(true)
+                                }
+                            }
+                        }
+
+                        if (!javtifulFound) {
+                            val fallbackRegex = Regex("""\"src\"\s*:\s*\"(https?://[^\"]+)\"""").findAll(embedHtml)
+                            fallbackRegex.forEach { match ->
+                                val url = match.groupValues[1].replace("\\/", "/")
+                                if (url.contains("fast-stream") || url.contains("video")) {
+                                    callback.invoke(
+                                        ExtractorLink(
+                                            source = "Javtiful",
+                                            name = "Javtiful",
+                                            url = url,
+                                            referer = embedUrl,
+                                            quality = Qualities.Unknown.value,
+                                            isM3u8 = url.contains(".m3u8")
+                                        )
+                                    )
+                                    foundStream.set(true)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ---- Subtitles via SubtitleCat -----------------------------------------
                 launch {
                     runCatching {
                         val searchDoc = app.get("$subtitleCatUrl/index.php?search=$code", timeout = 15).document
