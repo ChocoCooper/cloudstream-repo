@@ -156,45 +156,41 @@ class MissAVProvider : MainAPI() {
         val foundStream = AtomicBoolean(false)
 
         coroutineScope {
-            // ---- 123AV's own stream (JavPlayer Embed + API Brute Force) ---------------
+            // ---- 123AV's own stream (JavPlayer /stream?id= API) ---------------
             launch {
                 try {
                     val xData = document.selectFirst("div.watch-main > div.watch__main")?.attr("x-data").orEmpty()
-                    
                     val embedIdMatch = Regex("""javplayer\.cc[\\/]+e[\\/]+([a-zA-Z0-9]+)""").find(xData)
                     val embedId = embedIdMatch?.groupValues?.get(1)
 
                     if (!embedId.isNullOrBlank()) {
                         val embedUrl = "https://javplayer.cc/e/$embedId"
                         
-                        // Fetch embed page with Cloudflare bypass
-                        val embedHtml = app.get(
-                            embedUrl, 
-                            referer = mainUrl, 
-                            interceptor = CloudflareKiller()
+                        // 1. Try the newly discovered /stream API first!
+                        val apiUrl = "https://javplayer.cc/stream?id=$embedId"
+                        val apiRes = app.get(
+                            apiUrl, 
+                            headers = mapOf(
+                                "Referer" to mainUrl, // The sniffer showed it uses the 123AV main URL as referer
+                                "X-Requested-With" to "XMLHttpRequest" 
+                            )
                         ).text
-                        
-                        val unpackedHtml = runCatching { getAndUnpack(embedHtml) }.getOrDefault(embedHtml)
-                        var m3u8Url: String? = null
-                        
-                        // 1. Check for the modern JavPlayer hidden API endpoint
-                        val apiPath = Regex("""["'](/api/source/[a-zA-Z0-9_]+)["']""").find(unpackedHtml)?.groupValues?.get(1)
-                            ?: Regex("""["'](/api/source/[a-zA-Z0-9_]+)["']""").find(embedHtml)?.groupValues?.get(1)
-                            
-                        if (apiPath != null) {
-                            val apiUrl = "https://javplayer.cc$apiPath"
-                            // The API requires a POST request to deliver the JSON containing the stream URL
-                            val apiRes = app.post(apiUrl, referer = embedUrl).text
-                            
-                            // Extract stream URL and fix escaped slashes (\/ -> /)
-                            m3u8Url = Regex("""https?://[^"'\s]+?\.m3u8[^"'\s]*""").find(apiRes.replace("\\/", "/"))?.value
-                        }
 
-                        // 2. Fallback: If no API, check if .m3u8 is directly in the unpacked HTML
+                        var m3u8Url = Regex("""https?://[^"'\s]+?\.m3u8[^"'\s]*""").find(apiRes.replace("\\/", "/"))?.value
+
+                        // 2. If the API fails, fall back to the Cloudflare HTML bypass
                         if (m3u8Url.isNullOrBlank()) {
+                            val embedHtml = app.get(embedUrl, referer = mainUrl, interceptor = CloudflareKiller()).text
+                            val unpackedHtml = runCatching { getAndUnpack(embedHtml) }.getOrDefault(embedHtml)
+                            
                             val fallbackRegex = Regex("""(?:file|src|url|source)\s*[:=]\s*['"](https?://[^'"]+\.m3u8[^'"]*)['"]""")
                             m3u8Url = fallbackRegex.find(unpackedHtml)?.groupValues?.get(1) 
                                 ?: fallbackRegex.find(embedHtml)?.groupValues?.get(1)
+                                
+                            if (m3u8Url.isNullOrBlank()) {
+                                m3u8Url = Regex("""https?://[^"'\s]+?\.m3u8[^"'\s]*""").find(unpackedHtml.replace("\\/", "/"))?.value
+                                    ?: Regex("""https?://[^"'\s]+?\.m3u8[^"'\s]*""").find(embedHtml.replace("\\/", "/"))?.value
+                            }
                         }
 
                         if (!m3u8Url.isNullOrBlank()) {
@@ -221,12 +217,29 @@ class MissAVProvider : MainAPI() {
                 // ---- Cross-reference to MissAV for the actual stream ---------------------
                 launch {
                     runCatching {
-                        // Using the new cleanly extracted code ensures this API call won't break
                         val missAvVideoUrl = findMissAvUrl(code) ?: return@runCatching
                         val response = app.get(missAvVideoUrl, timeout = 15)
 
                         val unpackedText = getAndUnpack(response.text)
-                        val finalLink = Regex("""source=['"](.*?)['"]""").find(unpackedText)?.groupValues?.get(1)
+                        var finalLink = Regex("""source\s*[:=]\s*['"](.*?)['"]""").find(unpackedText)?.groupValues?.get(1)
+                        
+                        if (finalLink?.startsWith("aHR0c") == true) {
+                            finalLink = String(android.util.Base64.decode(finalLink, android.util.Base64.DEFAULT))
+                        }
+                        
+                        if (finalLink.isNullOrBlank()) {
+                            val b64Match = Regex("""['"](aHR0c[a-zA-Z0-9+/=]+)['"]""").find(unpackedText)?.groupValues?.get(1)
+                            if (b64Match != null) {
+                                val decoded = String(android.util.Base64.decode(b64Match, android.util.Base64.DEFAULT))
+                                if (decoded.contains(".m3u8") || decoded.contains(".mp4")) {
+                                    finalLink = decoded
+                                }
+                            }
+                        }
+                        
+                        if (finalLink.isNullOrBlank()) {
+                            finalLink = Regex("""https?://[^"'\s]+?\.m3u8[^"'\s]*""").find(unpackedText.replace("\\/", "/"))?.value
+                        }
 
                         if (!finalLink.isNullOrBlank()) {
                             callback.invoke(
@@ -250,9 +263,7 @@ class MissAVProvider : MainAPI() {
                     runCatching {
                         val searchDoc = app.get("$subtitleCatUrl/index.php?search=$code", timeout = 15).document
 
-                        val subtitlePageLinks = searchDoc.select(
-                            "table.sub-table > tbody > tr > td > a[href^=\"subs/\"]"
-                        )
+                        val subtitlePageLinks = searchDoc.select("table.sub-table > tbody > tr > td > a[href^=\"subs/\"]")
                             .filter { it.text().contains(code, ignoreCase = true) }
                             .mapNotNull { el ->
                                 el.attr("href").let { href ->
@@ -265,8 +276,7 @@ class MissAVProvider : MainAPI() {
                         subtitlePageLinks.forEach { subPageUrl ->
                             runCatching {
                                 val subPageDoc = app.get(subPageUrl, timeout = 10).document
-                                val enHref = subPageDoc.selectFirst("div.sub-single > span > a#download_en")
-                                    ?.attr("href")
+                                val enHref = subPageDoc.selectFirst("div.sub-single > span > a#download_en")?.attr("href")
 
                                 if (!enHref.isNullOrBlank()) {
                                     val fullEnUrl = if (enHref.startsWith("http")) enHref else "$subtitleCatUrl/$enHref"
