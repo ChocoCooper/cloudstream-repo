@@ -12,23 +12,14 @@ import kotlinx.coroutines.launch
 import java.net.URLEncoder
 import java.util.concurrent.atomic.AtomicBoolean
 
-// Some titles arrive double HTML-encoded (e.g. "Moody&#039;s" instead of "Moody's").
-// Jsoup's .text()/.attr() only decode entities once during parsing, so a literal
-// "&#039;" left in the text still needs one more manual unescape pass.
 private fun String.decodeHtmlEntities(): String = Parser.unescapeEntities(this, false)
 
-// Carries the poster scraped from the search/homepage card through to load(), since
-// the 123AV video page's own og:image often falls back to the generic site logo
-// (it's only filled in client-side by Alpine.js, which our static fetch never runs).
 data class LoadData(
     val url: String,
     val poster: String? = null
 )
 
 class MissAVProvider : MainAPI() {
-    // NOTE: mainUrl stays on 123av.com because ALL browsing (home page + search + video
-    // metadata) is scraped from 123AV. missAvUrl below is only ever used internally, at
-    // playback time, to look up the matching MissAV page and pull the real stream from it.
     override var mainUrl              = "https://123av.com"
     override var name                 = "MissAV"
     override val hasMainPage          = true
@@ -40,9 +31,6 @@ class MissAVProvider : MainAPI() {
     private val missAvUrl = "https://missav.ws"
     private val subtitleCatUrl = "https://www.subtitlecat.com"
 
-    // ------------------------------------------------------------------
-    // Home page — custom 123AV maker sections
-    // ------------------------------------------------------------------
     override val mainPage = mainPageOf(
         "$mainUrl/en/makers/madonna" to "Madonna",
         "$mainUrl/en/makers/moodys" to "Moody's",
@@ -61,9 +49,6 @@ class MissAVProvider : MainAPI() {
         return newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
     }
 
-    // ------------------------------------------------------------------
-    // 123AV card parser (home page + search)
-    // ------------------------------------------------------------------
     private fun Element.toSearchResult(): SearchResponse? {
         val linkEl = this.selectFirst("div.card__body > h3.card__title > a.card__link") ?: return null
         val title = linkEl.text().trim().decodeHtmlEntities()
@@ -74,9 +59,6 @@ class MissAVProvider : MainAPI() {
             it.attr("src").ifBlank { it.attr("data-src") }
         }?.let { fixUrlNull(it) }
 
-        // Bundle the href + poster together so load() can reuse the exact same poster
-        // shown here, instead of re-scraping (and possibly getting the wrong) image
-        // from the video page itself.
         val loadUrl = LoadData(href, posterUrl).toJson()
 
         return newMovieSearchResponse(title, loadUrl, TvType.NSFW) {
@@ -84,23 +66,14 @@ class MissAVProvider : MainAPI() {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Search — 123AV results
-    // ------------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
         val encoded = URLEncoder.encode(query, "UTF-8")
         val document = app.get("$mainUrl/en/search?keyword=$encoded").document
         return document.select("div.card").mapNotNull { it.toSearchResult() }
     }
 
-    // ------------------------------------------------------------------
-    // Video / detail page — 123AV metadata
-    // ------------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
-        // `url` is normally a LoadData JSON blob (href + poster) produced in toSearchResult().
-        // Fall back gracefully to treating it as a plain page URL (e.g. deep links) if parsing fails.
         val loadData = runCatching { parseJson<LoadData>(url) }.getOrNull() ?: LoadData(url, null)
-
         val document = app.get(loadData.url).document
 
         val title = (document.selectFirst("meta[property=og:title]")?.attr("content")
@@ -109,31 +82,23 @@ class MissAVProvider : MainAPI() {
             ?: document.selectFirst("h1")?.text()?.trim()
             ?: "Unknown").decodeHtmlEntities()
 
-        // Reuse the poster carried over from the search/homepage card. Only fall back to
-        // scraping og:image (which is often just the generic site logo) if we somehow
-        // don't have one already.
         val poster = loadData.poster
             ?: document.selectFirst("meta[property=og:image]")?.attr("content")?.let { fixUrlNull(it) }
 
-        val genres = document.select(
-            "dl.watch__info > div.watch__info-row > dd.chips > a[href^=\"/en/genres/\"]"
-        ).map { it.text().trim().decodeHtmlEntities() }
+        val genres = document.select("dl.watch__info > div.watch__info-row > dd.chips > a[href^=\"/en/genres/\"]")
+            .map { it.text().trim().decodeHtmlEntities() }
 
-        val tags = document.select(
-            "dl.watch__info > div.watch__info-row > dd.chips > a[href^=\"/en/tags/\"]"
-        ).map { it.text().trim().decodeHtmlEntities() }
+        val tags = document.select("dl.watch__info > div.watch__info-row > dd.chips > a[href^=\"/en/tags/\"]")
+            .map { it.text().trim().decodeHtmlEntities() }
 
-        val cast = document.select(
-            "dl.watch__info > div.watch__info-row > dd.chips > a[href^=\"/en/actresses/\"]"
-        ).map { it.text().trim().decodeHtmlEntities() }
+        val cast = document.select("dl.watch__info > div.watch__info-row > dd.chips > a[href^=\"/en/actresses/\"]")
+            .map { it.text().trim().decodeHtmlEntities() }
 
-        val maker = document.select(
-            "dl.watch__info > div.watch__info-row > dd.chips > a[href^=\"/en/makers/\"]"
-        ).map { it.text().trim().decodeHtmlEntities() }.firstOrNull()
+        val maker = document.select("dl.watch__info > div.watch__info-row > dd.chips > a[href^=\"/en/makers/\"]")
+            .map { it.text().trim().decodeHtmlEntities() }.firstOrNull()
 
-        val code = document.selectFirst(
-            "dl.watch__info > div.watch__info-row:nth-child(1) > dd"
-        )?.text()?.trim()?.decodeHtmlEntities()
+        val code = document.selectFirst("dl.watch__info > div.watch__info-row:nth-child(1) > dd")
+            ?.text()?.trim()?.decodeHtmlEntities()
 
         val plot = buildString {
             if (!code.isNullOrBlank()) appendLine("Code: $code")
@@ -149,15 +114,17 @@ class MissAVProvider : MainAPI() {
     }
 
     // ------------------------------------------------------------------
-    // Helper: pull the JAV code (e.g. "SDJS-373", "START-609") out of a title
+    // Helper: Highly robust JAV code extractor (Ignores glued strings)
     // ------------------------------------------------------------------
-    private fun extractCode(title: String): String? =
-        Regex("""[a-zA-Z]+-\d+""").find(title)?.value
+    private fun extractCode(title: String): String? {
+        // 1. Tries to find neatly spaced codes first
+        Regex("""\b([a-zA-Z]{2,6}-\d{2,5})\b""").find(title)?.let { return it.value.uppercase() }
+        // 2. Looks strictly for uppercase letters before hyphen (ignores glued lowercase words)
+        Regex("""[A-Z]{2,6}-\d{2,5}""").find(title)?.let { return it.value }
+        // 3. Fallback: rigidly capped letter count so it doesn't swallow sentences
+        return Regex("""([a-zA-Z]{2,6}-\d{2,5})""").find(title)?.value?.uppercase()
+    }
 
-    // ------------------------------------------------------------------
-    // Helper: search missav.ws for a given code and return the first
-    // matching video page URL (absolute).
-    // ------------------------------------------------------------------
     private suspend fun findMissAvUrl(code: String): String? {
         val encoded = URLEncoder.encode(code, "UTF-8")
         val document = app.get("$missAvUrl/en/search/$encoded", timeout = 15).document
@@ -170,9 +137,6 @@ class MissAVProvider : MainAPI() {
         return if (href.startsWith("http")) href else "$missAvUrl$href"
     }
 
-    // ------------------------------------------------------------------
-    // Links + subtitles
-    // ------------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -192,34 +156,46 @@ class MissAVProvider : MainAPI() {
         val foundStream = AtomicBoolean(false)
 
         coroutineScope {
-            // ---- 123AV's own stream (JavPlayer Embed) ---------------
+            // ---- 123AV's own stream (JavPlayer Embed + API Brute Force) ---------------
             launch {
                 try {
                     val xData = document.selectFirst("div.watch-main > div.watch__main")?.attr("x-data").orEmpty()
                     
-                    // 1. Safely extract the JavPlayer ID
                     val embedIdMatch = Regex("""javplayer\.cc[\\/]+e[\\/]+([a-zA-Z0-9]+)""").find(xData)
                     val embedId = embedIdMatch?.groupValues?.get(1)
 
                     if (!embedId.isNullOrBlank()) {
                         val embedUrl = "https://javplayer.cc/e/$embedId"
                         
-                        // 2. Fetch the embed page WITH CloudflareKiller interceptor!
-                        // This bypasses the 1.6KB Turnstile wall and grabs the actual player HTML.
+                        // Fetch embed page with Cloudflare bypass
                         val embedHtml = app.get(
                             embedUrl, 
                             referer = mainUrl, 
                             interceptor = CloudflareKiller()
                         ).text
                         
-                        // 3. Unpack the decrypted Javascript
                         val unpackedHtml = runCatching { getAndUnpack(embedHtml) }.getOrDefault(embedHtml)
+                        var m3u8Url: String? = null
                         
-                        // 4. Rip the direct .m3u8 stream from the script
-                        val m3u8Regex = Regex("""(?:file|src|url|source)\s*[:=]\s*['"](https?://[^'"]+\.m3u8[^'"]*)['"]""")
-                        val match = m3u8Regex.find(unpackedHtml) ?: m3u8Regex.find(embedHtml)
-                        
-                        val m3u8Url = match?.groupValues?.get(1)
+                        // 1. Check for the modern JavPlayer hidden API endpoint
+                        val apiPath = Regex("""["'](/api/source/[a-zA-Z0-9_]+)["']""").find(unpackedHtml)?.groupValues?.get(1)
+                            ?: Regex("""["'](/api/source/[a-zA-Z0-9_]+)["']""").find(embedHtml)?.groupValues?.get(1)
+                            
+                        if (apiPath != null) {
+                            val apiUrl = "https://javplayer.cc$apiPath"
+                            // The API requires a POST request to deliver the JSON containing the stream URL
+                            val apiRes = app.post(apiUrl, referer = embedUrl).text
+                            
+                            // Extract stream URL and fix escaped slashes (\/ -> /)
+                            m3u8Url = Regex("""https?://[^"'\s]+?\.m3u8[^"'\s]*""").find(apiRes.replace("\\/", "/"))?.value
+                        }
+
+                        // 2. Fallback: If no API, check if .m3u8 is directly in the unpacked HTML
+                        if (m3u8Url.isNullOrBlank()) {
+                            val fallbackRegex = Regex("""(?:file|src|url|source)\s*[:=]\s*['"](https?://[^'"]+\.m3u8[^'"]*)['"]""")
+                            m3u8Url = fallbackRegex.find(unpackedHtml)?.groupValues?.get(1) 
+                                ?: fallbackRegex.find(embedHtml)?.groupValues?.get(1)
+                        }
 
                         if (!m3u8Url.isNullOrBlank()) {
                             callback.invoke(
@@ -237,7 +213,6 @@ class MissAVProvider : MainAPI() {
                         }
                     }
                 } catch (e: Exception) {
-                    // Fail silently so it doesn't crash the other concurrent extractors
                     e.printStackTrace()
                 }
             }
@@ -246,6 +221,7 @@ class MissAVProvider : MainAPI() {
                 // ---- Cross-reference to MissAV for the actual stream ---------------------
                 launch {
                     runCatching {
+                        // Using the new cleanly extracted code ensures this API call won't break
                         val missAvVideoUrl = findMissAvUrl(code) ?: return@runCatching
                         val response = app.get(missAvVideoUrl, timeout = 15)
 
@@ -256,12 +232,12 @@ class MissAVProvider : MainAPI() {
                             callback.invoke(
                                 newExtractorLink(
                                     "MissAV",
-                                    "MissAV", // Renamed to just "MissAV"
+                                    "MissAV",
                                     finalLink,
                                     ExtractorLinkType.M3U8
                                 ) {
                                     this.referer = missAvUrl
-                                    this.quality = Qualities.Unknown.value // Removes the "1080p" tag
+                                    this.quality = Qualities.Unknown.value 
                                 }
                             )
                             foundStream.set(true)
