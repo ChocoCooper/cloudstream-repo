@@ -286,7 +286,7 @@ class MissAVProvider : MainAPI() {
                     }
                 }
 
-                // ---- SOURCE 3: Javtiful ------------------------------------------------
+                // ---- SOURCE 3: Javtiful (DEPRECATION FIX APPLIED) ----------------------
                 launch {
                     runCatching {
                         val javtifulVideoUrl = findJavtifulUrl(code) ?: return@runCatching
@@ -308,15 +308,18 @@ class MissAVProvider : MainAPI() {
                             sources?.forEach { source ->
                                 if (source.src.isNotBlank()) {
                                     val isM3u8 = source.type?.contains("mpegURL") == true || source.src.contains(".m3u8")
+                                    val linkType = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                    
                                     callback.invoke(
-                                        ExtractorLink(
-                                            source = "Javtiful",
-                                            name = "Javtiful",
-                                            url = source.src,
-                                            referer = embedUrl,
-                                            quality = source.size ?: Qualities.Unknown.value,
-                                            isM3u8 = isM3u8
-                                        )
+                                        newExtractorLink(
+                                            "Javtiful",
+                                            "Javtiful",
+                                            source.src,
+                                            linkType
+                                        ) {
+                                            this.referer = embedUrl
+                                            this.quality = source.size ?: Qualities.Unknown.value
+                                        }
                                     )
                                     javtifulFound = true
                                     foundStream.set(true)
@@ -329,15 +332,19 @@ class MissAVProvider : MainAPI() {
                             fallbackRegex.forEach { match ->
                                 val url = match.groupValues[1].replace("\\/", "/")
                                 if (url.contains("fast-stream") || url.contains("video")) {
+                                    val isM3u8 = url.contains(".m3u8")
+                                    val linkType = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                    
                                     callback.invoke(
-                                        ExtractorLink(
-                                            source = "Javtiful",
-                                            name = "Javtiful",
-                                            url = url,
-                                            referer = embedUrl,
-                                            quality = Qualities.Unknown.value,
-                                            isM3u8 = url.contains(".m3u8")
-                                        )
+                                        newExtractorLink(
+                                            "Javtiful",
+                                            "Javtiful",
+                                            url,
+                                            linkType
+                                        ) {
+                                            this.referer = embedUrl
+                                            this.quality = Qualities.Unknown.value
+                                        }
                                     )
                                     foundStream.set(true)
                                 }
