@@ -1,13 +1,10 @@
 package com.xmaal
 
 import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.utils.AppUtils.parseJson
+import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import com.lagradost.cloudstream3.utils.Qualities
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
-import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URI
 
@@ -25,24 +22,6 @@ class XmaalProvider : MainAPI() {
         "https://uncutmaza.gg"
     )
 
-    // A realistic browser UA + referer. Several of these sites otherwise
-    // serve a stripped-down page (or block the request outright) to
-    // non-browser user agents, which is the most likely reason the
-    // video-source selector was coming back empty ("No Links Found").
-    private fun browserHeaders(referer: String? = null): Map<String, String> {
-        val map = mutableMapOf(
-            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-            "Accept-Language" to "en-US,en;q=0.9"
-        )
-        if (referer != null) map["Referer"] = referer
-        return map
-    }
-
-    private suspend fun fetchDoc(url: String): Document {
-        return app.get(url, headers = browserHeaders(url)).document
-    }
-
     private fun siteNameFor(url: String): String {
         return when {
             url.contains("hitmaal.io") -> "HitMaal"
@@ -55,7 +34,7 @@ class XmaalProvider : MainAPI() {
     // Extracts the background-image url out of a style attribute like:
     // background-image: url("https://.../poster.webp");
     private fun extractBgImage(style: String?): String? {
-        if (style.isNullOrBlank()) return null
+        if (style == null) return null
         val regex = Regex("""url\((['"]?)(.*?)\1\)""")
         return regex.find(style)?.groupValues?.get(2)
     }
@@ -77,18 +56,17 @@ class XmaalProvider : MainAPI() {
         return mirrors.map { it.trimEnd('/') + path }
     }
 
-    // Only accept links that actually look like episode/media pages
-    // (…-episode-12/ style slugs). This is what stops sidebar / related
-    // widgets on the series-list page from being scraped in as if they
-    // were episodes of the current series, which was scrambling the
-    // final episode order.
-    private val episodeHrefRegex = Regex("""(?i)-episode-\d+""")
-
-    private fun listAnchors(document: Document): List<Element> {
-        return document.select("#primary a.video.lazy-bg, #primary a.video, #primary a.lazy-bg")
-            .ifEmpty { document.select("#primary a[href]") }
-            .filter { episodeHrefRegex.containsMatchIn(it.attr("href")) || it.attr("style").contains("background-image") }
-    }
+    // Small payload we thread through search -> load, so the real title
+    // ("Utha Le Jaunga Episode 4") and the real poster (the background-image
+    // url off the card) survive into the media page, instead of falling back
+    // to the page's <meta og:title>/<meta og:image>, which on these sites are
+    // a generic "Watch ... Web Series >>> HITMaal" string and a grey
+    // placeholder image.
+    data class LoadData(
+        val url: String,
+        val title: String,
+        val poster: String? = null
+    )
 
     // ---------------------------------------------------------------
     // HOME PAGE
@@ -105,24 +83,31 @@ class XmaalProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = if (page <= 1) request.data else "${request.data.trimEnd('/')}/page/$page/"
-        val document = fetchDoc(url)
+        val document = app.get(url).document
 
-        val items = listAnchors(document)
+        val items = document.select("#primary > div > a.video, #primary > div > a.lazy-bg, #primary > div > a")
             .mapNotNull { toSearchResult(it) }
             .distinctBy { it.url }
 
         return newHomePageResponse(
-            list = HomePageList(request.name, items, isHorizontalImages = true),
+            list = HomePageList(request.name, items, isHorizontalImages = false),
             hasNext = items.isNotEmpty()
         )
     }
 
+    // Builds a search result card straight from the anchor: the visible
+    // title comes from the `title` attribute (e.g. "Utha Le Jaunga Episode
+    // 4") and the poster comes from the inline `background-image` url in
+    // `style` — never from page meta tags.
     private fun toSearchResult(element: Element): SearchResponse? {
         val href = element.attr("href").takeIf { it.isNotBlank() } ?: return null
         val title = element.attr("title").ifBlank { element.text() }.ifBlank { return null }
         val poster = extractBgImage(element.attr("style"))
 
-        return newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
+        // Carry the real title/poster into load() via the url payload.
+        val loadUrl = LoadData(href, title, poster).toJson()
+
+        return newTvSeriesSearchResponse(title, loadUrl, TvType.TvSeries) {
             this.posterUrl = poster
         }
     }
@@ -136,8 +121,10 @@ class XmaalProvider : MainAPI() {
 
         mirrors.forEach { mirror ->
             try {
-                val document = fetchDoc("$mirror/?s=$query")
-                results.addAll(listAnchors(document).mapNotNull { toSearchResult(it) })
+                val document = app.get("$mirror/?s=$query").document
+                val items = document.select("#primary > div > a.video, #primary > div > a.lazy-bg, #primary > div > a")
+                    .mapNotNull { toSearchResult(it) }
+                results.addAll(items)
             } catch (e: Exception) {
                 // if one mirror is down, ignore and continue with the others
             }
@@ -145,7 +132,7 @@ class XmaalProvider : MainAPI() {
 
         // Deduplicate by media title + slug path (ignoring which domain it came from)
         return results.distinctBy { res ->
-            val slug = pathOf(res.url).trimEnd('/').substringAfterLast('/')
+            val slug = pathOf((parseJson<LoadData>(res.url)).url).trimEnd('/').substringAfterLast('/')
             "${res.name.lowercase().trim()}|$slug"
         }
     }
@@ -154,113 +141,67 @@ class XmaalProvider : MainAPI() {
     // LOAD (media page -> episode list)
     // ---------------------------------------------------------------
 
-    // Splits a title like "Bidaai Episode 4 (Bua ji and Sasuma)" into
-    // ("Bidaai", 4) so episodes can be grouped by series and sorted
-    // numerically within that series.
-    private val seriesEpisodeRegex = Regex("""(?i)^(.*?)\s*episode\s*(\d+)""")
-
-    private fun parseSeriesAndEpisode(title: String, hrefFallback: String): Pair<String, Int> {
-        seriesEpisodeRegex.find(title)?.let {
-            val seriesName = it.groupValues[1].trim().ifBlank { title }
-            val epNum = it.groupValues[2].toIntOrNull() ?: 1
-            return seriesName to epNum
-        }
-        // fall back to parsing the url slug, e.g. /bidaai-episode-4/
-        val slugMatch = Regex("""(?i)^(.*?)-episode-(\d+)""").find(
-            pathOf(hrefFallback).trim('/').substringAfterLast('/')
-        )
-        if (slugMatch != null) {
-            val seriesName = slugMatch.groupValues[1].replace('-', ' ').trim().ifBlank { title }
-            val epNum = slugMatch.groupValues[2].toIntOrNull() ?: 1
-            return seriesName to epNum
-        }
-        return title to 1
-    }
-
     override suspend fun load(url: String): LoadResponse {
-        val document = fetchDoc(url)
+        // `url` is a LoadData JSON payload produced by toSearchResult(); it
+        // carries the real page url plus the title/poster we already scraped
+        // off the card, so we don't need to (and shouldn't) trust this page's
+        // own <meta> tags for those two fields.
+        val loadData = try {
+            parseJson<LoadData>(url)
+        } catch (e: Exception) {
+            LoadData(url, url)
+        }
 
-        val title = document.selectFirst("meta[property=og:title]")?.attr("content")
-            ?: document.selectFirst("title")?.text()
-            ?: "Xmaal"
-        val poster = document.selectFirst("meta[property=og:image]")?.attr("content")
+        val pageUrl = loadData.url
+        val document = app.get(pageUrl).document
+
+        val title = loadData.title
+        val poster = loadData.poster
         val plot = document.selectFirst("meta[property=og:description]")?.attr("content")
 
         // Series list link, e.g. https://hitmaal.io/series/bidaai/
         val seriesLink = document.selectFirst("#primary > div.taxonomy-meta > div.series-list > a")
             ?.attr("href")
 
-        // Collect candidate episode hrefs from the series listing page.
-        val candidateHrefs: List<String> = if (seriesLink != null) {
-            try {
-                val seriesDoc = fetchDoc(seriesLink)
-                listAnchors(seriesDoc)
-                    .mapNotNull { it.attr("href").takeIf { h -> h.isNotBlank() } }
-                    .distinct()
-            } catch (e: Exception) {
-                emptyList()
-            }
-        } else emptyList()
+        val episodes = mutableListOf<Episode>()
 
-        // The listing page usually doesn't carry a poster for each entry -
-        // posters only show up once you open the individual episode page
-        // (its own og:image). So we crawl each candidate episode page (in
-        // parallel) to grab its real title + poster + confirm it's valid.
-        data class EpisodeInfo(val href: String, val title: String, val poster: String?)
+        if (seriesLink != null) {
+            val seriesDoc = app.get(seriesLink).document
+            val epElements = seriesDoc.select("#primary > div > a.video, #primary > div > a.lazy-bg, #primary > div > a")
 
-        val episodeInfos: List<EpisodeInfo> = coroutineScope {
-            candidateHrefs.map { href ->
-                async {
-                    try {
-                        val epDoc = fetchDoc(href)
-                        val epTitle = epDoc.selectFirst("meta[property=og:title]")?.attr("content")
-                            ?: epDoc.selectFirst("title")?.text()
-                            ?: href
-                        val epPoster = epDoc.selectFirst("meta[property=og:image]")?.attr("content")
-                        EpisodeInfo(href, epTitle, epPoster)
-                    } catch (e: Exception) {
-                        null
+            epElements.forEach { el ->
+                val epHref = el.attr("href").takeIf { it.isNotBlank() } ?: return@forEach
+                // Same rule here: episode title/poster come straight from the
+                // anchor's title attribute + background-image style, never
+                // from meta tags.
+                val epTitle = el.attr("title").ifBlank { el.text() }.ifBlank { "Episode" }
+                val epPoster = extractBgImage(el.attr("style"))
+                episodes.add(
+                    newEpisode(epHref) {
+                        this.name = epTitle
+                        this.posterUrl = epPoster
                     }
-                }
-            }.awaitAll().filterNotNull()
-        }
-
-        // Group by series name (parsed from title/url), then sort ascending
-        // by episode number within each series, then by series name so the
-        // final order looks like:
-        //   Series A Episode 1, Series A Episode 2, ... Series B Episode 1, ...
-        val parsed = episodeInfos.map { info ->
-            val (seriesName, epNum) = parseSeriesAndEpisode(info.title, info.href)
-            Triple(info, seriesName, epNum)
-        }
-
-        val seriesOrder = parsed.map { it.second }.distinct()
-        val seasonIndexOf = seriesOrder.withIndex().associate { (idx, name) -> name to (idx + 1) }
-
-        val sortedParsed = parsed.sortedWith(compareBy({ seasonIndexOf[it.second] ?: Int.MAX_VALUE }, { it.third }))
-
-        val episodes = sortedParsed.map { (info, seriesName, epNum) ->
-            newEpisode(info.href) {
-                this.name = info.title
-                this.posterUrl = info.poster
-                this.season = seasonIndexOf[seriesName] ?: 1
-                this.episode = epNum
+                )
             }
+        }
+
+        // Ensure ascending order using episode number parsed from the title, falling back to list order.
+        val epRegex = Regex("""(?i)episode\s*(\d+)""")
+        val sortedEpisodes = episodes.sortedBy { ep ->
+            epRegex.find(ep.name ?: "")?.groupValues?.get(1)?.toIntOrNull() ?: Int.MAX_VALUE
         }
 
         // If crawling the series page failed to find episodes, fall back to a single "episode" for this page.
-        val finalEpisodes = episodes.ifEmpty {
+        val finalEpisodes = sortedEpisodes.ifEmpty {
             listOf(
-                newEpisode(url) {
+                newEpisode(pageUrl) {
                     this.name = title
                     this.posterUrl = poster
-                    this.season = 1
-                    this.episode = 1
                 }
             )
         }
 
-        return newTvSeriesLoadResponse(title, url, TvType.TvSeries, finalEpisodes) {
+        return newTvSeriesLoadResponse(title, pageUrl, TvType.TvSeries, finalEpisodes) {
             this.posterUrl = poster
             this.plot = plot
         }
@@ -269,27 +210,6 @@ class XmaalProvider : MainAPI() {
     // ---------------------------------------------------------------
     // LOAD LINKS (checks all three mirrors for stream sources)
     // ---------------------------------------------------------------
-
-    private fun findStreamUrl(document: Document): String? {
-        // Primary target per the site's known markup.
-        document.selectFirst("div.xplayer-lazy-source[data-src]")?.attr("data-src")
-            ?.takeIf { it.isNotBlank() }?.let { return it }
-
-        // Fallbacks in case markup shifts slightly between mirrors/updates.
-        document.selectFirst("div.video-container [data-src]")?.attr("data-src")
-            ?.takeIf { it.isNotBlank() }?.let { return it }
-
-        document.selectFirst("[data-src]")?.attr("data-src")
-            ?.takeIf { it.isNotBlank() }?.let { return it }
-
-        document.selectFirst("video source[src]")?.attr("src")
-            ?.takeIf { it.isNotBlank() }?.let { return it }
-
-        document.selectFirst("video[src]")?.attr("src")
-            ?.takeIf { it.isNotBlank() }?.let { return it }
-
-        return null
-    }
 
     override suspend fun loadLinks(
         data: String,
@@ -301,8 +221,9 @@ class XmaalProvider : MainAPI() {
 
         mirrorUrls(data).forEach { mirrorUrl ->
             try {
-                val document = app.get(mirrorUrl, headers = browserHeaders(mirrorUrl)).document
-                val streamUrl = findStreamUrl(document)
+                val document = app.get(mirrorUrl).document
+                val sourceElement = document.selectFirst("div.xplayer-lazy-source, div.video-container div div[data-src]")
+                val streamUrl = sourceElement?.attr("data-src")
 
                 if (!streamUrl.isNullOrBlank()) {
                     val srcName = siteNameFor(mirrorUrl)
