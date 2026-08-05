@@ -1,5 +1,6 @@
 package com.MissAv
 
+import android.util.Base64
 import org.jsoup.nodes.Element
 import org.jsoup.parser.Parser
 import com.lagradost.cloudstream3.*
@@ -72,6 +73,19 @@ class MissAVProvider : MainAPI() {
         return document.select("div.card").mapNotNull { it.toSearchResult() }
     }
 
+    // ------------------------------------------------------------------
+    // Helper: Highly Aggressive JAV Code Sanitizer
+    // ------------------------------------------------------------------
+    private fun extractCode(text: String?): String? {
+        if (text.isNullOrBlank()) return null
+        
+        // Matches standard codes (ADN-528) and complex codes (FC2-PPV-12345)
+        // Stops capturing immediately after the numbers, effectively chopping off
+        // "-uncensored", "-leaked", or any other junk appended to the end.
+        val regex = Regex("""([a-zA-Z0-9]{2,8}(?:-[a-zA-Z0-9]{2,8})?-\d{2,6})""")
+        return regex.find(text)?.value?.uppercase()
+    }
+
     override suspend fun load(url: String): LoadResponse {
         val loadData = runCatching { parseJson<LoadData>(url) }.getOrNull() ?: LoadData(url, null)
         val document = app.get(loadData.url).document
@@ -97,11 +111,13 @@ class MissAVProvider : MainAPI() {
         val maker = document.select("dl.watch__info > div.watch__info-row > dd.chips > a[href^=\"/en/makers/\"]")
             .map { it.text().trim().decodeHtmlEntities() }.firstOrNull()
 
-        val code = document.selectFirst("dl.watch__info > div.watch__info-row:nth-child(1) > dd")
+        // Extract and strictly sanitize the code for the plot description
+        val rawCode = document.selectFirst("dl.watch__info > div.watch__info-row:nth-child(1) > dd")
             ?.text()?.trim()?.decodeHtmlEntities()
+        val cleanCode = extractCode(rawCode) ?: rawCode
 
         val plot = buildString {
-            if (!code.isNullOrBlank()) appendLine("Code: $code")
+            if (!cleanCode.isNullOrBlank()) appendLine("Code: $cleanCode")
             if (!maker.isNullOrBlank()) appendLine("Maker: $maker")
         }.trim().ifBlank { null }
 
@@ -113,28 +129,18 @@ class MissAVProvider : MainAPI() {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Helper: Highly robust JAV code extractor (Ignores glued strings)
-    // ------------------------------------------------------------------
-    private fun extractCode(title: String): String? {
-        // 1. Tries to find neatly spaced codes first
-        Regex("""\b([a-zA-Z]{2,6}-\d{2,5})\b""").find(title)?.let { return it.value.uppercase() }
-        // 2. Looks strictly for uppercase letters before hyphen (ignores glued lowercase words)
-        Regex("""[A-Z]{2,6}-\d{2,5}""").find(title)?.let { return it.value }
-        // 3. Fallback: rigidly capped letter count so it doesn't swallow sentences
-        return Regex("""([a-zA-Z]{2,6}-\d{2,5})""").find(title)?.value?.uppercase()
-    }
-
     private suspend fun findMissAvUrl(code: String): String? {
         val encoded = URLEncoder.encode(code, "UTF-8")
         val document = app.get("$missAvUrl/en/search/$encoded", timeout = 15).document
 
-        val card = document.selectFirst(".thumbnail, .max-w-sm, .w-full.truncate") ?: return null
-        val aTag = card.selectFirst(".text-secondary") ?: card.selectFirst("a") ?: return null
-
-        val href = aTag.attr("href")
-        if (href.isBlank()) return null
-        return if (href.startsWith("http")) href else "$missAvUrl$href"
+        val aTags = document.select("a[href]")
+        for (a in aTags) {
+            val href = a.attr("href")
+            if (href.contains(code, ignoreCase = true) && !href.contains("search") && !href.contains("tags")) {
+                return if (href.startsWith("http")) href else "$missAvUrl$href"
+            }
+        }
+        return null
     }
 
     override suspend fun loadLinks(
@@ -149,9 +155,13 @@ class MissAVProvider : MainAPI() {
             ?.substringBeforeLast(" — 123AV")?.trim()
             ?: document.title()).decodeHtmlEntities()
 
-        val code = document.selectFirst("dl.watch__info > div.watch__info-row:nth-child(1) > dd")
+        // 1. Grab whatever 123AV claims the code is (e.g., "ADN-528-uncensored") or fallback to title
+        val rawCodeText = document.selectFirst("dl.watch__info > div.watch__info-row:nth-child(1) > dd")
             ?.text()?.trim()?.decodeHtmlEntities()
-            ?: extractCode(title)
+            ?: title
+
+        // 2. FORCIBLY pass it through the Regex to sanitize junk. Result: "ADN-528"
+        val code = extractCode(rawCodeText)
 
         val foundStream = AtomicBoolean(false)
 
@@ -166,19 +176,19 @@ class MissAVProvider : MainAPI() {
                     if (!embedId.isNullOrBlank()) {
                         val embedUrl = "https://javplayer.cc/e/$embedId"
                         
-                        // 1. Try the newly discovered /stream API first!
+                        // Try the newly discovered /stream API first!
                         val apiUrl = "https://javplayer.cc/stream?id=$embedId"
                         val apiRes = app.get(
                             apiUrl, 
                             headers = mapOf(
-                                "Referer" to mainUrl, // The sniffer showed it uses the 123AV main URL as referer
+                                "Referer" to mainUrl, 
                                 "X-Requested-With" to "XMLHttpRequest" 
                             )
                         ).text
 
                         var m3u8Url = Regex("""https?://[^"'\s]+?\.m3u8[^"'\s]*""").find(apiRes.replace("\\/", "/"))?.value
 
-                        // 2. If the API fails, fall back to the Cloudflare HTML bypass
+                        // Fall back to Cloudflare HTML bypass if the API fails
                         if (m3u8Url.isNullOrBlank()) {
                             val embedHtml = app.get(embedUrl, referer = mainUrl, interceptor = CloudflareKiller()).text
                             val unpackedHtml = runCatching { getAndUnpack(embedHtml) }.getOrDefault(embedHtml)
@@ -224,13 +234,13 @@ class MissAVProvider : MainAPI() {
                         var finalLink = Regex("""source\s*[:=]\s*['"](.*?)['"]""").find(unpackedText)?.groupValues?.get(1)
                         
                         if (finalLink?.startsWith("aHR0c") == true) {
-                            finalLink = String(android.util.Base64.decode(finalLink, android.util.Base64.DEFAULT))
+                            finalLink = String(Base64.decode(finalLink, Base64.DEFAULT))
                         }
                         
                         if (finalLink.isNullOrBlank()) {
                             val b64Match = Regex("""['"](aHR0c[a-zA-Z0-9+/=]+)['"]""").find(unpackedText)?.groupValues?.get(1)
                             if (b64Match != null) {
-                                val decoded = String(android.util.Base64.decode(b64Match, android.util.Base64.DEFAULT))
+                                val decoded = String(Base64.decode(b64Match, Base64.DEFAULT))
                                 if (decoded.contains(".m3u8") || decoded.contains(".mp4")) {
                                     finalLink = decoded
                                 }
