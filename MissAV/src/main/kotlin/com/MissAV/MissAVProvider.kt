@@ -20,13 +20,6 @@ data class LoadData(
     val poster: String? = null
 )
 
-// Data class to parse Javtiful's inline playerSources JSON
-data class JavtifulSource(
-    val src: String,
-    val type: String?,
-    val size: Int?
-)
-
 class MissAVProvider : MainAPI() {
     override var mainUrl              = "https://123av.com"
     override var name                 = "MissAV"
@@ -81,9 +74,6 @@ class MissAVProvider : MainAPI() {
         return document.select("div.card").mapNotNull { it.toSearchResult() }
     }
 
-    // ------------------------------------------------------------------
-    // Helper: JAV Code Sanitizer (Stops capturing at the digits)
-    // ------------------------------------------------------------------
     private fun extractCode(text: String?): String? {
         if (text.isNullOrBlank()) return null
         val regex = Regex("""([a-zA-Z0-9]{2,8}(?:-[a-zA-Z0-9]{2,8})?-\d{2,6})""")
@@ -132,7 +122,6 @@ class MissAVProvider : MainAPI() {
         }
     }
 
-    // Helper: Find MissAV Video URL
     private suspend fun findMissAvUrl(code: String): String? {
         val encoded = URLEncoder.encode(code, "UTF-8")
         val document = app.get("$missAvUrl/en/search/$encoded", timeout = 15).document
@@ -147,12 +136,12 @@ class MissAVProvider : MainAPI() {
         return null
     }
 
-    // Helper: Find Javtiful Video URL
+    // Helper: Find Javtiful Video URL (Uses broad, un-breakable CSS selector)
     private suspend fun findJavtifulUrl(code: String): String? {
         val encoded = URLEncoder.encode(code, "UTF-8")
         val document = app.get("$javtifulUrl/search?q=$encoded", timeout = 15).document
 
-        val articles = document.select("body > main > section.front-section > div > div.front-video-grid > article > a[href]")
+        val articles = document.select("article a[href]")
         for (a in articles) {
             val href = a.attr("href")
             val title = a.attr("title").ifBlank { a.selectFirst("img")?.attr("alt").orEmpty() }
@@ -160,7 +149,6 @@ class MissAVProvider : MainAPI() {
                 return if (href.startsWith("http")) href else "$javtifulUrl$href"
             }
         }
-        // Fallback to first article link if specific match wasn't found
         val firstHref = articles.firstOrNull()?.attr("href") ?: return null
         return if (firstHref.startsWith("http")) firstHref else "$javtifulUrl$firstHref"
     }
@@ -286,60 +274,62 @@ class MissAVProvider : MainAPI() {
                     }
                 }
 
-                // ---- SOURCE 3: Javtiful (DEPRECATION FIX APPLIED) ----------------------
+                // ---- SOURCE 3: Javtiful (REGEX ONLY - Unbreakable) ---------------------
                 launch {
                     runCatching {
                         val javtifulVideoUrl = findJavtifulUrl(code) ?: return@runCatching
                         val javDoc = app.get(javtifulVideoUrl, timeout = 15).document
 
-                        val iframeSrc = javDoc.selectFirst("div.player iframe, #player iframe")?.attr("src")
+                        // Try to find the iframe source
+                        val iframeSrc = javDoc.selectFirst("div.player iframe, #player iframe, iframe")?.attr("src")
                         if (iframeSrc.isNullOrBlank()) return@runCatching
 
                         val embedUrl = if (iframeSrc.startsWith("http")) iframeSrc else "$javtifulUrl$iframeSrc"
                         val embedHtml = app.get(embedUrl, referer = javtifulVideoUrl, timeout = 15).text
 
-                        val sourcesJsonMatch = Regex("""\"playerSources\"\s*:\s*(\[.*?\])""").find(embedHtml)
                         var javtifulFound = false
+                        val sourcesJsonMatch = Regex("""\"playerSources\"\s*:\s*(\[.*?\])""").find(embedHtml)
 
+                        // 1. Regex the URL straight out of the JSON string to avoid Data Class/Jackson errors
                         if (sourcesJsonMatch != null) {
-                            val sourcesJson = sourcesJsonMatch.groupValues[1]
-                            val sources = runCatching { parseJson<List<JavtifulSource>>(sourcesJson) }.getOrNull()
-
-                            sources?.forEach { source ->
-                                if (source.src.isNotBlank()) {
-                                    val isM3u8 = source.type?.contains("mpegURL") == true || source.src.contains(".m3u8")
-                                    val linkType = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                    
-                                    callback.invoke(
-                                        newExtractorLink(
-                                            "Javtiful",
-                                            "Javtiful",
-                                            source.src,
-                                            linkType
-                                        ) {
-                                            this.referer = embedUrl
-                                            this.quality = source.size ?: Qualities.Unknown.value
-                                        }
-                                    )
-                                    javtifulFound = true
-                                    foundStream.set(true)
-                                }
+                            val innerJson = sourcesJsonMatch.groupValues[1]
+                            val srcMatches = Regex("""\"src\"\s*:\s*\"(https?://[^\"]+)\"""").findAll(innerJson)
+                            
+                            srcMatches.forEach { match ->
+                                val rawUrl = match.groupValues[1].replace("\\/", "/")
+                                val isM3u8 = rawUrl.contains(".m3u8")
+                                val linkType = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                
+                                callback.invoke(
+                                    newExtractorLink(
+                                        "Javtiful",
+                                        "Javtiful",
+                                        rawUrl,
+                                        linkType
+                                    ) {
+                                        this.referer = embedUrl
+                                        this.quality = Qualities.Unknown.value
+                                    }
+                                )
+                                javtifulFound = true
+                                foundStream.set(true)
                             }
                         }
 
+                        // 2. Ultimate Fallback (Global Regex)
                         if (!javtifulFound) {
                             val fallbackRegex = Regex("""\"src\"\s*:\s*\"(https?://[^\"]+)\"""").findAll(embedHtml)
                             fallbackRegex.forEach { match ->
-                                val url = match.groupValues[1].replace("\\/", "/")
-                                if (url.contains("fast-stream") || url.contains("video")) {
-                                    val isM3u8 = url.contains(".m3u8")
+                                val rawUrl = match.groupValues[1].replace("\\/", "/")
+                                if (rawUrl.contains("fast-stream") || rawUrl.contains("video")) {
+                                    val isM3u8 = rawUrl.contains(".m3u8")
                                     val linkType = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                     
                                     callback.invoke(
                                         newExtractorLink(
                                             "Javtiful",
                                             "Javtiful",
-                                            url,
+                                            rawUrl,
                                             linkType
                                         ) {
                                             this.referer = embedUrl
