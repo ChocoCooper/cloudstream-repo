@@ -45,9 +45,7 @@ class MissAVProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = if (page <= 1) request.data else "${request.data}?page=$page"
         val document = app.get(url).document
-
         val items = document.select("div.card").mapNotNull { it.toSearchResult() }
-
         return newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
     }
 
@@ -74,6 +72,9 @@ class MissAVProvider : MainAPI() {
         return document.select("div.card").mapNotNull { it.toSearchResult() }
     }
 
+    // ------------------------------------------------------------------
+    // Helper: JAV Code Sanitizer (Stops capturing at the digits)
+    // ------------------------------------------------------------------
     private fun extractCode(text: String?): String? {
         if (text.isNullOrBlank()) return null
         val regex = Regex("""([a-zA-Z0-9]{2,8}(?:-[a-zA-Z0-9]{2,8})?-\d{2,6})""")
@@ -124,7 +125,7 @@ class MissAVProvider : MainAPI() {
 
     private suspend fun findMissAvUrl(code: String): String? {
         val encoded = URLEncoder.encode(code, "UTF-8")
-        val document = app.get("$missAvUrl/en/search/$encoded", timeout = 15).document
+        val document = app.get("$missAvUrl/en/search/$encoded", timeout = 15, interceptor = CloudflareKiller()).document
 
         val aTags = document.select("a[href]")
         for (a in aTags) {
@@ -136,10 +137,9 @@ class MissAVProvider : MainAPI() {
         return null
     }
 
-    // Helper: Find Javtiful Video URL (Uses broad, un-breakable CSS selector)
     private suspend fun findJavtifulUrl(code: String): String? {
         val encoded = URLEncoder.encode(code, "UTF-8")
-        val document = app.get("$javtifulUrl/search?q=$encoded", timeout = 15).document
+        val document = app.get("$javtifulUrl/search?q=$encoded", timeout = 15, interceptor = CloudflareKiller()).document
 
         val articles = document.select("article a[href]")
         for (a in articles) {
@@ -169,7 +169,8 @@ class MissAVProvider : MainAPI() {
             ?.text()?.trim()?.decodeHtmlEntities()
             ?: title
 
-        val code = extractCode(rawCodeText)
+        // Failsafe: if regex fails, just use the first chunk of the title
+        val code = extractCode(rawCodeText) ?: rawCodeText.split(" ").firstOrNull() ?: rawCodeText
 
         val foundStream = AtomicBoolean(false)
 
@@ -187,10 +188,8 @@ class MissAVProvider : MainAPI() {
                         
                         val apiRes = app.get(
                             apiUrl, 
-                            headers = mapOf(
-                                "Referer" to mainUrl, 
-                                "X-Requested-With" to "XMLHttpRequest" 
-                            )
+                            headers = mapOf("Referer" to mainUrl, "X-Requested-With" to "XMLHttpRequest"),
+                            interceptor = CloudflareKiller()
                         ).text
 
                         var m3u8Url = Regex("""https?://[^"'\s]+?\.m3u8[^"'\s]*""").find(apiRes.replace("\\/", "/"))?.value
@@ -229,12 +228,12 @@ class MissAVProvider : MainAPI() {
                 }
             }
 
-            if (!code.isNullOrBlank()) {
+            if (code.isNotBlank()) {
                 // ---- SOURCE 2: MissAV --------------------------------------------------
                 launch {
                     runCatching {
                         val missAvVideoUrl = findMissAvUrl(code) ?: return@runCatching
-                        val response = app.get(missAvVideoUrl, timeout = 15)
+                        val response = app.get(missAvVideoUrl, timeout = 15, interceptor = CloudflareKiller())
 
                         val unpackedText = getAndUnpack(response.text)
                         var finalLink = Regex("""source\s*[:=]\s*['"](.*?)['"]""").find(unpackedText)?.groupValues?.get(1)
@@ -274,23 +273,23 @@ class MissAVProvider : MainAPI() {
                     }
                 }
 
-                // ---- SOURCE 3: Javtiful (REGEX ONLY - Unbreakable) ---------------------
+                // ---- SOURCE 3: Javtiful ------------------------------------------------
                 launch {
                     runCatching {
                         val javtifulVideoUrl = findJavtifulUrl(code) ?: return@runCatching
-                        val javDoc = app.get(javtifulVideoUrl, timeout = 15).document
+                        val javDoc = app.get(javtifulVideoUrl, timeout = 15, interceptor = CloudflareKiller()).document
 
-                        // Try to find the iframe source
                         val iframeSrc = javDoc.selectFirst("div.player iframe, #player iframe, iframe")?.attr("src")
                         if (iframeSrc.isNullOrBlank()) return@runCatching
 
                         val embedUrl = if (iframeSrc.startsWith("http")) iframeSrc else "$javtifulUrl$iframeSrc"
-                        val embedHtml = app.get(embedUrl, referer = javtifulVideoUrl, timeout = 15).text
+                        
+                        // Added CloudflareKiller here to bypass the wall the Python script warned us about!
+                        val embedHtml = app.get(embedUrl, referer = javtifulVideoUrl, timeout = 15, interceptor = CloudflareKiller()).text
 
                         var javtifulFound = false
                         val sourcesJsonMatch = Regex("""\"playerSources\"\s*:\s*(\[.*?\])""").find(embedHtml)
 
-                        // 1. Regex the URL straight out of the JSON string to avoid Data Class/Jackson errors
                         if (sourcesJsonMatch != null) {
                             val innerJson = sourcesJsonMatch.groupValues[1]
                             val srcMatches = Regex("""\"src\"\s*:\s*\"(https?://[^\"]+)\"""").findAll(innerJson)
@@ -316,7 +315,6 @@ class MissAVProvider : MainAPI() {
                             }
                         }
 
-                        // 2. Ultimate Fallback (Global Regex)
                         if (!javtifulFound) {
                             val fallbackRegex = Regex("""\"src\"\s*:\s*\"(https?://[^\"]+)\"""").findAll(embedHtml)
                             fallbackRegex.forEach { match ->
@@ -346,7 +344,7 @@ class MissAVProvider : MainAPI() {
                 // ---- Subtitles via SubtitleCat -----------------------------------------
                 launch {
                     runCatching {
-                        val searchDoc = app.get("$subtitleCatUrl/index.php?search=$code", timeout = 15).document
+                        val searchDoc = app.get("$subtitleCatUrl/index.php?search=$code", timeout = 15, interceptor = CloudflareKiller()).document
 
                         val subtitlePageLinks = searchDoc.select("table.sub-table > tbody > tr > td > a[href^=\"subs/\"]")
                             .filter { it.text().contains(code, ignoreCase = true) }
@@ -360,7 +358,7 @@ class MissAVProvider : MainAPI() {
 
                         subtitlePageLinks.forEach { subPageUrl ->
                             runCatching {
-                                val subPageDoc = app.get(subPageUrl, timeout = 10).document
+                                val subPageDoc = app.get(subPageUrl, timeout = 10, interceptor = CloudflareKiller()).document
                                 val enHref = subPageDoc.selectFirst("div.sub-single > span > a#download_en")?.attr("href")
 
                                 if (!enHref.isNullOrBlank()) {
