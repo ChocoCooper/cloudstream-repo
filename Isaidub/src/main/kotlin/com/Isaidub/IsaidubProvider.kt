@@ -25,6 +25,11 @@ data class SimpleTmdbMovie(
 
 class IsaidubProvider : MainAPI() {
 
+    // NOTE: mainUrl is now a *runtime* value. It starts as the stable
+    // "domain finder" URL (isaidub.io) which always redirects (via meta-refresh
+    // or JS) to whatever the current working domain is (e.g. isaidub.movie).
+    // Every entry-point (getMainPage/search/load/loadLinks) calls
+    // resolveActiveDomain() first, which updates this var if the cache is stale.
     override var mainUrl        = "https://isaidub.io"
     override var name           = "Isaidub"
     override val supportedTypes = setOf(TvType.Movie)
@@ -38,6 +43,104 @@ class IsaidubProvider : MainAPI() {
         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
     )
+
+    // ==============================================================
+    // DYNAMIC DOMAIN RESOLUTION
+    // ==============================================================
+
+    // This is the stable "landing" URL that always exists and always
+    // redirects to the current live domain. Do NOT change this to the
+    // live domain — it's the anchor we bounce off every time to find
+    // wherever the site currently lives.
+    private val domainAnchorUrl = "https://isaidub.io"
+
+    private var cachedMainUrl: String = mainUrl
+    private var lastDomainCheckMs: Long = 0L
+    private val domainCacheTtlMs = 20 * 60 * 1000L // re-check every 20 minutes
+
+    /**
+     * Resolves the currently active domain by hitting the stable anchor URL
+     * and following whatever redirect mechanism it uses (HTTP redirect,
+     * <meta http-equiv="refresh">, or a fallback <a href> on the page).
+     * Caches the result and mutates [mainUrl] so all existing code (which
+     * already references mainUrl everywhere) keeps working unchanged.
+     */
+    @Synchronized
+    private fun domainCacheIsFresh(): Boolean {
+        return cachedMainUrl.isNotBlank() &&
+            (System.currentTimeMillis() - lastDomainCheckMs) < domainCacheTtlMs
+    }
+
+    private suspend fun resolveActiveDomain(): String {
+        if (domainCacheIsFresh()) return cachedMainUrl
+
+        try {
+            val response = scrapeSemaphore.withPermit {
+                app.get(domainAnchorUrl, headers = baseHeaders, timeout = 10, allowRedirects = true)
+            }
+
+            var resolved = response.url.trimEnd('/')
+
+            // If the HTTP client followed a real 3xx redirect, response.url already
+            // points at the new domain. If the site instead uses a meta-refresh /
+            // JS redirect (as isaidub.io currently does), response.url will still be
+            // the anchor URL itself, so we need to parse the HTML for the real target.
+            if (resolved.trimEnd('/') == domainAnchorUrl.trimEnd('/') ||
+                resolved.contains("isaidub.io")
+            ) {
+                val doc = try { response.document } catch (e: Exception) { null }
+                var target: String? = null
+
+                if (doc != null) {
+                    // 1) <meta http-equiv="refresh" content="5;url=https://newdomain/">
+                    val metaContent = doc.selectFirst("meta[http-equiv=refresh]")?.attr("content")
+                    if (!metaContent.isNullOrBlank()) {
+                        val m = Regex("url=(.+)", RegexOption.IGNORE_CASE).find(metaContent)
+                        if (m != null) {
+                            target = m.groupValues[1].trim('\'', '"', ' ')
+                        }
+                    }
+
+                    // 2) fallback: the visible "Go to new site" anchor link
+                    if (target.isNullOrBlank()) {
+                        target = doc.select("a[href^=http]").firstOrNull { a ->
+                            !a.attr("href").contains("isaidub.io", ignoreCase = true)
+                        }?.attr("href")
+                    }
+
+                    // 3) fallback: parse it straight out of the inline redirect script
+                    //    e.g. window.location.href = "https://newdomain/";
+                    if (target.isNullOrBlank()) {
+                        val scriptText = doc.select("script").joinToString("\n") { it.data() }
+                        val m = Regex("""location\.href\s*=\s*["']([^"']+)["']""").find(scriptText)
+                        target = m?.groupValues?.get(1)
+                    }
+                }
+
+                if (!target.isNullOrBlank()) {
+                    resolved = target.trim().trimEnd('/')
+                }
+            }
+
+            if (resolved.isNotBlank() && resolved.startsWith("http") &&
+                !resolved.contains("isaidub.io")
+            ) {
+                synchronized(this) {
+                    cachedMainUrl = resolved
+                    lastDomainCheckMs = System.currentTimeMillis()
+                }
+                mainUrl = resolved
+            }
+        } catch (e: Exception) {
+            // Network hiccup or anchor unreachable: keep using whatever we had
+            // cached before (or the anchor itself as last resort) rather than
+            // throwing and breaking the whole provider.
+        }
+
+        return cachedMainUrl.ifBlank { mainUrl }
+    }
+
+    // ==============================================================
 
     private val masterTmdbKeys = listOf(
         "fb7bb23f03b6994dafc674c074d01761", "e55425032d3d0f371fc776f302e7c09b",
@@ -134,16 +237,20 @@ class IsaidubProvider : MainAPI() {
         return Pair(movie, resolvedYear)
     }
 
+    // mainPage now stores RELATIVE paths + names only. The full URL is built
+    // at request time in getMainPage() using the freshly resolved mainUrl,
+    // because mainUrl can change between app launches/sessions.
     override val mainPage = mainPageOf(
-        "$mainUrl/tamil-yearly-dubbed-movies/" to "New Tamil Dubbed Movies",
-        "$mainUrl/tamil-action-dubbed-movies/" to "Tamil Dubbed Action Movies",
-        "$mainUrl/tamil-thriller-dubbed-movies/" to "Tamil Dubbed Thriller Movies",
-        "$mainUrl/tamil-comedy-dubbed-movies/" to "Tamil Dubbed Comedy Movies",
-        "$mainUrl/tamil-family-dubbed-movies/" to "Tamil Dubbed Family Movies"
+        "tamil-yearly-dubbed-movies/"   to "New Tamil Dubbed Movies",
+        "tamil-action-dubbed-movies/"   to "Tamil Dubbed Action Movies",
+        "tamil-thriller-dubbed-movies/" to "Tamil Dubbed Thriller Movies",
+        "tamil-comedy-dubbed-movies/"   to "Tamil Dubbed Comedy Movies",
+        "tamil-family-dubbed-movies/"   to "Tamil Dubbed Family Movies"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
-        val sectionUrl = request.data
+        val activeMainUrl = resolveActiveDomain()
+        val sectionUrl = "$activeMainUrl/${request.data.trimStart('/')}"
         val homePageLists = mutableListOf<HomePageList>()
 
         try {
@@ -155,7 +262,7 @@ class IsaidubProvider : MainAPI() {
                 val hrefAttr = firstAFolder?.attr("href") ?: ""
                 
                 if (hrefAttr.isNotBlank()) {
-                    targetUrl = resolveUrl(mainUrl, hrefAttr)
+                    targetUrl = resolveUrl(activeMainUrl, hrefAttr)
                 }
             }
 
@@ -177,6 +284,7 @@ class IsaidubProvider : MainAPI() {
         targetBaseUrl: String,
         sectionYear: String = ""
     ): List<SearchResponse> {
+        val activeMainUrl = resolveActiveDomain()
         val collected  = mutableListOf<SearchResponse>()
         var currentPage = 1
         var maxPageNum = 15 // Safety ceiling 
@@ -216,7 +324,7 @@ class IsaidubProvider : MainAPI() {
                     if (tvKeywords.any { low.contains(it) || hrefLow.contains(it) }) return@forEach
                     
                     val yearInTitle = Regex("\\b(19|20)\\d{2}\\b").find(rawTitle)?.value ?: sectionYear
-                    val link = resolveUrl(mainUrl, href)
+                    val link = resolveUrl(activeMainUrl, href)
                     candidates.add(Triple(rawTitle, link, yearInTitle))
                 }
 
@@ -283,7 +391,7 @@ class IsaidubProvider : MainAPI() {
                                 val u  = URLEncoder.encode(link,         "UTF-8")
                                 val s  = URLEncoder.encode(plot,         "UTF-8")
                                 val st = URLEncoder.encode(rawTitle,     "UTF-8") 
-                                val data = "$mainUrl/synthetic_meta?t=$t&y=$y&p=$p&url=$u&s=$s&st=$st"
+                                val data = "$activeMainUrl/synthetic_meta?t=$t&y=$y&p=$p&url=$u&s=$s&st=$st"
 
                                 newMovieSearchResponse(cleanTitle, data) {
                                     this.posterUrl = poster
@@ -309,6 +417,7 @@ class IsaidubProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
+        val activeMainUrl = resolveActiveDomain()
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
         
         val jsonResponse = fetchFromTmdb { apiKey ->
@@ -342,7 +451,7 @@ class IsaidubProvider : MainAPI() {
                 val p  = URLEncoder.encode(poster, "UTF-8")
                 val s  = URLEncoder.encode(plot,   "UTF-8")
                 val st = "" 
-                val data = "$mainUrl/synthetic_meta?t=$t&y=$y&p=$p&url=&s=$s&st=$st"
+                val data = "$activeMainUrl/synthetic_meta?t=$t&y=$y&p=$p&url=&s=$s&st=$st"
                 
                 searchResults.add(
                     newMovieSearchResponse(title, data) {
@@ -357,6 +466,8 @@ class IsaidubProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
+        val activeMainUrl = resolveActiveDomain()
+
         if (!url.contains("synthetic_meta")) {
             return newMovieLoadResponse("Isaidub Movie", url, TvType.Movie, url)
         }
@@ -397,7 +508,7 @@ class IsaidubProvider : MainAPI() {
             synopsis = tmdb?.overview ?: ""
         }
 
-        val dataUrl = "$mainUrl/synthetic_meta" +
+        val dataUrl = "$activeMainUrl/synthetic_meta" +
             "?t=${URLEncoder.encode(title,         "UTF-8")}" +
             "&y=${URLEncoder.encode(year,          "UTF-8")}" +
             "&p=${URLEncoder.encode(poster,        "UTF-8")}" +
@@ -418,6 +529,7 @@ class IsaidubProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        val activeMainUrl = resolveActiveDomain()
         var moviePageUrl = ""
         var actualScrapedTitle = ""
 
@@ -466,7 +578,7 @@ class IsaidubProvider : MainAPI() {
                     source = this.name,
                     name   = sourceName,
                     url    = finalUrl,
-                    referer = mainUrl,
+                    referer = activeMainUrl,
                     quality = Qualities.Unknown.value,
                     type   = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                 )
@@ -477,7 +589,8 @@ class IsaidubProvider : MainAPI() {
 
     private suspend fun findMoviePage(title: String, year: String): ScrapedMovie? {
         if (year.isBlank()) return null
-        val yearUrl = "$mainUrl/tamil-$year-dubbed-movies/"
+        val activeMainUrl = resolveActiveDomain()
+        val yearUrl = "$activeMainUrl/tamil-$year-dubbed-movies/"
         
         var folderBestMovie: ScrapedMovie? = null
         var folderBestScore = -1
@@ -497,7 +610,7 @@ class IsaidubProvider : MainAPI() {
                 val pageDoc = scrapeSemaphore.withPermit { app.get(url, headers = baseHeaders, timeout = 10).document }
                 
                 pageDoc.select("div.container div.folder a, div.container div.f a").forEach { a ->
-                    val href = resolveUrl(mainUrl, a.attr("href"))
+                    val href = resolveUrl(activeMainUrl, a.attr("href"))
                     if (!href.contains("/movie/", ignoreCase = true)) return@forEach
                     
                     val movieTitle = a.text().trim().ifBlank { a.attr("title").trim() }
