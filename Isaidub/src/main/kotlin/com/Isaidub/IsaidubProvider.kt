@@ -71,70 +71,97 @@ class IsaidubProvider : MainAPI() {
             (System.currentTimeMillis() - lastDomainCheckMs) < domainCacheTtlMs
     }
 
+    /**
+     * The domain rotates and can chain through MULTIPLE redirect hops
+     * (isaidub.io -> isaidub.movie -> isaidub.video -> ...). A single hop
+     * is not enough: the first target we land on might itself be stale
+     * and just show another "we moved" notice. So we keep following
+     * redirects until we land on a page that actually contains real
+     * movie-listing markup (div.container div.folder / div.f), which is
+     * our proof that we've reached the live, working site — not just
+     * another placeholder.
+     */
     private suspend fun resolveActiveDomain(): String {
         if (domainCacheIsFresh()) return cachedMainUrl
 
+        var candidateUrl = domainAnchorUrl
+        var resolvedGood = false
+        val visited = mutableSetOf<String>()
+
         try {
-            val response = scrapeSemaphore.withPermit {
-                app.get(domainAnchorUrl, headers = baseHeaders, timeout = 10, allowRedirects = true)
-            }
+            for (hop in 0 until 6) {
+                val normalized = candidateUrl.trimEnd('/')
+                if (!visited.add(normalized)) {
+                    android.util.Log.d("IsaidubDebug", "resolveActiveDomain: redirect loop detected at $normalized, stopping")
+                    break
+                }
 
-            var resolved = response.url.trimEnd('/')
+                val response = scrapeSemaphore.withPermit {
+                    app.get(candidateUrl, headers = baseHeaders, timeout = 10)
+                }
+                if (!response.isSuccessful) {
+                    android.util.Log.d("IsaidubDebug", "resolveActiveDomain: hop $hop to $candidateUrl not successful (code=${response.code})")
+                    break
+                }
 
-            // If the HTTP client followed a real 3xx redirect, response.url already
-            // points at the new domain. If the site instead uses a meta-refresh /
-            // JS redirect (as isaidub.io currently does), response.url will still be
-            // the anchor URL itself, so we need to parse the HTML for the real target.
-            if (resolved.trimEnd('/') == domainAnchorUrl.trimEnd('/') ||
-                resolved.contains("isaidub.io")
-            ) {
+                val finalUrl = response.url.trimEnd('/')
                 val doc = try { response.document } catch (e: Exception) { null }
-                var target: String? = null
 
+                val looksLikeHomepage = doc?.select("div.container div.folder a, div.container div.f a")?.isNotEmpty() == true
+                android.util.Log.d("IsaidubDebug", "resolveActiveDomain: hop $hop candidate=$candidateUrl -> finalUrl=$finalUrl looksLikeHomepage=$looksLikeHomepage")
+
+                if (looksLikeHomepage) {
+                    candidateUrl = finalUrl
+                    resolvedGood = true
+                    break
+                }
+
+                // Not real content yet - this is probably another "we moved" page.
+                // Find where IT points next.
+                var nextTarget: String? = null
                 if (doc != null) {
                     // 1) <meta http-equiv="refresh" content="5;url=https://newdomain/">
                     val metaContent = doc.selectFirst("meta[http-equiv=refresh]")?.attr("content")
                     if (!metaContent.isNullOrBlank()) {
-                        val m = Regex("url=(.+)", RegexOption.IGNORE_CASE).find(metaContent)
-                        if (m != null) {
-                            target = m.groupValues[1].trim('\'', '"', ' ')
-                        }
+                        nextTarget = Regex("url=(.+)", RegexOption.IGNORE_CASE)
+                            .find(metaContent)?.groupValues?.get(1)?.trim('\'', '"', ' ')
                     }
 
                     // 2) fallback: the visible "Go to new site" anchor link
-                    if (target.isNullOrBlank()) {
-                        target = doc.select("a[href^=http]").firstOrNull { a ->
-                            !a.attr("href").contains("isaidub.io", ignoreCase = true)
+                    if (nextTarget.isNullOrBlank()) {
+                        nextTarget = doc.select("a[href^=http]").firstOrNull { a ->
+                            a.attr("href").trimEnd('/') != finalUrl
                         }?.attr("href")
                     }
 
-                    // 3) fallback: parse it straight out of the inline redirect script
-                    //    e.g. window.location.href = "https://newdomain/";
-                    if (target.isNullOrBlank()) {
+                    // 3) fallback: inline redirect script, e.g. window.location.href = "...";
+                    if (nextTarget.isNullOrBlank()) {
                         val scriptText = doc.select("script").joinToString("\n") { it.data() }
-                        val m = Regex("""location\.href\s*=\s*["']([^"']+)["']""").find(scriptText)
-                        target = m?.groupValues?.get(1)
+                        nextTarget = Regex("""location\.href\s*=\s*["']([^"']+)["']""")
+                            .find(scriptText)?.groupValues?.get(1)
                     }
                 }
 
-                if (!target.isNullOrBlank()) {
-                    resolved = target.trim().trimEnd('/')
+                if (nextTarget.isNullOrBlank()) {
+                    android.util.Log.d("IsaidubDebug", "resolveActiveDomain: hop $hop found no further redirect target, stopping")
+                    break
                 }
-            }
 
-            if (resolved.isNotBlank() && resolved.startsWith("http") &&
-                !resolved.contains("isaidub.io")
-            ) {
-                synchronized(this) {
-                    cachedMainUrl = resolved
-                    lastDomainCheckMs = System.currentTimeMillis()
-                }
-                mainUrl = resolved
+                candidateUrl = nextTarget.trim().trimEnd('/')
             }
         } catch (e: Exception) {
-            // Network hiccup or anchor unreachable: keep using whatever we had
-            // cached before (or the anchor itself as last resort) rather than
-            // throwing and breaking the whole provider.
+            android.util.Log.d("IsaidubDebug", "resolveActiveDomain: exception ${e.message}")
+        }
+
+        if (resolvedGood && candidateUrl.isNotBlank() && candidateUrl.startsWith("http")) {
+            synchronized(this) {
+                cachedMainUrl = candidateUrl
+                lastDomainCheckMs = System.currentTimeMillis()
+            }
+            mainUrl = candidateUrl
+            android.util.Log.d("IsaidubDebug", "resolveActiveDomain: RESOLVED -> $candidateUrl")
+        } else {
+            android.util.Log.d("IsaidubDebug", "resolveActiveDomain: FAILED to resolve, cachedMainUrl='$cachedMainUrl' mainUrl='$mainUrl' lastCandidate='$candidateUrl'")
         }
 
         return cachedMainUrl.ifBlank { mainUrl }
@@ -240,12 +267,18 @@ class IsaidubProvider : MainAPI() {
     // mainPage now stores RELATIVE paths + names only. The full URL is built
     // at request time in getMainPage() using the freshly resolved mainUrl,
     // because mainUrl can change between app launches/sessions.
+    //
+    // These paths were taken directly from the confirmed live homepage nav
+    // (isaidub.movie) - the old action/thriller/comedy/family genre paths
+    // did not appear anywhere in that nav and may no longer exist, so they
+    // were swapped for the folders that are actually linked on the site.
     override val mainPage = mainPageOf(
-        "tamil-yearly-dubbed-movies/"   to "New Tamil Dubbed Movies",
-        "tamil-action-dubbed-movies/"   to "Tamil Dubbed Action Movies",
-        "tamil-thriller-dubbed-movies/" to "Tamil Dubbed Thriller Movies",
-        "tamil-comedy-dubbed-movies/"   to "Tamil Dubbed Comedy Movies",
-        "tamil-family-dubbed-movies/"   to "Tamil Dubbed Family Movies"
+        "tamil-yearly-dubbed-movies/" to "New Tamil Dubbed Movies",
+        "tamil-2026-dubbed-movies/"   to "2026 Tamil Dubbed Movies",
+        "tamil-2025-dubbed-movies/"   to "2025 Tamil Dubbed Movies",
+        "tamil-genres-dubbed-movies/" to "Tamil Genres Dubbed Movies",
+        "tamil-chinese-dubbed-movies/" to "Tamil Chinese Dubbed Movies",
+        "movie/hollywood-movies-in-english/" to "Hollywood Movies (English)"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
@@ -631,7 +664,11 @@ class IsaidubProvider : MainAPI() {
             } catch (e: Exception) {}
         }
 
+        android.util.Log.d("IsaidubDebug", "findMoviePage: title='$title' year='$year' yearUrl=$yearUrl maxPage=$maxPage")
+
         scanPage(yearUrl)
+
+        android.util.Log.d("IsaidubDebug", "after page1 scan: bestScore=$folderBestScore needed=${targetTokens.size} bestMovie=${folderBestMovie?.title} bestLink=${folderBestMovie?.link} targetTokens=$targetTokens")
 
         if (folderBestScore >= targetTokens.size && folderBestMovie != null) {
             return folderBestMovie
@@ -646,6 +683,8 @@ class IsaidubProvider : MainAPI() {
                 deferreds.awaitAll()
             }
         }
+
+        android.util.Log.d("IsaidubDebug", "after full scan: bestScore=$folderBestScore needed=${targetTokens.size} bestMovie=${folderBestMovie?.title} bestLink=${folderBestMovie?.link}")
 
         return folderBestMovie
     }
