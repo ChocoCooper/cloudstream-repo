@@ -25,7 +25,7 @@ data class SimpleTmdbMovie(
 
 class IsaidubProvider : MainAPI() {
 
-    override var mainUrl        = "https://isaidub.ceo"
+    override var mainUrl        = "https://isaidub.io"
     override var name           = "Isaidub"
     override val supportedTypes = setOf(TvType.Movie)
     override var lang           = "ta"
