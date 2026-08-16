@@ -28,16 +28,20 @@ class JogemovieProvider : MainAPI() {
         "af6887753365e14160254ac7f4345dd2", "06f10fc8741a672af455421c239a1ffc",
         "09ad8ace66eec34302943272db0e8d2c", "ea118e768e75a1fe3b53dc99c9e4de09"
     )
-    private var currentApiKeyIndex = 0
+    private val currentApiKeyIndex = java.util.concurrent.atomic.AtomicInteger(0)
 
     private fun getTmdbApiKey(): String {
-        val key = tmdbApiKeys[currentApiKeyIndex]
-        currentApiKeyIndex = (currentApiKeyIndex + 1) % tmdbApiKeys.size
-        return key
+        val index = currentApiKeyIndex.getAndUpdate { (it + 1) % tmdbApiKeys.size }
+        return tmdbApiKeys[index]
     }
 
-    // Cache for TMDB results (key: "cleanTitle|year")
-    private val tmdbCache = mutableMapOf<String, TmdbMovie?>()
+    // Cache for TMDB results (key: "cleanTitle|year").
+    // Uses a ConcurrentHashMap because parseMovieItems() now looks up items in
+    // parallel via amap(), so multiple coroutines can read/write this at once.
+    // ConcurrentHashMap doesn't permit null values, so a "no match" result is
+    // represented by the NOT_FOUND sentinel instead of null.
+    private val tmdbCache = java.util.concurrent.ConcurrentHashMap<String, TmdbMovie>()
+    private val NOT_FOUND = TmdbMovie(-1, "", "", "", "", "")
 
     // mainPageOf maps a "data" string (used to build the section URL) to a display name.
     // request.data / request.name below come from these pairs.
@@ -65,11 +69,9 @@ class JogemovieProvider : MainAPI() {
     // ----------------------------------------------------------------------
     private suspend fun searchTmdb(query: String, year: String? = null): TmdbMovie? {
         val cacheKey = "$query|$year"
-        tmdbCache[cacheKey]?.let { return it }
-        // Note: a cached null (no match found) also short-circuits correctly here
-        // because tmdbCache[cacheKey] would be present as a key with null value —
-        // handled via containsKey check below.
-        if (tmdbCache.containsKey(cacheKey)) return tmdbCache[cacheKey]
+        // ConcurrentHashMap can't store null values, so "no match found" is cached
+        // as NOT_FOUND rather than null, and translated back to null on the way out.
+        tmdbCache[cacheKey]?.let { return if (it === NOT_FOUND) null else it }
 
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
         val yearParam = year?.let { "&year=$it" } ?: ""
@@ -101,7 +103,7 @@ class JogemovieProvider : MainAPI() {
                 // try next key
             }
         }
-        tmdbCache[cacheKey] = null
+        tmdbCache[cacheKey] = NOT_FOUND
         return null
     }
 
@@ -138,33 +140,51 @@ class JogemovieProvider : MainAPI() {
 
     // ----------------------------------------------------------------------
     // Parse movie items from site HTML, enrich with TMDB (English titles)
+    // Strips leading site "category tag" prefixes like 「한국영화」, 【NEW】, [HD], etc.
+    // so the TMDB query and the Korean fallback title only contain the actual
+    // movie title (and year), not the site's own labeling.
+    // e.g. "「한국영화」 몰래하는 섹스 임장 (2026)" -> "몰래하는 섹스 임장 (2026)"
+    private val bracketPrefixPattern = Regex("^(?:[\\[［【「『][^\\]］】」』]*[\\]］】」』]\\s*)+")
+
+    private fun stripBracketTags(title: String): String =
+        title.replace(bracketPrefixPattern, "").trim()
+
     // ----------------------------------------------------------------------
     private suspend fun parseMovieItems(document: Document): List<SearchResponse> {
         val items = document.select(".item")
-        return items.mapNotNull { item ->
+        // Run the per-item TMDB lookups in parallel instead of one-at-a-time.
+        // A page with 20-40 items previously meant 20-40 sequential HTTP round
+        // trips before anything rendered, which is slow enough that users would
+        // back out mid-load and flood logcat with cancelled-request IOExceptions.
+        return items.amap { item ->
             val titleElement = item.selectFirst("h3 a")
-            val rawTitle = titleElement?.text()?.trim() ?: return@mapNotNull null
+            val rawTitle = titleElement?.text()?.trim() ?: return@amap null
             val link = titleElement.attr("href")
-            if (link.isBlank()) return@mapNotNull null
+            if (link.isBlank()) return@amap null
 
             val imgElement = item.selectFirst(".item-img a img")
             val sitePoster = imgElement?.attr("src")?.let {
                 if (it.startsWith("//")) "https:$it" else it
             } ?: ""
 
+            // Strip site tags like 「한국영화」 / [HD] / 【NEW】 before doing anything else,
+            // so both the TMDB query and the Korean fallback title are clean.
+            val untaggedTitle = stripBracketTags(rawTitle).ifBlank { rawTitle }
+
             // Extract year (e.g., "(2022)") to improve TMDB matching
             val yearPattern = Regex("\\((\\d{4})\\)")
-            val year = yearPattern.find(rawTitle)?.groupValues?.get(1)
-            val cleanTitle = rawTitle.replace(yearPattern, "").trim()
+            val year = yearPattern.find(untaggedTitle)?.groupValues?.get(1)
+            val cleanTitle = untaggedTitle.replace(yearPattern, "").trim()
 
-            // Try TMDB lookup
+            // Try TMDB lookup using the tag-free, year-free title
             val tmdbData = searchTmdb(cleanTitle, year)
 
-            // Choose English title if TMDB found a match; otherwise keep Korean title
+            // Choose English title if TMDB found a match; otherwise keep the
+            // tag-stripped Korean title (still includes the year, if present)
             val displayTitle = if (tmdbData != null && tmdbData.originalTitle.isNotBlank()) {
                 tmdbData.originalTitle
             } else {
-                rawTitle // fallback to original Korean title
+                untaggedTitle
             }
 
             // Use TMDB poster if available; otherwise keep site poster
@@ -177,7 +197,7 @@ class JogemovieProvider : MainAPI() {
             newMovieSearchResponse(displayTitle, link, TvType.Movie) {
                 this.posterUrl = finalPoster
             }
-        }
+        }.filterNotNull()
     }
 
     // ----------------------------------------------------------------------
