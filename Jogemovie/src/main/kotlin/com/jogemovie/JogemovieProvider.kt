@@ -108,6 +108,45 @@ class JogemovieProvider : MainAPI() {
     }
 
     // ----------------------------------------------------------------------
+    // TMDB search – returns *all* candidate results (used by search(), so the
+    // user can pick the right movie from Cloudstream's search UI before we
+    // ever touch jogemovie.com).
+    // ----------------------------------------------------------------------
+    private suspend fun searchTmdbMulti(query: String): List<TmdbMovie> {
+        val encodedQuery = URLEncoder.encode(query, "UTF-8")
+
+        for (i in tmdbApiKeys.indices) {
+            val key = getTmdbApiKey()
+            val url = "$tmdbBase/search/movie?api_key=$key&query=$encodedQuery&language=ko-KR"
+            try {
+                val response = app.get(url, timeout = 5000)
+                if (response.code == 200) {
+                    val json = JSONObject(response.text)
+                    val results = json.getJSONArray("results")
+                    val movies = mutableListOf<TmdbMovie>()
+                    for (idx in 0 until results.length()) {
+                        val item = results.getJSONObject(idx)
+                        movies.add(
+                            TmdbMovie(
+                                id = item.getInt("id"),
+                                title = item.getString("title"),                  // Korean title
+                                originalTitle = item.getString("original_title"), // English title
+                                overview = item.optString("overview", ""),
+                                posterPath = item.optString("poster_path", ""),
+                                releaseDate = item.optString("release_date", "")
+                            )
+                        )
+                    }
+                    return movies
+                }
+            } catch (_: Exception) {
+                // try next key
+            }
+        }
+        return emptyList()
+    }
+
+    // ----------------------------------------------------------------------
     // Main page: show movies with English titles (if available)
     // ----------------------------------------------------------------------
     override suspend fun getMainPage(
@@ -122,20 +161,36 @@ class JogemovieProvider : MainAPI() {
     }
 
     // ----------------------------------------------------------------------
-    // Search: translate English query -> Korean via TMDB, then search site
+    // Search: query TMDB directly so the user picks from real movie results
+    // (English title, correct poster, release year) instead of noisy site
+    // search results. We deliberately do NOT touch jogemovie.com here - the
+    // Korean title + year needed to find it on the site is only resolved once
+    // the user actually selects a result, inside load().
     // ----------------------------------------------------------------------
     override suspend fun search(query: String): List<SearchResponse> {
-        // 1. Get Korean title from TMDB using the English query
-        val tmdbResult = searchTmdb(query)
-        val searchTerm = tmdbResult?.title ?: query // fallback to original if no TMDB match
+        val results = searchTmdbMulti(query)
+        return results.mapNotNull { movie ->
+            val displayTitle = movie.originalTitle.ifBlank { movie.title }
+            if (displayTitle.isBlank()) return@mapNotNull null
 
-        // 2. Search the site with the Korean title
-        val encoded = URLEncoder.encode(searchTerm, "UTF-8")
-        val url = "${getBaseUrl()}/?s=$encoded"
-        val document = app.get(url).document
+            val releaseYear = movie.releaseDate.take(4).takeIf { it.length == 4 }
 
-        // 3. Parse items – will again try to get English titles via TMDB
-        return parseMovieItems(document)
+            // Package what load() needs to find this on jogemovie.com later.
+            // This is NOT a real URL - it's an opaque payload that load()
+            // recognizes and unpacks (see loadFromTmdbPayload).
+            val payload = JSONObject().apply {
+                put("koreanTitle", movie.title)
+                put("englishTitle", displayTitle)
+                put("year", releaseYear)
+                put("posterPath", movie.posterPath)
+            }.toString()
+
+            val label = if (releaseYear != null) "$displayTitle ($releaseYear)" else displayTitle
+
+            newMovieSearchResponse(label, payload, TvType.Movie) {
+                this.posterUrl = if (movie.posterPath.isNotBlank()) "$imageBase${movie.posterPath}" else null
+            }
+        }
     }
 
     // ----------------------------------------------------------------------
@@ -201,11 +256,24 @@ class JogemovieProvider : MainAPI() {
     }
 
     // ----------------------------------------------------------------------
-    // Load: fetch detail page metadata before showing the "info" screen.
-    // The url passed in is the detail page link produced above; we pass it
-    // straight through as `dataUrl` since loadLinks() re-fetches it.
+    // Load: two possible shapes of `url` land here.
+    //
+    // 1. A real jogemovie.com detail-page URL - happens when the user browsed
+    //    to this item from the main page (getMainPage/parseMovieItems), where
+    //    we already had the site's own link. We just fetch it for metadata.
+    //
+    // 2. A TMDB payload (JSON, not a real URL) - happens when the user picked
+    //    this item from search(), where we only had TMDB data so far. Here we
+    //    take the Korean title + year out of that payload, search
+    //    jogemovie.com with it, and resolve it to a real detail-page URL
+    //    before continuing - this is the "extract Korean title + year, feed
+    //    it into the site search, then crawl" step.
     // ----------------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
+        if (url.trim().startsWith("{")) {
+            return loadFromTmdbPayload(url)
+        }
+
         val document = app.get(url).document
         val title = document.selectFirst("meta[property=og:title]")?.attr("content")?.trim()
             ?: document.selectFirst("h1, h3")?.text()?.trim()
@@ -216,6 +284,57 @@ class JogemovieProvider : MainAPI() {
         return newMovieLoadResponse(title, url, TvType.Movie, url) {
             this.posterUrl = poster
             this.plot = plot
+        }
+    }
+
+    // Resolves a TMDB search-result payload to a real jogemovie.com detail
+    // page by searching the site with the Korean title (and disambiguating
+    // with the release year, since site titles include "(YYYY)").
+    private suspend fun loadFromTmdbPayload(payload: String): LoadResponse {
+        val json = JSONObject(payload)
+        val koreanTitle = json.optString("koreanTitle", "")
+        val englishTitle = json.optString("englishTitle", koreanTitle).ifBlank { koreanTitle }
+        val year = json.optString("year", "").takeIf { it.isNotBlank() }
+        val posterPath = json.optString("posterPath", "")
+
+        val searchTerm = koreanTitle.ifBlank { englishTitle }
+        if (searchTerm.isBlank()) {
+            throw ErrorLoadingException("No title available to search jogemovie with")
+        }
+
+        val encoded = URLEncoder.encode(searchTerm, "UTF-8")
+        val siteUrl = "${getBaseUrl()}/?s=$encoded"
+        val document = app.get(siteUrl).document
+        val items = document.select(".item")
+
+        // Prefer a result whose "(YYYY)" year matches TMDB's release year;
+        // fall back to the first search result if no year match is found.
+        val yearPattern = Regex("\\((\\d{4})\\)")
+        val matched = items.firstOrNull { item ->
+            if (year == null) return@firstOrNull false
+            val itemTitle = item.selectFirst("h3 a")?.text() ?: return@firstOrNull false
+            yearPattern.find(itemTitle)?.groupValues?.get(1) == year
+        } ?: items.firstOrNull()
+        ?: throw ErrorLoadingException("No jogemovie result found for \"$searchTerm\"")
+
+        val detailLink = matched.selectFirst("h3 a")?.attr("href")
+        if (detailLink.isNullOrBlank()) {
+            throw ErrorLoadingException("Matched jogemovie result had no detail link")
+        }
+
+        val poster = if (posterPath.isNotBlank()) {
+            "$imageBase$posterPath"
+        } else {
+            matched.selectFirst(".item-img a img")?.attr("src")?.let {
+                if (it.startsWith("//")) "https:$it" else it
+            }
+        }
+
+        // dataUrl = detailLink, so loadLinks() below receives the real
+        // jogemovie.com detail page and can crawl a.MVlink -> tapes -> iframe
+        // exactly as it already does for the direct-browse case.
+        return newMovieLoadResponse(englishTitle, detailLink, TvType.Movie, detailLink) {
+            this.posterUrl = poster
         }
     }
 
@@ -243,27 +362,62 @@ class JogemovieProvider : MainAPI() {
 
         val urlsToFetch = if (tapeLinks.isNotEmpty()) tapeLinks else listOf(finalPageUrl)
 
-        var found = false
+        // CloudStream's registered extractors run inside its own internal
+        // safeApiCall wrapper, so a crashing extractor (e.g. a broken embed
+        // host handler) fails silently from here - loadExtractor won't throw,
+        // it'll just deliver zero links. Track actual emissions ourselves via
+        // a counting wrapper instead of trusting "no exception" as success.
+        var linksEmitted = 0
+        val countingCallback: (ExtractorLink) -> Unit = {
+            linksEmitted++
+            callback(it)
+        }
+
+        var iframeFound = false
         for (tapeUrl in urlsToFetch) {
             try {
                 val doc = if (tapeUrl == finalPageUrl) finalDoc else app.get(tapeUrl).document
                 val iframe = doc.selectFirst(".player iframe")
                 val embedUrl = iframe?.attr("src")
-                if (!embedUrl.isNullOrBlank()) {
+                if (embedUrl.isNullOrBlank()) continue
+                iframeFound = true
+
+                val before = linksEmitted
+                try {
                     // Let CloudStream's extractor framework figure out how to
                     // resolve this embed host into a playable link.
-                    loadExtractor(embedUrl, finalPageUrl, subtitleCallback, callback)
-                    found = true
+                    loadExtractor(embedUrl, finalPageUrl, subtitleCallback, countingCallback)
+                } catch (_: Exception) {
+                    // A matched extractor threw instead of failing gracefully;
+                    // fall through to the raw-URL fallback below.
+                }
+
+                if (linksEmitted == before) {
+                    // The matched extractor produced nothing (crashed silently,
+                    // or no extractor matched this host). Offer the raw iframe
+                    // URL directly - it's sometimes already a playable stream
+                    // even when the specific extractor chokes on the page.
+                    callback(
+                        newExtractorLink(
+                            source = this.name,
+                            name = this.name,
+                            url = embedUrl
+                        ) {
+                            this.referer = finalPageUrl
+                            this.quality = Qualities.Unknown.value
+                        }
+                    )
+                    linksEmitted++
                 }
             } catch (_: Exception) {
                 // skip failed tape
             }
         }
 
-        if (!found) {
+        if (!iframeFound) {
             throw ErrorLoadingException("No embed iframe found on any tape")
         }
-        return found
+        return linksEmitted > 0
     }
 
     // Helper data class for TMDB results
