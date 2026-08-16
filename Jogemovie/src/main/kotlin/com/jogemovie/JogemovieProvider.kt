@@ -10,7 +10,8 @@ class JogemovieProvider : MainAPI() {
     override var mainUrl = "https://jogemovie.com"
     override var name = "Jogemovie"
     override var lang = "en"
-    override val supportsLatest = true
+    override val hasMainPage = true
+    override val supportedTypes = setOf(TvType.Movie)
 
     // TMDB configuration
     private val tmdbBase = "https://api.tmdb.org/3"
@@ -38,22 +39,25 @@ class JogemovieProvider : MainAPI() {
     // Cache for TMDB results (key: "cleanTitle|year")
     private val tmdbCache = mutableMapOf<String, TmdbMovie?>()
 
-    override val mainPage = MainPageLayout(
-        prebuilt = listOf(
-            HomePageList("Korean Movies", "k19movie"),
-            HomePageList("Japanese Movies", "j19movie")
-        )
+    // mainPageOf maps a "data" string (used to build the section URL) to a display name.
+    // request.data / request.name below come from these pairs.
+    override val mainPage = mainPageOf(
+        "k19movie" to "Korean Movies",
+        "j19movie" to "Japanese Movies"
     )
 
-    private val baseUrl by lazy { getBaseUrl() }
+    private var cachedBaseUrl: String? = null
 
-    private fun getBaseUrl(): String {
-        try {
+    private suspend fun getBaseUrl(): String {
+        cachedBaseUrl?.let { return it }
+        val resolved = try {
             val response = app.get(mainUrl, allowRedirects = true)
-            return response.url.toString().replaceAfterLast("/", "").dropLast(1)
+            response.url.toString().replaceAfterLast("/", "").dropLast(1)
         } catch (e: Exception) {
-            return "https://v25.jogemovie.net"
+            "https://v25.jogemovie.net"
         }
+        cachedBaseUrl = resolved
+        return resolved
     }
 
     // ----------------------------------------------------------------------
@@ -62,6 +66,10 @@ class JogemovieProvider : MainAPI() {
     private suspend fun searchTmdb(query: String, year: String? = null): TmdbMovie? {
         val cacheKey = "$query|$year"
         tmdbCache[cacheKey]?.let { return it }
+        // Note: a cached null (no match found) also short-circuits correctly here
+        // because tmdbCache[cacheKey] would be present as a key with null value —
+        // handled via containsKey check below.
+        if (tmdbCache.containsKey(cacheKey)) return tmdbCache[cacheKey]
 
         val encodedQuery = URLEncoder.encode(query, "UTF-8")
         val yearParam = year?.let { "&year=$it" } ?: ""
@@ -81,7 +89,7 @@ class JogemovieProvider : MainAPI() {
                             id = first.getInt("id"),
                             title = first.getString("title"),                  // Korean title
                             originalTitle = first.getString("original_title"), // English title
-                            overview = first.getString("overview"),
+                            overview = first.optString("overview", ""),
                             posterPath = first.optString("poster_path", ""),
                             releaseDate = first.optString("release_date", "")
                         )
@@ -104,19 +112,11 @@ class JogemovieProvider : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-        val section = request.data as String
-        val url = "$baseUrl/$section/"
+        val section = request.data
+        val url = "${getBaseUrl()}/$section/"
         val document = app.get(url).document
-        val videos = parseMovieItems(document)
-        return HomePageResponse(
-            listOf(
-                HomePageList(
-                    name = if (section == "k19movie") "Korean Movies" else "Japanese Movies",
-                    list = videos,
-                    isHorizontal = false
-                )
-            )
-        )
+        val items = parseMovieItems(document)
+        return newHomePageResponse(request.name, items)
     }
 
     // ----------------------------------------------------------------------
@@ -129,17 +129,17 @@ class JogemovieProvider : MainAPI() {
 
         // 2. Search the site with the Korean title
         val encoded = URLEncoder.encode(searchTerm, "UTF-8")
-        val url = "$baseUrl/?s=$encoded"
+        val url = "${getBaseUrl()}/?s=$encoded"
         val document = app.get(url).document
 
         // 3. Parse items – will again try to get English titles via TMDB
-        return parseMovieItems(document).map { it.toSearchResult() }
+        return parseMovieItems(document)
     }
 
     // ----------------------------------------------------------------------
     // Parse movie items from site HTML, enrich with TMDB (English titles)
     // ----------------------------------------------------------------------
-    private suspend fun parseMovieItems(document: Document): List<Video> {
+    private suspend fun parseMovieItems(document: Document): List<SearchResponse> {
         val items = document.select(".item")
         return items.mapNotNull { item ->
             val titleElement = item.selectFirst("h3 a")
@@ -148,11 +148,9 @@ class JogemovieProvider : MainAPI() {
             if (link.isBlank()) return@mapNotNull null
 
             val imgElement = item.selectFirst(".item-img a img")
-            var poster = imgElement?.attr("src")?.let {
+            val sitePoster = imgElement?.attr("src")?.let {
                 if (it.startsWith("//")) "https:$it" else it
             } ?: ""
-
-            val date = item.selectFirst(".meta .date")?.text()?.trim() ?: ""
 
             // Extract year (e.g., "(2022)") to improve TMDB matching
             val yearPattern = Regex("\\((\\d{4})\\)")
@@ -166,37 +164,50 @@ class JogemovieProvider : MainAPI() {
             val displayTitle = if (tmdbData != null && tmdbData.originalTitle.isNotBlank()) {
                 tmdbData.originalTitle
             } else {
-                rawTitle  // fallback to original Korean title
+                rawTitle // fallback to original Korean title
             }
 
             // Use TMDB poster if available; otherwise keep site poster
             val finalPoster = if (tmdbData != null && tmdbData.posterPath.isNotBlank()) {
                 "$imageBase${tmdbData.posterPath}"
             } else {
-                poster
+                sitePoster
             }
 
-            Video(
-                title = displayTitle,
-                url = link,
-                posterUrl = finalPoster,
-                addDate = date,
-                metadata = mapOf(
-                    "koreanTitle" to rawTitle,      // keep original for debugging
-                    "tmdbId" to (tmdbData?.id?.toString() ?: ""),
-                    "overview" to (tmdbData?.overview ?: "")
-                )
-            )
+            newMovieSearchResponse(displayTitle, link, TvType.Movie) {
+                this.posterUrl = finalPoster
+            }
         }
     }
 
     // ----------------------------------------------------------------------
-    // Extract video embed links from detail page (unchanged)
+    // Load: fetch detail page metadata before showing the "info" screen.
+    // The url passed in is the detail page link produced above; we pass it
+    // straight through as `dataUrl` since loadLinks() re-fetches it.
     // ----------------------------------------------------------------------
-    override suspend fun loadVideoLinks(
+    override suspend fun load(url: String): LoadResponse {
+        val document = app.get(url).document
+        val title = document.selectFirst("meta[property=og:title]")?.attr("content")?.trim()
+            ?: document.selectFirst("h1, h3")?.text()?.trim()
+            ?: "Unknown"
+        val poster = document.selectFirst("meta[property=og:image]")?.attr("content")
+        val plot = document.selectFirst("meta[property=og:description]")?.attr("content")
+
+        return newMovieLoadResponse(title, url, TvType.Movie, url) {
+            this.posterUrl = poster
+            this.plot = plot
+        }
+    }
+
+    // ----------------------------------------------------------------------
+    // Extract video embed links from detail page
+    // ----------------------------------------------------------------------
+    override suspend fun loadLinks(
         data: String,
-        videoCallback: (VideoLink) -> Unit
-    ) {
+        isCasting: Boolean,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
         val detailDoc = app.get(data).document
         val mvLink = detailDoc.selectFirst("a.MVlink")
             ?: throw ErrorLoadingException("No MVlink found on detail page")
@@ -213,17 +224,16 @@ class JogemovieProvider : MainAPI() {
         val urlsToFetch = if (tapeLinks.isNotEmpty()) tapeLinks else listOf(finalPageUrl)
 
         var found = false
-        for ((index, url) in urlsToFetch.withIndex()) {
+        for (tapeUrl in urlsToFetch) {
             try {
-                val doc = if (url == finalPageUrl) finalDoc else app.get(url).document
+                val doc = if (tapeUrl == finalPageUrl) finalDoc else app.get(tapeUrl).document
                 val iframe = doc.selectFirst(".player iframe")
-                if (iframe != null) {
-                    val embedUrl = iframe.attr("src")
-                    if (embedUrl.isNotBlank()) {
-                        val quality = if (urlsToFetch.size > 1) "Source ${index + 1}" else "Default"
-                        videoCallback.invoke(VideoLink(embedUrl, quality, true))
-                        found = true
-                    }
+                val embedUrl = iframe?.attr("src")
+                if (!embedUrl.isNullOrBlank()) {
+                    // Let CloudStream's extractor framework figure out how to
+                    // resolve this embed host into a playable link.
+                    loadExtractor(embedUrl, finalPageUrl, subtitleCallback, callback)
+                    found = true
                 }
             } catch (_: Exception) {
                 // skip failed tape
@@ -233,15 +243,8 @@ class JogemovieProvider : MainAPI() {
         if (!found) {
             throw ErrorLoadingException("No embed iframe found on any tape")
         }
+        return found
     }
-
-    private fun Video.toSearchResult(): SearchResponse =
-        SearchResponse(
-            title = title,
-            url = url,
-            posterUrl = posterUrl,
-            addDate = addDate
-        )
 
     // Helper data class for TMDB results
     private data class TmdbMovie(
