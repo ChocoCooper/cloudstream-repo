@@ -101,7 +101,7 @@ class JavHubProvider : MainAPI() {
             ?: this.text().trim()
             
         val title = rawTitle.replace("(?i)Mosaic|English Sub|Uncensored".toRegex(), "")
-            .trim(" -_|".toCharArray())
+            .trim(*" -_|".toCharArray())
             .trim()
             
         if (title.isBlank()) return null
@@ -127,7 +127,7 @@ class JavHubProvider : MainAPI() {
 
         val rawTitle = document.selectFirst("h1")?.text()?.trim()?.decodeHtmlEntities() ?: "Unknown"
         val title = rawTitle.replace("(?i)Mosaic|English Sub|Uncensored".toRegex(), "")
-            .trim(" -_|".toCharArray())
+            .trim(*" -_|".toCharArray())
             .trim()
 
         val poster = loadData.poster
