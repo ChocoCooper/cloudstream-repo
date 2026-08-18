@@ -1,4 +1,4 @@
-package com.MissAv
+package com.javhub
 
 import android.util.Base64
 import org.jsoup.Jsoup
@@ -27,7 +27,7 @@ data class JavHDAjaxResponse(
     @JsonProperty("html") val html: String? = null
 )
 
-class JavHDProvider : MainAPI() {
+class JavHubProvider : MainAPI() {
     override var mainUrl              = "https://javhd.today"
     override var name                 = "JavHD"
     override val hasMainPage          = true
