@@ -1,4 +1,4 @@
-package com.MissAv
+package com.JavHub
 
 import android.util.Base64
 import org.jsoup.Jsoup
@@ -27,7 +27,7 @@ data class JavHDAjaxResponse(
     @JsonProperty("html") val html: String? = null
 )
 
-class JavHDProvider : MainAPI() {
+class JavHubProvider : MainAPI() {
     override var mainUrl              = "https://javhd.today"
     override var name                 = "JavHD"
     override val hasMainPage          = true
@@ -305,7 +305,18 @@ class JavHDProvider : MainAPI() {
                                         link = runCatching { String(Base64.decode(data, Base64.DEFAULT)) }.getOrDefault(data)
                                     }
                                     if (link.contains(".m3u8")) {
-                                        callback.invoke(newExtractorLink("Javdock", "Javdock Server", link, ExtractorLinkType.M3U8, Qualities.Unknown.value, embedUrl))
+                                        // COMPILER ERROR FIX: Passed link variables inside the ExtractorLink lambda block
+                                        callback.invoke(
+                                            newExtractorLink(
+                                                "Javdock",
+                                                "Javdock Server",
+                                                link,
+                                                ExtractorLinkType.M3U8
+                                            ) {
+                                                this.referer = embedUrl
+                                                this.quality = Qualities.Unknown.value
+                                            }
+                                        )
                                         foundStream.set(true)
                                     }
                                 }
@@ -313,7 +324,18 @@ class JavHDProvider : MainAPI() {
                             
                             // Regex fallback to catch any unhidden streams in the unpacked HTML
                             Regex("""(https?://[^\s'\"<>]+?\.m3u8[^\s'\"<>]*)""").findAll(unpackedHtml.replace("\\/", "/")).forEach { match ->
-                                callback.invoke(newExtractorLink("Javdock", "Javdock", match.groupValues[1], ExtractorLinkType.M3U8, Qualities.Unknown.value, embedUrl))
+                                // COMPILER ERROR FIX: Passed link variables inside the ExtractorLink lambda block
+                                callback.invoke(
+                                    newExtractorLink(
+                                        "Javdock",
+                                        "Javdock",
+                                        match.groupValues[1],
+                                        ExtractorLinkType.M3U8
+                                    ) {
+                                        this.referer = embedUrl
+                                        this.quality = Qualities.Unknown.value
+                                    }
+                                )
                                 foundStream.set(true)
                             }
                         }
