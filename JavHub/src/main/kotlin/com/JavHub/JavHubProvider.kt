@@ -1,4 +1,4 @@
-package com.javhub
+package com.MissAv
 
 import android.util.Base64
 import org.jsoup.Jsoup
@@ -27,7 +27,7 @@ data class JavHDAjaxResponse(
     @JsonProperty("html") val html: String? = null
 )
 
-class JavHubProvider : MainAPI() {
+class JavHDProvider : MainAPI() {
     override var mainUrl              = "https://javhd.today"
     override var name                 = "JavHD"
     override val hasMainPage          = true
@@ -60,8 +60,10 @@ class JavHubProvider : MainAPI() {
         val url = if (page <= 1) request.data else "${request.data}?page=$page"
         val document = app.get(url, headers = browserHeaders).document
         
-        // Universally targets the grid items using Pure Anchor Hunting
-        val items = document.select("a:has(img)").mapNotNull { it.toSearchResult() }.distinctBy { it.url }
+        // Strictly target the .video class to avoid sidebar categories
+        val items = document.select(".video a:has(img)")
+            .mapNotNull { it.toSearchResult() }
+            .distinctBy { extractCode(it.name) ?: it.url } // Deduplicate by JAV Code
         
         return newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
     }
@@ -78,14 +80,17 @@ class JavHubProvider : MainAPI() {
         
         // Fetch JSON from the AJAX endpoint to bypass the CAPTCHA
         val jsonResponse = app.get(url, headers = ajaxHeaders, timeout = 15).text
-        
         val ajaxData = runCatching { parseJson<JavHDAjaxResponse>(jsonResponse) }.getOrNull()
         val htmlPayload = ajaxData?.html ?: return emptyList()
         
         // Parse the extracted HTML payload natively
         val document = Jsoup.parse(htmlPayload)
         
-        val items = document.select("a:has(img)").mapNotNull { it.toSearchResult() }.distinctBy { it.url }
+        // Strictly target the .video class and deduplicate by Code
+        val items = document.select(".video a:has(img)")
+            .mapNotNull { it.toSearchResult() }
+            .distinctBy { extractCode(it.name) ?: it.url }
+            
         return items
     }
 
@@ -96,12 +101,13 @@ class JavHubProvider : MainAPI() {
         if (href.contains("/search/") || href.contains("/channel/") || href.contains("/tag/")) return null
         
         // Safely extract the title
-        var rawTitle = this.attr("title").ifBlank { null }
+        val rawTitle = this.attr("title").ifBlank { null }
             ?: this.selectFirst("span")?.text()?.trim()
             ?: this.text().trim()
             
+        // Cleansed title using native multi-char trim to avoid compiler errors
         val title = rawTitle.replace("(?i)Mosaic|English Sub|Uncensored".toRegex(), "")
-            .trim(*" -_|".toCharArray())
+            .trim('-', '_', '|', ' ')
             .trim()
             
         if (title.isBlank()) return null
@@ -127,7 +133,7 @@ class JavHubProvider : MainAPI() {
 
         val rawTitle = document.selectFirst("h1")?.text()?.trim()?.decodeHtmlEntities() ?: "Unknown"
         val title = rawTitle.replace("(?i)Mosaic|English Sub|Uncensored".toRegex(), "")
-            .trim(*" -_|".toCharArray())
+            .trim('-', '_', '|', ' ')
             .trim()
 
         val poster = loadData.poster
@@ -272,32 +278,42 @@ class JavHubProvider : MainAPI() {
                 }
             }
 
-            // ---- MIRROR 3: Javdock (Direct URL) -------------------------------------
+            // ---- MIRROR 3: Javdock (Direct URL + Smart Embedded Server Bypass) --------
             launch {
                 runCatching {
                     val urlJavdock = "https://www.javdock.com/video/$cleanCode/"
                     val docJavdock = app.get(urlJavdock, timeout = 15, headers = browserHeaders).document
                     
-                    val iframes = docJavdock.select("iframe")
-                    iframes.forEach { iframe ->
+                    docJavdock.select("iframe").forEach { iframe ->
                         val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }
-                        if (src.isNotBlank() && src.startsWith("http")) {
-                            val embedHtml = app.get(src, headers = mapOf("Referer" to urlJavdock) + browserHeaders, timeout = 15).text
-                            val unpackedHtml = runCatching { getAndUnpack(embedHtml) }.getOrDefault(embedHtml)
-                            val m3u8Match = Regex("""(https?://[^\s'\"<>]+?\.m3u8[^\s'\"<>]*)""").find(unpackedHtml.replace("\\/", "/"))?.groupValues?.get(1)
+                        if (src.isNotBlank()) {
+                            val embedUrl = if (src.startsWith("//")) "https:$src" else if (src.startsWith("/")) "https://www.javdock.com$src" else src
                             
-                            if (!m3u8Match.isNullOrBlank()) {
-                                callback.invoke(
-                                    newExtractorLink(
-                                        "Javdock",
-                                        "Javdock",
-                                        m3u8Match,
-                                        ExtractorLinkType.M3U8
-                                    ) {
-                                        this.referer = src
-                                        this.quality = Qualities.Unknown.value
+                            // Let Cloudstream's native extractors handle standard hosts if recognized
+                            loadExtractor(embedUrl, subtitleCallback, callback)
+
+                            val embedHtml = app.get(embedUrl, headers = mapOf("Referer" to urlJavdock) + browserHeaders, timeout = 15).text
+                            val unpackedHtml = runCatching { getAndUnpack(embedHtml) }.getOrDefault(embedHtml)
+                            val embedDoc = Jsoup.parse(unpackedHtml)
+
+                            // Deep scan: Intercepts server buttons hiding m3u8 URLs inside data-attributes
+                            embedDoc.select("[data-src], [data-video], [data-url], [data-link]").forEach { el ->
+                                val data = el.attr("data-src").ifBlank { el.attr("data-video") }.ifBlank { el.attr("data-url") }.ifBlank { el.attr("data-link") }
+                                if (data.isNotBlank()) {
+                                    var link = data
+                                    if (data.startsWith("aHR0c")) {
+                                        link = runCatching { String(Base64.decode(data, Base64.DEFAULT)) }.getOrDefault(data)
                                     }
-                                )
+                                    if (link.contains(".m3u8")) {
+                                        callback.invoke(newExtractorLink("Javdock", "Javdock Server", link, ExtractorLinkType.M3U8, Qualities.Unknown.value, embedUrl))
+                                        foundStream.set(true)
+                                    }
+                                }
+                            }
+                            
+                            // Regex fallback to catch any unhidden streams in the unpacked HTML
+                            Regex("""(https?://[^\s'\"<>]+?\.m3u8[^\s'\"<>]*)""").findAll(unpackedHtml.replace("\\/", "/")).forEach { match ->
+                                callback.invoke(newExtractorLink("Javdock", "Javdock", match.groupValues[1], ExtractorLinkType.M3U8, Qualities.Unknown.value, embedUrl))
                                 foundStream.set(true)
                             }
                         }
