@@ -135,14 +135,10 @@ class JavHubProvider : MainAPI() {
         val code = extractCode(title) ?: extractCode(loadData.url)
         val cleanCode = code?.lowercase()
 
-        // 1. Vertical Poster from JavHD (passed via LoadData)
-        val verticalPoster = loadData.poster
-            ?: document.selectFirst("meta[property=og:image]")?.attr("content")?.let { fixUrlNull(it) }
+        val poster = if (cleanCode != null) "https://fourhoi.com/$cleanCode/cover-n.jpg" else loadData.poster
 
         var fetchedDescription: String? = null
-        var horizontalPoster: String? = null
 
-        // Background call to MissAV to extract the horizontal poster and detailed description
         if (!code.isNullOrBlank()) {
             runCatching {
                 val missAvDoc = app.get("$missAvUrl/en/$cleanCode", timeout = 10, headers = browserHeaders).document
@@ -155,21 +151,11 @@ class JavHubProvider : MainAPI() {
                 if (fetchedDescription.isNullOrBlank()) {
                     fetchedDescription = missAvDoc.selectFirst("meta[property=og:description]")?.attr("content")?.decodeHtmlEntities()
                 }
-
-                // 2. Horizontal Poster from MissAV
-                horizontalPoster = missAvDoc.selectFirst("meta[property=og:image]")?.attr("content")
-                    ?: missAvDoc.selectFirst("video")?.attr("poster")
             }
         }
 
-        // Fallback for Horizontal Poster just in case MissAV fails
-        if (horizontalPoster.isNullOrBlank() && cleanCode != null) {
-            horizontalPoster = "https://fourhoi.com/$cleanCode/cover-n.jpg"
-        }
-
         return newMovieLoadResponse(title, loadData.url, TvType.NSFW, loadData.url) {
-            this.posterUrl = verticalPoster
-            this.backgroundPosterUrl = horizontalPoster
+            this.posterUrl = poster
             this.plot = fetchedDescription
         }
     }
