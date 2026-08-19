@@ -17,12 +17,17 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 private fun String.decodeHtmlEntities(): String = Parser.unescapeEntities(this, false)
 
+// Extension function to force Master Playlist containing all resolutions
+private fun String.toPlaylistM3u8(): String {
+    return this.replace(Regex("""/[0-9]+x[0-9]+/[^/]+\.m3u8"""), "/playlist.m3u8")
+               .replace("video.m3u8", "playlist.m3u8")
+}
+
 data class LoadData(
     val url: String,
     val poster: String? = null
 )
 
-// Data class to parse JavHD's secret AJAX JSON response
 data class JavHDAjaxResponse(
     @JsonProperty("html") val html: String? = null
 )
@@ -50,7 +55,6 @@ class JavHubProvider : MainAPI() {
         "$mainUrl/channel/moodyz-new/" to "Moodyz"
     )
 
-    // High-precision Regex to exclusively grab the JAV Code (e.g. JUR-103)
     private fun extractCode(text: String?): String? {
         if (text.isNullOrBlank()) return null
         val regex = Regex("""([a-zA-Z0-9]{2,8}(?:-[a-zA-Z0-9]{2,8})?-\d{2,6})""")
@@ -61,10 +65,9 @@ class JavHubProvider : MainAPI() {
         val url = if (page <= 1) request.data else "${request.data}?page=$page"
         val document = app.get(url, headers = browserHeaders).document
         
-        // Strictly target the .video class to avoid sidebar categories
         val items = document.select(".video a:has(img)")
             .mapNotNull { it.toSearchResult() }
-            .distinctBy { extractCode(it.name) ?: it.url } // Deduplicate by JAV Code
+            .distinctBy { extractCode(it.name) ?: it.url }
         
         return newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
     }
@@ -79,15 +82,12 @@ class JavHubProvider : MainAPI() {
             "Referer" to "$mainUrl/"
         ) + browserHeaders
         
-        // Fetch JSON from the AJAX endpoint to bypass the CAPTCHA
         val jsonResponse = app.get(url, headers = ajaxHeaders, timeout = 15).text
         val ajaxData = runCatching { parseJson<JavHDAjaxResponse>(jsonResponse) }.getOrNull()
         val htmlPayload = ajaxData?.html ?: return emptyList()
         
-        // Parse the extracted HTML payload natively
         val document = Jsoup.parse(htmlPayload)
         
-        // Strictly target the .video class and deduplicate by Code
         val items = document.select(".video a:has(img)")
             .mapNotNull { it.toSearchResult() }
             .distinctBy { extractCode(it.name) ?: it.url }
@@ -98,26 +98,21 @@ class JavHubProvider : MainAPI() {
     private fun Element.toSearchResult(): SearchResponse? {
         val href = fixUrlNull(this.attr("href")) ?: return null
         
-        // Immediately filter out non-video utility/language links
         if (href.contains("/search/") || href.contains("/channel/") || href.contains("/tag/")) return null
         
-        // Safely extract the title
         val rawTitle = this.attr("title").ifBlank { null }
             ?: this.selectFirst("span")?.text()?.trim()
             ?: this.text().trim()
             
-        // Cleansed title using native multi-char trim to avoid compiler errors
         val title = rawTitle.replace("(?i)Mosaic|English Sub|Uncensored".toRegex(), "")
             .trim('-', '_', '|', ' ')
             .trim()
             
         if (title.isBlank()) return null
 
-        // Enforce Valid JAV Code presence
         val code = extractCode(title) ?: extractCode(href)
         if (code == null) return null
 
-        // Extract high-quality vertical poster
         val imgEl = this.selectFirst("img") ?: return null
         val posterUrl = imgEl.attr("data-src").ifBlank { imgEl.attr("data-original") }.ifBlank { imgEl.attr("src") }.let { fixUrlNull(it) }
 
@@ -137,23 +132,21 @@ class JavHubProvider : MainAPI() {
             .trim('-', '_', '|', ' ')
             .trim()
 
-        val tags = document.select("a[href*=/tag/]").map { it.text().trim().decodeHtmlEntities() }
-        val actors = document.select("a[href*=/star/], a[href*=/model/]").map { ActorData(Actor(it.text().trim().decodeHtmlEntities())) }
-
         val code = extractCode(title) ?: extractCode(loadData.url)
         val cleanCode = code?.lowercase()
 
-        // Dynamically inject the high-res poster from fourhoi.com on the Details Page
-        val poster = if (cleanCode != null) "https://fourhoi.com/$cleanCode/cover-n.jpg" else loadData.poster
+        // 1. Vertical Poster from JavHD (passed via LoadData)
+        val verticalPoster = loadData.poster
+            ?: document.selectFirst("meta[property=og:image]")?.attr("content")?.let { fixUrlNull(it) }
 
         var fetchedDescription: String? = null
+        var horizontalPoster: String? = null
 
-        // Background call to MissAV to extract the detailed description
+        // Background call to MissAV to extract the horizontal poster and detailed description
         if (!code.isNullOrBlank()) {
             runCatching {
                 val missAvDoc = app.get("$missAvUrl/en/$cleanCode", timeout = 10, headers = browserHeaders).document
                 
-                // Targets the specific CSS path first, falls back to robust layout classes if layout shifts
                 val descEl = missAvDoc.selectFirst("html > body > div:nth-of-type(2) > div:nth-of-type(3) > div > div:nth-of-type(2) > div:nth-of-type(6) > div:nth-of-type(2) > div:nth-of-type(1) > div > div:nth-of-type(1) > div:nth-of-type(1)")
                     ?: missAvDoc.selectFirst("div.mb-1.text-secondary")
                     
@@ -162,19 +155,22 @@ class JavHubProvider : MainAPI() {
                 if (fetchedDescription.isNullOrBlank()) {
                     fetchedDescription = missAvDoc.selectFirst("meta[property=og:description]")?.attr("content")?.decodeHtmlEntities()
                 }
+
+                // 2. Horizontal Poster from MissAV
+                horizontalPoster = missAvDoc.selectFirst("meta[property=og:image]")?.attr("content")
+                    ?: missAvDoc.selectFirst("video")?.attr("poster")
             }
         }
 
-        val plot = buildString {
-            if (!code.isNullOrBlank()) appendLine("Code: $code\n")
-            if (!fetchedDescription.isNullOrBlank()) appendLine(fetchedDescription)
-        }.trim().ifBlank { null }
+        // Fallback for Horizontal Poster just in case MissAV fails
+        if (horizontalPoster.isNullOrBlank() && cleanCode != null) {
+            horizontalPoster = "https://fourhoi.com/$cleanCode/cover-n.jpg"
+        }
 
         return newMovieLoadResponse(title, loadData.url, TvType.NSFW, loadData.url) {
-            this.posterUrl = poster
-            this.plot = plot
-            this.tags = tags
-            this.actors = actors
+            this.posterUrl = verticalPoster
+            this.backgroundPosterUrl = horizontalPoster
+            this.plot = fetchedDescription
         }
     }
 
@@ -245,7 +241,7 @@ class JavHubProvider : MainAPI() {
                                     newExtractorLink(
                                         sourceName,
                                         sourceName,
-                                        m3u8Url,
+                                        m3u8Url.toPlaylistM3u8(),
                                         ExtractorLinkType.M3U8
                                     ) {
                                         this.referer = "https://javplayer.cc/" 
@@ -301,7 +297,7 @@ class JavHubProvider : MainAPI() {
                                     newExtractorLink(
                                         sourceName,
                                         sourceName,
-                                        finalLink,
+                                        finalLink.toPlaylistM3u8(),
                                         ExtractorLinkType.M3U8
                                     ) {
                                         this.referer = "https://missav.ws"
@@ -329,7 +325,7 @@ class JavHubProvider : MainAPI() {
                             newExtractorLink(
                                 "Jable",
                                 "Jable",
-                                hlsUrl,
+                                hlsUrl.toPlaylistM3u8(),
                                 ExtractorLinkType.M3U8
                             ) {
                                 this.referer = "https://jable.tv"
