@@ -1,1 +1,22 @@
-# cloud
+# CloudStream Extensions
+This repository contains custom CloudStream providers for accessing and organizing media from different online sources. The extensions are designed to work with the CloudStream.
+
+More providers may be added or updated over time.
+
+## Repository URL
+https://raw.githubusercontent.com/ChocoCooper/cloudstream-repo/master/repo.json
+
+## ⭐ Support
+If you find these extensions useful, consider giving the repository a ⭐ on GitHub.
+
+#### Disclaimer: This repository is not affiliated with or endorsed by the official CloudStream project.
+
+## ⚖️ DMCA Disclaimer
+
+We hereby issue this notice to clarify that these extensions function similarly to a standard web browser by fetching video files from the internet.
+
+- **No content is hosted by this repository or the Cloudstream 3 application.**
+- Any content accessed is hosted by third-party websites.
+- Users are solely responsible for their usage and must comply with their local laws.
+
+If you believe content is violating copyright laws, please contact the **actual file hosts**, **not** the developers of this repository or the Cloudstream 3 app.
