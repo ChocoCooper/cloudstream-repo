@@ -11,6 +11,8 @@ import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
 import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.fasterxml.jackson.annotation.JsonProperty
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import java.net.URLEncoder
@@ -83,20 +85,6 @@ class JavHubProvider : MainAPI() {
         return regex.find(cleanText)?.value?.uppercase()
     }
 
-    /**
-     * Pulls the synopsis text out of a MissAV video page.
-     *
-     * Matches the exact node from the page:
-     * /html/body/div[1]/div[3]/div/div[2]/div[6]/div[2]/div[1]/div/div[1]/div[1]
-     * which renders as:
-     * <div :class="{...}" class="mb-1 text-secondary break-all line-clamp-2">...</div>
-     *
-     * We match on the stable class combination (mb-1 + text-secondary + break-all)
-     * rather than the toggled line-clamp-2/line-clamp-none state, and rather than
-     * a raw XPath (Jsoup has no native XPath engine and DOM offsets shift easily).
-     * The CSS line-clamp only visually truncates — jsoup's .text() still returns
-     * the FULL untruncated synopsis, which is what we want.
-     */
     private fun extractMissAvDescription(doc: Document): String? {
         val descEl = doc.selectFirst("div.mb-1.text-secondary.break-all")
             ?: doc.selectFirst("div.text-secondary.break-all")
@@ -124,25 +112,32 @@ class JavHubProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         val encoded = URLEncoder.encode(query, "UTF-8")
-        val url = "$mainUrl/search/video/?s=$encoded&ajax=1"
-
+        
         val ajaxHeaders = mapOf(
             "X-Requested-With" to "XMLHttpRequest",
             "Accept" to "application/json, text/javascript, */*; q=0.01",
             "Referer" to "$mainUrl/"
         ) + browserHeaders
 
-        val jsonResponse = app.get(url, headers = ajaxHeaders, timeout = 15).text
-        val ajaxData = runCatching { parseJson<JavHDAjaxResponse>(jsonResponse) }.getOrNull()
-        val htmlPayload = ajaxData?.html ?: return emptyList()
+        return coroutineScope {
+            // Fetch pages 1 and 2 concurrently.
+            // If page 2 fails or doesn't exist, runCatching will return an empty list and it will be safely ignored.
+            (1..2).map { page ->
+                async {
+                    runCatching {
+                        val url = "$mainUrl/search/video/?s=$encoded&page=$page&ajax=1"
+                        val jsonResponse = app.get(url, headers = ajaxHeaders, timeout = 15).text
+                        val ajaxData = runCatching { parseJson<JavHDAjaxResponse>(jsonResponse) }.getOrNull()
+                        val htmlPayload = ajaxData?.html ?: return@runCatching emptyList()
 
-        val document = Jsoup.parse(htmlPayload)
+                        val document = Jsoup.parse(htmlPayload)
 
-        val items = document.select("ul.videos div.video a:has(img)")
-            .mapNotNull { it.toSearchResult() }
-            .distinctBy { extractCode(it.name) ?: it.url }
-
-        return items
+                        document.select("ul.videos div.video a:has(img)")
+                            .mapNotNull { it.toSearchResult() }
+                    }.getOrDefault(emptyList())
+                }
+            }.awaitAll().flatten().distinctBy { extractCode(it.name) ?: it.url }
+        }
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
@@ -212,10 +207,6 @@ class JavHubProvider : MainAPI() {
 
         var fetchedDescription: String? = null
         if (!cleanCode.isNullOrBlank()) {
-            // Try the base code first, then the common MissAV slug variants —
-            // some codes only resolve under an "-uncensored-leak" or
-            // "-english-subtitle" suffixed slug, and a straight 404/redirect on
-            // the base slug was silently swallowing the description before.
             val missAvSlugCandidates = listOf(
                 cleanCode,
                 "$cleanCode-uncensored-leak",
