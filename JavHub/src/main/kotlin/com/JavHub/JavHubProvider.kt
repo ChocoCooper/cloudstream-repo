@@ -17,12 +17,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 private fun String.decodeHtmlEntities(): String = Parser.unescapeEntities(this, false)
 
-// Upgrades a single-resolution HLS URL to the multi-resolution master playlist
-// WHEN we can clearly tell it's a per-resolution variant (a "/1920x1080/" or
-// "/1080p/" style segment in the path). If the URL doesn't match that shape,
-// it is left completely untouched — different mirrors use different master
-// filenames (or already return the master directly), and forcing every URL
-// to literally end in "playlist.m3u8" breaks mirrors that don't use that name.
 private fun String.toPlaylistM3u8(): String {
     val perResolutionSegment = Regex("""/(?:\d{3,5}x\d{3,5}|\d{3,4}p)/[^/]+\.m3u8""")
     return when {
@@ -34,7 +28,6 @@ private fun String.toPlaylistM3u8(): String {
     }
 }
 
-// Added 'code' to pass the exact JAV code directly from the UI grid to the extractors
 data class LoadData(
     val url: String,
     val poster: String? = null,
@@ -47,7 +40,7 @@ data class JavHDAjaxResponse(
 
 class JavHubProvider : MainAPI() {
     override var mainUrl              = "https://javhd.today"
-    override var name                 = "JavHD"
+    override var name                 = "JavHub"
     override val hasMainPage          = true
     override var lang                 = "en"
     override val hasDownloadSupport   = true
@@ -68,22 +61,11 @@ class JavHubProvider : MainAPI() {
         "$mainUrl/channel/moodyz-new/" to "Moodyz"
     )
 
-    // ---------------------------------------------------------------------
-    // Shared metadata helpers — used identically by getMainPage(), search(),
-    // toSearchResult(), and load(), so homepage and search results always
-    // converge on the exact same title/code/backgroundPosterUrl.
-    // ---------------------------------------------------------------------
-
-    // Word-boundary safe so we never eat into legitimate substrings of a real code.
     private val JUNK_WORDS = Regex(
         """\b(mosaic|english\s*sub(?:title)?s?|uncensored|engsub)\b""",
         RegexOption.IGNORE_CASE
     )
 
-    /**
-     * Strips known junk keywords (Mosaic / English Subtitle / Uncensored / EngSub,
-     * in any position/order) and normalizes whitespace/punctuation.
-     */
     private fun cleanTitleText(raw: String?): String? {
         if (raw.isNullOrBlank()) return null
         return raw
@@ -94,11 +76,6 @@ class JavHubProvider : MainAPI() {
             .ifBlank { null }
     }
 
-    /**
-     * Extracts a JAV code like "JUR-816" from arbitrary text (title, url slug, etc).
-     * Always cleans junk keywords first, so "Mosaic JUR-816", "JUR-816 Uncensored",
-     * "JUR-816 [English Subtitle]", etc. all resolve to the same code: "JUR-816".
-     */
     private fun extractCode(text: String?): String? {
         val cleanText = cleanTitleText(text) ?: return null
         val regex = Regex("""\b([a-zA-Z0-9]{2,8}(?:-[a-zA-Z0-9]{2,8})?-\d{2,6})\b""")
@@ -109,7 +86,6 @@ class JavHubProvider : MainAPI() {
         val url = if (page <= 1) request.data else "${request.data}?page=$page"
         val document = app.get(url, headers = browserHeaders).document
 
-        // Strictly target the main list (ul.videos) to preserve perfect sequential order
         val items = document.select("ul.videos div.video a:has(img)")
             .mapNotNull { it.toSearchResult() }
             .distinctBy { extractCode(it.name) ?: it.url }
@@ -133,7 +109,6 @@ class JavHubProvider : MainAPI() {
 
         val document = Jsoup.parse(htmlPayload)
 
-        // Strictly target the main list (ul.videos) to preserve perfect sequential order
         val items = document.select("ul.videos div.video a:has(img)")
             .mapNotNull { it.toSearchResult() }
             .distinctBy { extractCode(it.name) ?: it.url }
@@ -141,14 +116,6 @@ class JavHubProvider : MainAPI() {
         return items
     }
 
-    /**
-     * Builds the SearchResponse identically for homepage and search markup.
-     * The anchor `title` attribute is not guaranteed on every listing template
-     * (homepage vs AJAX search fragment can differ), so we fall back through
-     * several candidate sources for the raw title text before giving up. This
-     * is what makes homepage items resolve a code just as reliably as search
-     * items do, instead of silently producing a null/garbled code.
-     */
     private fun Element.toSearchResult(): SearchResponse? {
         val rawHref = this.attr("href")
         if (rawHref.isBlank()) return null
@@ -158,7 +125,6 @@ class JavHubProvider : MainAPI() {
 
         val imgEl = this.selectFirst("img")
 
-        // Fallback chain: anchor title attr -> img alt -> nested title/text elements -> link text.
         val titleCandidate = listOfNotNull(
             this.attr("title").ifBlank { null },
             imgEl?.attr("alt")?.ifBlank { null },
@@ -167,9 +133,9 @@ class JavHubProvider : MainAPI() {
         ).firstNotNullOfOrNull { cleanTitleText(it) }
 
         val title = titleCandidate ?: return null
+        val code = extractCode(title) ?: return null
 
-        val code = extractCode(title)
-        if (code == null) return null
+        if (!title.uppercase().startsWith(code.uppercase())) return null
 
         val posterUrl = fixUrlNull(
             imgEl?.attr("src")?.ifBlank { null } ?: imgEl?.attr("data-src")
@@ -183,33 +149,18 @@ class JavHubProvider : MainAPI() {
         }
     }
 
-    /**
-     * Single source of truth for the final LoadResponse. Regardless of whether
-     * the user arrived via homepage or search, this always re-derives
-     * title/code from the actual video page itself, so both entry paths
-     * converge on identical output — same title, same backgroundPosterUrl,
-     * same description. The vertical poster is preserved from LoadData
-     * (cheap and reliable from the listing thumbnail).
-     */
     override suspend fun load(url: String): LoadResponse {
         val loadData = runCatching { parseJson<LoadData>(url) }.getOrNull()
         var videoUrl = loadData?.url ?: url
 
         var document = app.get(videoUrl, headers = browserHeaders).document
 
-        // Homepage links sometimes point at a "channel"-scoped copy of the video
-        // page (e.g. /channel/madonna/video/xxx) which can render a lighter
-        // template than the canonical /video/xxx page search results link to
-        // directly. Resolve to the canonical page so BOTH entry paths always
-        // end up parsing the exact same document — this is what keeps
-        // homepage and search converging on identical title/code/description.
         val canonicalHref = document.selectFirst("link[rel=canonical]")?.attr("href")
             ?: document.selectFirst("meta[property=og:url]")?.attr("content")
 
         if (!canonicalHref.isNullOrBlank() && canonicalHref != videoUrl) {
             runCatching {
                 val canonicalDoc = app.get(canonicalHref, headers = browserHeaders).document
-                // Only swap over if the canonical page actually has real content.
                 if (canonicalDoc.selectFirst("h1") != null) {
                     document = canonicalDoc
                     videoUrl = canonicalHref
@@ -222,12 +173,7 @@ class JavHubProvider : MainAPI() {
 
         val title = freshTitle ?: loadData?.code ?: "Unknown"
 
-        // Prefer the code extracted from the freshly-loaded (canonical) page;
-        // fall back to the listing-supplied code, then the URL slug, in that order.
-        val code = extractCode(freshTitle)
-            ?: loadData?.code
-            ?: extractCode(videoUrl)
-
+        val code = extractCode(freshTitle) ?: loadData?.code ?: extractCode(videoUrl)
         val cleanCode = code?.lowercase()
 
         val verticalPoster = loadData?.poster
@@ -251,13 +197,6 @@ class JavHubProvider : MainAPI() {
 
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
             this.posterUrl = verticalPoster
-            // IMPORTANT: CloudStream only exposes ONE header map on LoadResponse
-            // (posterHeaders) and applies it to every image tied to this response,
-            // including backgroundPosterUrl. posterUrl lives on javhd.today but
-            // backgroundPosterUrl lives on fourhoi.com — a Referer scoped to one
-            // domain can get the image request on the OTHER domain rejected by
-            // hotlink protection. Keep only a User-Agent here (safe for both
-            // hosts) instead of a domain-specific Referer.
             this.posterHeaders = mapOf("User-Agent" to browserHeaders["User-Agent"]!!)
             this.backgroundPosterUrl = horizontalPoster
             this.plot = fetchedDescription
@@ -275,7 +214,6 @@ class JavHubProvider : MainAPI() {
         val videoUrl = loadData?.url ?: data
 
         var code = loadData?.code
-
         if (code == null) {
             val document = app.get(videoUrl, timeout = 15, headers = browserHeaders).document
             val rawTitle = document.selectFirst("h1")?.text()?.trim() ?: ""
@@ -287,8 +225,6 @@ class JavHubProvider : MainAPI() {
         val foundStream = AtomicBoolean(false)
 
         coroutineScope {
-
-            // ---- MIRROR 1: 123AV (Direct URL + Variants) --------------------------
             val variants123av = listOf(
                 cleanCode to "123AV",
                 "$cleanCode-uncensored-leaked" to "123AV [Uncensored]"
@@ -342,8 +278,6 @@ class JavHubProvider : MainAPI() {
                                         m3u8Url.toPlaylistM3u8(),
                                         ExtractorLinkType.M3U8
                                     ) {
-                                        // Use the site's own domain as referer for playback,
-                                        // not the embed/player domain used to fetch the URL.
                                         this.referer = "https://123av.com/"
                                         this.quality = Qualities.Unknown.value
                                     }
@@ -357,7 +291,6 @@ class JavHubProvider : MainAPI() {
                 }
             }
 
-            // ---- MIRROR 2: MissAV (Direct URL + Variants) --------------------------------------
             val variantsMissAv = listOf(
                 cleanCode to "MissAV",
                 "$cleanCode-uncensored-leak" to "MissAV [Uncensored]",
@@ -411,7 +344,6 @@ class JavHubProvider : MainAPI() {
                 }
             }
 
-            // ---- MIRROR 3: Jable (Direct URL) ---------------------------------------
             launch {
                 runCatching {
                     val urlJable = "https://jable.tv/videos/$cleanCode/?lang=en"
@@ -437,7 +369,6 @@ class JavHubProvider : MainAPI() {
                 }
             }
 
-            // ---- MIRROR 4: Javmost (page -> #show_player iframe -> dooplayer embed -> mostplayer stream) --
             val variantsJavmost = listOf(
                 code to "Javmost",
                 "$code-UNCENSORED-edit" to "Javmost [Uncensored]"
@@ -465,9 +396,6 @@ class JavHubProvider : MainAPI() {
 
                             val unpackedHtml = runCatching { getAndUnpack(embedHtml) }.getOrDefault(embedHtml)
 
-                            // The embed page loads its actual manifest from mostplayer's CDN
-                            // via a tokenized "stream?t=" request — capture that directly when
-                            // present, since it's the confirmed real stream endpoint.
                             var streamUrl = Regex("""https?://cdn\.mostplayer\.com/stream\?t=[^"'\s<>]+""")
                                 .find(unpackedHtml.replace("\\/", "/"))?.value
                                 ?: Regex("""https?://cdn\.mostplayer\.com/stream\?t=[^"'\s<>]+""")
@@ -494,7 +422,6 @@ class JavHubProvider : MainAPI() {
                                         streamUrl.toPlaylistM3u8(),
                                         ExtractorLinkType.M3U8
                                     ) {
-                                        // Site's own domain as referer, per playback requirements.
                                         this.referer = "https://www.javmost.ws/"
                                         this.quality = Qualities.Unknown.value
                                     }
@@ -506,7 +433,6 @@ class JavHubProvider : MainAPI() {
                 }
             }
 
-            // ---- Subtitles via SubtitleCat (Fetches multiple .srt matches) -----------
             launch {
                 runCatching {
                     val searchDoc = app.get("$subtitleCatUrl/index.php?search=$code", timeout = 15, headers = browserHeaders).document
