@@ -19,20 +19,21 @@ class Film1kProvider : MainAPI() {
         "$mainUrl/tag/1990s" to "1990s Movies"
     )
 
+    private val isHorizontalImages = false
+
     private fun cleanTitle(raw: String): String {
         return raw
             .replace(Regex("movie poster watch online", RegexOption.IGNORE_CASE), "")
             .replace(Regex("watch movie online", RegexOption.IGNORE_CASE), "")
             .replace(Regex("watch tv online", RegexOption.IGNORE_CASE), "")
             .replace(Regex("watch series online", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("full movie online", RegexOption.IGNORE_CASE), "")
             .replace(Regex("movie poster", RegexOption.IGNORE_CASE), "")
             .replace(Regex("watch online", RegexOption.IGNORE_CASE), "")
             .replace(Regex("\\s+"), " ")
             .trim(' ', '-', '|', ':')
             .trim()
     }
-
-    private val isHorizontalImages = true
 
     override suspend fun getMainPage(
         page: Int,
@@ -140,7 +141,7 @@ class Film1kProvider : MainAPI() {
 
         fun cleanupText(text: String): String {
             return text
-                .replace(Regex("\\s+([.,;:!?])"), "$1") // "marriage ." -> "marriage."
+                .replace(Regex("\\s+([.,;:!?])"), "$1")
                 .replace(Regex("\\s+"), " ")
                 .trim()
         }
