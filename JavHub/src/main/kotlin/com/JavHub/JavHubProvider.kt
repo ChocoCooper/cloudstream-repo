@@ -100,10 +100,8 @@ class JavHubProvider : MainAPI() {
         
         if (href.contains("/search/") || href.contains("/channel/") || href.contains("/tag/")) return null
         
-        val rawTitle = this.attr("title").ifBlank { null }
-            ?: this.selectFirst("span")?.text()?.trim()
-            ?: this.text().trim()
-            
+        // Strict attribute fetch with no fallbacks
+        val rawTitle = this.attr("title")
         val title = rawTitle.replace("(?i)Mosaic|English Sub|Uncensored".toRegex(), "")
             .trim('-', '_', '|', ' ')
             .trim()
@@ -114,12 +112,15 @@ class JavHubProvider : MainAPI() {
         if (code == null) return null
 
         val imgEl = this.selectFirst("img") ?: return null
-        val posterUrl = imgEl.attr("data-src").ifBlank { imgEl.attr("data-original") }.ifBlank { imgEl.attr("src") }.let { fixUrlNull(it) }
+        // Strict src attribute fetch with no data-src or data-original fallbacks
+        val posterUrl = fixUrlNull(imgEl.attr("src"))
 
         val loadUrl = LoadData(href, posterUrl).toJson()
 
         return newMovieSearchResponse(title, loadUrl, TvType.NSFW) {
             this.posterUrl = posterUrl
+            // Injects referer header to bypass potential 403 Forbidden hotlink blocks
+            this.posterHeaders = mapOf("Referer" to "https://javhd.today/")
         }
     }
 
@@ -127,6 +128,7 @@ class JavHubProvider : MainAPI() {
         val loadData = runCatching { parseJson<LoadData>(url) }.getOrNull() ?: LoadData(url, null)
         val document = app.get(loadData.url, headers = browserHeaders).document
 
+        // Strict h1 fetch with no fallbacks
         val rawTitle = document.selectFirst("h1")?.text()?.trim()?.decodeHtmlEntities() ?: "Unknown"
         val title = rawTitle.replace("(?i)Mosaic|English Sub|Uncensored".toRegex(), "")
             .trim('-', '_', '|', ' ')
@@ -135,27 +137,27 @@ class JavHubProvider : MainAPI() {
         val code = extractCode(title) ?: extractCode(loadData.url)
         val cleanCode = code?.lowercase()
 
-        val poster = if (cleanCode != null) "https://fourhoi.com/$cleanCode/cover-n.jpg" else loadData.poster
-
+        val verticalPoster = loadData.poster
         var fetchedDescription: String? = null
+        var horizontalPoster: String? = null
 
         if (!code.isNullOrBlank()) {
             runCatching {
                 val missAvDoc = app.get("$missAvUrl/en/$cleanCode", timeout = 10, headers = browserHeaders).document
                 
+                // Strict CSS path fetch with no fallback layout selectors
                 val descEl = missAvDoc.selectFirst("html > body > div:nth-of-type(2) > div:nth-of-type(3) > div > div:nth-of-type(2) > div:nth-of-type(6) > div:nth-of-type(2) > div:nth-of-type(1) > div > div:nth-of-type(1) > div:nth-of-type(1)")
-                    ?: missAvDoc.selectFirst("div.mb-1.text-secondary")
-                    
                 fetchedDescription = descEl?.text()?.trim()?.decodeHtmlEntities()
 
-                if (fetchedDescription.isNullOrBlank()) {
-                    fetchedDescription = missAvDoc.selectFirst("meta[property=og:description]")?.attr("content")?.decodeHtmlEntities()
-                }
+                // Strict og:image fetch with no video tag or fourhoi fallbacks
+                horizontalPoster = missAvDoc.selectFirst("meta[property=og:image]")?.attr("content")
             }
         }
 
         return newMovieLoadResponse(title, loadData.url, TvType.NSFW, loadData.url) {
-            this.posterUrl = poster
+            this.posterUrl = verticalPoster
+            this.posterHeaders = mapOf("Referer" to "https://javhd.today/")
+            this.backgroundPosterUrl = horizontalPoster
             this.plot = fetchedDescription
         }
     }
