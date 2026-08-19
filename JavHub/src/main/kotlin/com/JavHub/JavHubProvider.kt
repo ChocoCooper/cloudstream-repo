@@ -84,7 +84,7 @@ class JavHubProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = if (page <= 1) request.data else "${request.data}?page=$page"
-        val document = app.get(url, headers = browserHeaders).document
+        val document = app.get(url, headers = browserHeaders, cacheTime = 0).document
 
         val items = document.select("ul.videos div.video a:has(img)")
             .mapNotNull { it.toSearchResult() }
@@ -168,7 +168,9 @@ class JavHubProvider : MainAPI() {
             }
         }
 
-        val freshTitle = cleanTitleText(document.selectFirst("h1")?.text()?.decodeHtmlEntities())
+        val rawTitle = document.selectFirst("h1")?.text()?.decodeHtmlEntities() ?: "Unknown"
+
+        val freshTitle = cleanTitleText(rawTitle)
             ?: cleanTitleText(document.selectFirst("meta[property=og:title]")?.attr("content"))
 
         val title = freshTitle ?: loadData?.code ?: "Unknown"
@@ -184,8 +186,7 @@ class JavHubProvider : MainAPI() {
             runCatching {
                 val missAvDoc = app.get("$missAvUrl/en/$cleanCode", timeout = 10, headers = browserHeaders).document
 
-                val descEl = missAvDoc.selectFirst("div.mb-1.text-secondary")
-                    ?: missAvDoc.selectFirst("meta[property=og:description]")
+                val descEl = missAvDoc.selectFirst("div.text-secondary.break-all, div.mb-1.text-secondary, meta[property=og:description]")
 
                 fetchedDescription = if (descEl?.tagName() == "meta") {
                     descEl.attr("content").decodeHtmlEntities()
@@ -195,11 +196,13 @@ class JavHubProvider : MainAPI() {
             }
         }
 
+        val plotText = fetchedDescription?.ifBlank { null } ?: rawTitle
+
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
             this.posterUrl = verticalPoster
             this.posterHeaders = mapOf("User-Agent" to browserHeaders["User-Agent"]!!)
             this.backgroundPosterUrl = horizontalPoster
-            this.plot = fetchedDescription
+            this.plot = plotText
         }
     }
 
@@ -225,6 +228,60 @@ class JavHubProvider : MainAPI() {
         val foundStream = AtomicBoolean(false)
 
         coroutineScope {
+
+            val variantsMissAv = listOf(
+                cleanCode to "MissAV",
+                "$cleanCode-uncensored-leak" to "MissAV [Uncensored]",
+                "$cleanCode-english-subtitle" to "MissAV [English Subtitle]"
+            )
+
+            variantsMissAv.forEach { (vCode, sourceName) ->
+                launch {
+                    runCatching {
+                        val missAvVideoUrl = "https://missav.ws/en/$vCode"
+                        val response = app.get(missAvVideoUrl, timeout = 15, headers = browserHeaders)
+
+                        if (response.code == 200) {
+                            val unpackedText = getAndUnpack(response.text)
+                            var finalLink = Regex("""source\s*[:=]\s*['"](.*?)['"]""").find(unpackedText)?.groupValues?.get(1)
+
+                            if (finalLink?.startsWith("aHR0c") == true) {
+                                finalLink = String(Base64.decode(finalLink, Base64.DEFAULT))
+                            }
+
+                            if (finalLink.isNullOrBlank()) {
+                                val b64Match = Regex("""['"](aHR0c[a-zA-Z0-9+/=]+)['"]""").find(unpackedText)?.groupValues?.get(1)
+                                if (b64Match != null) {
+                                    val decoded = String(Base64.decode(b64Match, Base64.DEFAULT))
+                                    if (decoded.contains(".m3u8") || decoded.contains(".mp4")) {
+                                        finalLink = decoded
+                                    }
+                                }
+                            }
+
+                            if (finalLink.isNullOrBlank()) {
+                                finalLink = Regex("""https?://[^"'\s]+?\.m3u8[^"'\s]*""").find(unpackedText.replace("\\/", "/"))?.value
+                            }
+
+                            if (!finalLink.isNullOrBlank()) {
+                                callback.invoke(
+                                    newExtractorLink(
+                                        sourceName,
+                                        sourceName,
+                                        finalLink.toPlaylistM3u8(),
+                                        ExtractorLinkType.M3U8
+                                    ) {
+                                        this.referer = "https://missav.ws"
+                                        this.quality = Qualities.Unknown.value
+                                    }
+                                )
+                                foundStream.set(true)
+                            }
+                        }
+                    }
+                }
+            }
+
             val variants123av = listOf(
                 cleanCode to "123AV",
                 "$cleanCode-uncensored-leaked" to "123AV [Uncensored]"
@@ -287,59 +344,6 @@ class JavHubProvider : MainAPI() {
                         }
                     } catch (e: Exception) {
                         e.printStackTrace()
-                    }
-                }
-            }
-
-            val variantsMissAv = listOf(
-                cleanCode to "MissAV",
-                "$cleanCode-uncensored-leak" to "MissAV [Uncensored]",
-                "$cleanCode-english-subtitle" to "MissAV [English Subtitle]"
-            )
-
-            variantsMissAv.forEach { (vCode, sourceName) ->
-                launch {
-                    runCatching {
-                        val missAvVideoUrl = "https://missav.ws/en/$vCode"
-                        val response = app.get(missAvVideoUrl, timeout = 15, headers = browserHeaders)
-
-                        if (response.code == 200) {
-                            val unpackedText = getAndUnpack(response.text)
-                            var finalLink = Regex("""source\s*[:=]\s*['"](.*?)['"]""").find(unpackedText)?.groupValues?.get(1)
-
-                            if (finalLink?.startsWith("aHR0c") == true) {
-                                finalLink = String(Base64.decode(finalLink, Base64.DEFAULT))
-                            }
-
-                            if (finalLink.isNullOrBlank()) {
-                                val b64Match = Regex("""['"](aHR0c[a-zA-Z0-9+/=]+)['"]""").find(unpackedText)?.groupValues?.get(1)
-                                if (b64Match != null) {
-                                    val decoded = String(Base64.decode(b64Match, Base64.DEFAULT))
-                                    if (decoded.contains(".m3u8") || decoded.contains(".mp4")) {
-                                        finalLink = decoded
-                                    }
-                                }
-                            }
-
-                            if (finalLink.isNullOrBlank()) {
-                                finalLink = Regex("""https?://[^"'\s]+?\.m3u8[^"'\s]*""").find(unpackedText.replace("\\/", "/"))?.value
-                            }
-
-                            if (!finalLink.isNullOrBlank()) {
-                                callback.invoke(
-                                    newExtractorLink(
-                                        sourceName,
-                                        sourceName,
-                                        finalLink.toPlaylistM3u8(),
-                                        ExtractorLinkType.M3U8
-                                    ) {
-                                        this.referer = "https://missav.ws"
-                                        this.quality = Qualities.Unknown.value
-                                    }
-                                )
-                                foundStream.set(true)
-                            }
-                        }
                     }
                 }
             }
