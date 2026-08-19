@@ -2,6 +2,7 @@ package com.JavHub
 
 import android.util.Base64
 import org.jsoup.Jsoup
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.jsoup.parser.Parser
 import com.lagradost.cloudstream3.*
@@ -36,16 +37,6 @@ data class LoadData(
 
 data class JavHDAjaxResponse(
     @JsonProperty("html") val html: String? = null
-)
-
-data class JavmostEmbedResponse(
-    @JsonProperty("status") val status: String? = null,
-    @JsonProperty("data") val data: List<String>? = null
-)
-
-data class DooplayerStreamResponse(
-    @JsonProperty("ok") val ok: Boolean? = null,
-    @JsonProperty("url") val url: String? = null
 )
 
 class JavHubProvider : MainAPI() {
@@ -90,6 +81,34 @@ class JavHubProvider : MainAPI() {
         val cleanText = cleanTitleText(text) ?: return null
         val regex = Regex("""\b([a-zA-Z0-9]{2,8}(?:-[a-zA-Z0-9]{2,8})?-\d{2,6})\b""")
         return regex.find(cleanText)?.value?.uppercase()
+    }
+
+    /**
+     * Pulls the synopsis text out of a MissAV video page.
+     *
+     * Matches the exact node from the page:
+     * /html/body/div[1]/div[3]/div/div[2]/div[6]/div[2]/div[1]/div/div[1]/div[1]
+     * which renders as:
+     * <div :class="{...}" class="mb-1 text-secondary break-all line-clamp-2">...</div>
+     *
+     * We match on the stable class combination (mb-1 + text-secondary + break-all)
+     * rather than the toggled line-clamp-2/line-clamp-none state, and rather than
+     * a raw XPath (Jsoup has no native XPath engine and DOM offsets shift easily).
+     * The CSS line-clamp only visually truncates — jsoup's .text() still returns
+     * the FULL untruncated synopsis, which is what we want.
+     */
+    private fun extractMissAvDescription(doc: Document): String? {
+        val descEl = doc.selectFirst("div.mb-1.text-secondary.break-all")
+            ?: doc.selectFirst("div.text-secondary.break-all")
+            ?: doc.selectFirst("meta[property=og:description]")
+
+        val text = if (descEl?.tagName() == "meta") {
+            descEl.attr("content")
+        } else {
+            descEl?.text()
+        }
+
+        return text?.trim()?.decodeHtmlEntities()?.ifBlank { null }
     }
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
@@ -193,15 +212,29 @@ class JavHubProvider : MainAPI() {
 
         var fetchedDescription: String? = null
         if (!cleanCode.isNullOrBlank()) {
-            runCatching {
-                val missAvDoc = app.get("$missAvUrl/en/$cleanCode", timeout = 10, headers = browserHeaders).document
+            // Try the base code first, then the common MissAV slug variants —
+            // some codes only resolve under an "-uncensored-leak" or
+            // "-english-subtitle" suffixed slug, and a straight 404/redirect on
+            // the base slug was silently swallowing the description before.
+            val missAvSlugCandidates = listOf(
+                cleanCode,
+                "$cleanCode-uncensored-leak",
+                "$cleanCode-english-subtitle"
+            )
 
-                val descEl = missAvDoc.selectFirst("div.text-secondary.break-all, div.mb-1.text-secondary, meta[property=og:description]")
+            for (slug in missAvSlugCandidates) {
+                val found = runCatching {
+                    val missAvDoc = app.get(
+                        "$missAvUrl/en/$slug",
+                        timeout = 10,
+                        headers = browserHeaders
+                    ).document
+                    extractMissAvDescription(missAvDoc)
+                }.getOrNull()
 
-                fetchedDescription = if (descEl?.tagName() == "meta") {
-                    descEl.attr("content").decodeHtmlEntities()
-                } else {
-                    descEl?.text()?.trim()?.decodeHtmlEntities()
+                if (!found.isNullOrBlank()) {
+                    fetchedDescription = found
+                    break
                 }
             }
         }
@@ -360,71 +393,7 @@ class JavHubProvider : MainAPI() {
                 }
             }
 
-            // 3. JAVMOST
-            val variantsJavmost = listOf(
-                code to "Javmost",
-                "$code-UNCENSORED-edit" to "Javmost [Uncensored]"
-            )
-
-            variantsJavmost.forEach { (vCode, sourceName) ->
-                launch {
-                    runCatching {
-                        val javmostUrl = "https://www.javmost.ws/$vCode/"
-                        val doc = app.get(javmostUrl, timeout = 15, headers = browserHeaders).document
-
-                        val scriptContent = doc.select("script").html()
-                        val apiEndpointMatch = Regex("""\$\.post\(\s*['"]/?([a-zA-Z0-9]{8,15})/?['"]""").find(scriptContent)?.groupValues?.get(1)
-                        val apiEndpoint = apiEndpointMatch ?: "ri3123o235r"
-
-                        val embedApiResponse = app.post(
-                            "https://www.javmost.ws/$apiEndpoint/",
-                            headers = mapOf(
-                                "Referer" to javmostUrl,
-                                "X-Requested-With" to "XMLHttpRequest",
-                                "User-Agent" to browserHeaders["User-Agent"]!!
-                            )
-                        ).text
-
-                        val embedData = runCatching { parseJson<JavmostEmbedResponse>(embedApiResponse) }.getOrNull()
-                        val embedUrl = embedData?.data?.firstOrNull()
-
-                        if (!embedUrl.isNullOrBlank()) {
-                            val embedId = embedUrl.substringAfter("/e/").trim('/')
-
-                            if (embedId.isNotBlank()) {
-                                val streamApiResponse = app.post(
-                                    "https://www.dooplayer.com/api/stream/$embedId",
-                                    headers = mapOf(
-                                        "Referer" to "https://www.dooplayer.com/embed/e/$embedId",
-                                        "X-Requested-With" to "XMLHttpRequest",
-                                        "User-Agent" to browserHeaders["User-Agent"]!!
-                                    )
-                                ).text
-
-                                val streamData = runCatching { parseJson<DooplayerStreamResponse>(streamApiResponse) }.getOrNull()
-                                val finalStreamUrl = streamData?.url
-
-                                if (!finalStreamUrl.isNullOrBlank()) {
-                                    callback.invoke(
-                                        newExtractorLink(
-                                            sourceName,
-                                            sourceName,
-                                            finalStreamUrl.toPlaylistM3u8(),
-                                            ExtractorLinkType.M3U8
-                                        ) {
-                                            this.referer = "https://www.dooplayer.com/"
-                                            this.quality = Qualities.Unknown.value
-                                        }
-                                    )
-                                    foundStream.set(true)
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 4. JABLE
+            // 3. JABLE
             launch {
                 runCatching {
                     val urlJable = "https://jable.tv/videos/$cleanCode/?lang=en"
