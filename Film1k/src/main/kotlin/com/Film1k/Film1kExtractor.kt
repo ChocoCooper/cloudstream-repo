@@ -28,7 +28,7 @@ import java.net.URI
 
 class Film1kExtractor : ExtractorApi() {
     override var mainUrl = "https://film1k.xyz"
-    override var name = "Film1k Embed"
+    override var name = "Film1k" // Updated from "Film1k Embed"
     override val requiresReferer = false
 
     override suspend fun getUrl(
@@ -66,13 +66,13 @@ class Film1kExtractor : ExtractorApi() {
 
                 callback.invoke(
                     newExtractorLink(
-                        name = this.name,
-                        source = this.name,
+                        name = "Film1k",
+                        source = "Film1k",
                         url = streamUrl,
                         type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                     ) {
                         this.referer = apiBase
-                        this.quality = if (src.has("height")) src.optInt("height") else Qualities.Unknown.value
+                        this.quality = Qualities.Unknown.value // Strip all resolution numbers
                     }
                 )
             }
