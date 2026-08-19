@@ -23,9 +23,11 @@ private fun String.toPlaylistM3u8(): String {
                .replace("video.m3u8", "playlist.m3u8")
 }
 
+// Added 'code' to pass the exact JAV code directly from the UI grid to the extractors
 data class LoadData(
     val url: String,
-    val poster: String? = null
+    val poster: String? = null,
+    val code: String? = null
 )
 
 data class JavHDAjaxResponse(
@@ -49,7 +51,7 @@ class JavHubProvider : MainAPI() {
     private val missAvUrl      = "https://missav.ws"
 
     override val mainPage = mainPageOf(
-        "$mainUrl/channel/madonna-new/" to "Madonna",
+        "$mainUrl/channel/madonna/" to "Madonna",
         "$mainUrl/channel/nagae-style-new/" to "Nagae Style",
         "$mainUrl/channel/attackers-new/" to "Attackers",
         "$mainUrl/channel/moodyz-new/" to "Moodyz"
@@ -96,7 +98,11 @@ class JavHubProvider : MainAPI() {
     }
 
     private fun Element.toSearchResult(): SearchResponse? {
-        val href = fixUrlNull(this.attr("href")) ?: return null
+        val rawHref = this.attr("href")
+        if (rawHref.isBlank()) return null
+        
+        // Safely resolves relative URLs regardless of JSoup Base URI state
+        val href = if (rawHref.startsWith("/")) "$mainUrl$rawHref" else rawHref
         
         if (href.contains("/search/") || href.contains("/channel/") || href.contains("/tag/")) return null
         
@@ -107,13 +113,15 @@ class JavHubProvider : MainAPI() {
             
         if (title.isBlank()) return null
 
-        val code = extractCode(title) ?: extractCode(href)
+        // Strictly extracts code from the title only
+        val code = extractCode(title)
         if (code == null) return null
 
         val imgEl = this.selectFirst("img") ?: return null
         val posterUrl = fixUrlNull(imgEl.attr("src"))
 
-        val loadUrl = LoadData(href, posterUrl).toJson()
+        // We explicitly package the verified Code into the JSON payload
+        val loadUrl = LoadData(href, posterUrl, code).toJson()
 
         return newMovieSearchResponse(title, loadUrl, TvType.NSFW) {
             this.posterUrl = posterUrl
@@ -122,28 +130,28 @@ class JavHubProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val loadData = runCatching { parseJson<LoadData>(url) }.getOrNull() ?: LoadData(url, null)
-        val document = app.get(loadData.url, headers = browserHeaders).document
+        val loadData = runCatching { parseJson<LoadData>(url) }.getOrNull()
+        val videoUrl = loadData?.url ?: url
+        
+        val document = app.get(videoUrl, headers = browserHeaders).document
 
         val rawTitle = document.selectFirst("h1")?.text()?.trim()?.decodeHtmlEntities() ?: "Unknown"
         val title = rawTitle.replace("(?i)Mosaic|English Sub|Uncensored".toRegex(), "")
             .trim('-', '_', '|', ' ')
             .trim()
 
-        val code = extractCode(title) ?: extractCode(loadData.url)
+        // Bypasses the HTML entirely if we already packaged the code in LoadData, otherwise extracts from title only
+        val code = loadData?.code ?: extractCode(title)
         val cleanCode = code?.lowercase()
 
-        val verticalPoster = loadData.poster
+        val verticalPoster = loadData?.poster
         var fetchedDescription: String? = null
-        
-        // Dynamically inject the fourhoi image as the horizontal background poster
         val horizontalPoster = if (cleanCode != null) "https://fourhoi.com/$cleanCode/cover-n.jpg" else null
 
         if (!cleanCode.isNullOrBlank()) {
             runCatching {
                 val missAvDoc = app.get("$missAvUrl/en/$cleanCode", timeout = 10, headers = browserHeaders).document
                 
-                // Cloudstream uses Jsoup (Raw HTML). We must use raw HTML classes or meta tags.
                 val descEl = missAvDoc.selectFirst("div.mb-1.text-secondary") 
                     ?: missAvDoc.selectFirst("meta[property=og:description]")
 
@@ -155,7 +163,8 @@ class JavHubProvider : MainAPI() {
             }
         }
 
-        return newMovieLoadResponse(title, loadData.url, TvType.NSFW, loadData.url) {
+        // We pass the exact 'url' JSON string to loadLinks to preserve the Code state
+        return newMovieLoadResponse(title, url, TvType.NSFW, url) {
             this.posterUrl = verticalPoster
             this.posterHeaders = mapOf("Referer" to "https://javhd.today/")
             this.backgroundPosterUrl = horizontalPoster
@@ -170,10 +179,19 @@ class JavHubProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         
-        val document = app.get(data, timeout = 15, headers = browserHeaders).document
-        val rawTitle = document.selectFirst("h1")?.text()?.trim() ?: data
+        val loadData = runCatching { parseJson<LoadData>(data) }.getOrNull()
+        val videoUrl = loadData?.url ?: data
         
-        val code = extractCode(rawTitle) ?: rawTitle.split("/").lastOrNull { it.isNotBlank() }?.uppercase() ?: return false
+        // Grab code directly from JSON. If somehow missing, safely fallback to scraping the page title only.
+        var code = loadData?.code
+        
+        if (code == null) {
+            val document = app.get(videoUrl, timeout = 15, headers = browserHeaders).document
+            val rawTitle = document.selectFirst("h1")?.text()?.trim() ?: ""
+            code = extractCode(rawTitle)
+        }
+        
+        if (code == null) return false
         val cleanCode = code.lowercase()
         val foundStream = AtomicBoolean(false)
 
