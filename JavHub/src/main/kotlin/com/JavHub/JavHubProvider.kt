@@ -182,19 +182,37 @@ class JavHubProvider : MainAPI() {
      */
     override suspend fun load(url: String): LoadResponse {
         val loadData = runCatching { parseJson<LoadData>(url) }.getOrNull()
-        val videoUrl = loadData?.url ?: url
+        var videoUrl = loadData?.url ?: url
 
-        val document = app.get(videoUrl, headers = browserHeaders).document
+        var document = app.get(videoUrl, headers = browserHeaders).document
 
-        // Re-derive title fresh from the actual page — identical for both
-        // homepage and search paths, since both eventually land on the same videoUrl.
+        // Homepage links sometimes point at a "channel"-scoped copy of the video
+        // page (e.g. /channel/madonna/video/xxx) which can render a lighter
+        // template than the canonical /video/xxx page search results link to
+        // directly. Resolve to the canonical page so BOTH entry paths always
+        // end up parsing the exact same document — this is what keeps
+        // homepage and search converging on identical title/code/description.
+        val canonicalHref = document.selectFirst("link[rel=canonical]")?.attr("href")
+            ?: document.selectFirst("meta[property=og:url]")?.attr("content")
+
+        if (!canonicalHref.isNullOrBlank() && canonicalHref != videoUrl) {
+            runCatching {
+                val canonicalDoc = app.get(canonicalHref, headers = browserHeaders).document
+                // Only swap over if the canonical page actually has real content.
+                if (canonicalDoc.selectFirst("h1") != null) {
+                    document = canonicalDoc
+                    videoUrl = canonicalHref
+                }
+            }
+        }
+
         val freshTitle = cleanTitleText(document.selectFirst("h1")?.text()?.decodeHtmlEntities())
             ?: cleanTitleText(document.selectFirst("meta[property=og:title]")?.attr("content"))
 
-        val title = freshTitle ?: "Unknown"
+        val title = freshTitle ?: loadData?.code ?: "Unknown"
 
-        // Prefer the code extracted from the freshly-loaded page; fall back to
-        // the listing-supplied code, then the URL slug, in that order.
+        // Prefer the code extracted from the freshly-loaded (canonical) page;
+        // fall back to the listing-supplied code, then the URL slug, in that order.
         val code = extractCode(freshTitle)
             ?: loadData?.code
             ?: extractCode(videoUrl)
@@ -222,7 +240,14 @@ class JavHubProvider : MainAPI() {
 
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
             this.posterUrl = verticalPoster
-            this.posterHeaders = mapOf("Referer" to "https://javhd.today/")
+            // IMPORTANT: CloudStream only exposes ONE header map on LoadResponse
+            // (posterHeaders) and applies it to every image tied to this response,
+            // including backgroundPosterUrl. posterUrl lives on javhd.today but
+            // backgroundPosterUrl lives on fourhoi.com — a Referer scoped to one
+            // domain can get the image request on the OTHER domain rejected by
+            // hotlink protection. Keep only a User-Agent here (safe for both
+            // hosts) instead of a domain-specific Referer.
+            this.posterHeaders = mapOf("User-Agent" to browserHeaders["User-Agent"]!!)
             this.backgroundPosterUrl = horizontalPoster
             this.plot = fetchedDescription
         }
