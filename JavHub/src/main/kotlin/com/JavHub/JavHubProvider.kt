@@ -41,6 +41,7 @@ class JavHubProvider : MainAPI() {
     )
 
     private val subtitleCatUrl = "https://www.subtitlecat.com"
+    private val missAvUrl      = "https://missav.ws"
 
     override val mainPage = mainPageOf(
         "$mainUrl/channel/madonna/" to "Madonna",
@@ -136,16 +137,37 @@ class JavHubProvider : MainAPI() {
             .trim('-', '_', '|', ' ')
             .trim()
 
-        val poster = loadData.poster
-            ?: document.selectFirst("meta[property=og:image]")?.attr("content")?.let { fixUrlNull(it) }
-
         val tags = document.select("a[href*=/tag/]").map { it.text().trim().decodeHtmlEntities() }
         val actors = document.select("a[href*=/star/], a[href*=/model/]").map { ActorData(Actor(it.text().trim().decodeHtmlEntities())) }
 
         val code = extractCode(title) ?: extractCode(loadData.url)
+        val cleanCode = code?.lowercase()
+
+        // Dynamically inject the high-res poster from fourhoi.com on the Details Page
+        val poster = if (cleanCode != null) "https://fourhoi.com/$cleanCode/cover-n.jpg" else loadData.poster
+
+        var fetchedDescription: String? = null
+
+        // Background call to MissAV to extract the detailed description
+        if (!code.isNullOrBlank()) {
+            runCatching {
+                val missAvDoc = app.get("$missAvUrl/en/$cleanCode", timeout = 10, headers = browserHeaders).document
+                
+                // Targets the specific CSS path first, falls back to robust layout classes if layout shifts
+                val descEl = missAvDoc.selectFirst("html > body > div:nth-of-type(2) > div:nth-of-type(3) > div > div:nth-of-type(2) > div:nth-of-type(6) > div:nth-of-type(2) > div:nth-of-type(1) > div > div:nth-of-type(1) > div:nth-of-type(1)")
+                    ?: missAvDoc.selectFirst("div.mb-1.text-secondary")
+                    
+                fetchedDescription = descEl?.text()?.trim()?.decodeHtmlEntities()
+
+                if (fetchedDescription.isNullOrBlank()) {
+                    fetchedDescription = missAvDoc.selectFirst("meta[property=og:description]")?.attr("content")?.decodeHtmlEntities()
+                }
+            }
+        }
 
         val plot = buildString {
-            if (!code.isNullOrBlank()) appendLine("Code: $code")
+            if (!code.isNullOrBlank()) appendLine("Code: $code\n")
+            if (!fetchedDescription.isNullOrBlank()) appendLine(fetchedDescription)
         }.trim().ifBlank { null }
 
         return newMovieLoadResponse(title, loadData.url, TvType.NSFW, loadData.url) {
@@ -172,168 +194,118 @@ class JavHubProvider : MainAPI() {
 
         coroutineScope {
             
-            // ---- MIRROR 1: 123AV (Direct URL) --------------------------
-            launch {
-                try {
-                    val url123av = "https://123av.com/en/v/$cleanCode"
-                    val doc123 = app.get(url123av, timeout = 15, headers = browserHeaders).document
-                    
-                    val xData = doc123.selectFirst("div.watch-main > div.watch__main")?.attr("x-data").orEmpty()
-                    val embedIdMatch = Regex("""javplayer\.cc[\\/]+e[\\/]+([a-zA-Z0-9]+)""").find(xData)
-                    val embedId = embedIdMatch?.groupValues?.get(1)
+            // ---- MIRROR 1: 123AV (Direct URL + Variants) --------------------------
+            val variants123av = listOf(
+                cleanCode to "123AV",
+                "$cleanCode-uncensored-leaked" to "123AV [Uncensored]"
+            )
 
-                    if (!embedId.isNullOrBlank()) {
-                        val embedUrl = "https://javplayer.cc/e/$embedId"
-                        val apiUrl = "https://javplayer.cc/stream?id=$embedId"
+            variants123av.forEach { (vCode, sourceName) ->
+                launch {
+                    try {
+                        val url123av = "https://123av.com/en/v/$vCode"
+                        val doc123 = app.get(url123av, timeout = 15, headers = browserHeaders).document
                         
-                        val apiRes = app.get(
-                            apiUrl, 
-                            headers = mapOf(
-                                "Referer" to "https://123av.com", 
-                                "X-Requested-With" to "XMLHttpRequest",
-                                "User-Agent" to browserHeaders["User-Agent"]!!
-                            ),
-                            interceptor = CloudflareKiller()
-                        ).text
+                        val xData = doc123.selectFirst("div.watch-main > div.watch__main")?.attr("x-data").orEmpty()
+                        val embedIdMatch = Regex("""javplayer\.cc[\\/]+e[\\/]+([a-zA-Z0-9]+)""").find(xData)
+                        val embedId = embedIdMatch?.groupValues?.get(1)
 
-                        var m3u8Url = Regex("""https?://[^"'\s]+?\.m3u8[^"'\s]*""").find(apiRes.replace("\\/", "/"))?.value
-
-                        if (m3u8Url.isNullOrBlank()) {
-                            val embedHtml = app.get(embedUrl, referer = "https://123av.com", interceptor = CloudflareKiller()).text
-                            val unpackedHtml = runCatching { getAndUnpack(embedHtml) }.getOrDefault(embedHtml)
+                        if (!embedId.isNullOrBlank()) {
+                            val embedUrl = "https://javplayer.cc/e/$embedId"
+                            val apiUrl = "https://javplayer.cc/stream?id=$embedId"
                             
-                            val fallbackRegex = Regex("""(?:file|src|url|source)\s*[:=]\s*['"](https?://[^'"]+\.m3u8[^'"]*)['"]""")
-                            m3u8Url = fallbackRegex.find(unpackedHtml)?.groupValues?.get(1) 
-                                ?: fallbackRegex.find(embedHtml)?.groupValues?.get(1)
-                                
+                            val apiRes = app.get(
+                                apiUrl, 
+                                headers = mapOf(
+                                    "Referer" to "https://123av.com", 
+                                    "X-Requested-With" to "XMLHttpRequest",
+                                    "User-Agent" to browserHeaders["User-Agent"]!!
+                                ),
+                                interceptor = CloudflareKiller()
+                            ).text
+
+                            var m3u8Url = Regex("""https?://[^"'\s]+?\.m3u8[^"'\s]*""").find(apiRes.replace("\\/", "/"))?.value
+
                             if (m3u8Url.isNullOrBlank()) {
-                                m3u8Url = Regex("""https?://[^"'\s]+?\.m3u8[^"'\s]*""").find(unpackedHtml.replace("\\/", "/"))?.value
-                                    ?: Regex("""https?://[^"'\s]+?\.m3u8[^"'\s]*""").find(embedHtml.replace("\\/", "/"))?.value
-                            }
-                        }
-
-                        if (!m3u8Url.isNullOrBlank()) {
-                            callback.invoke(
-                                newExtractorLink(
-                                    "123AV",
-                                    "123AV",
-                                    m3u8Url,
-                                    ExtractorLinkType.M3U8
-                                ) {
-                                    this.referer = "https://javplayer.cc/" 
-                                    this.quality = Qualities.Unknown.value 
-                                }
-                            )
-                            foundStream.set(true)
-                        }
-                    }
-                } catch (e: Exception) {
-                    e.printStackTrace()
-                }
-            }
-
-            // ---- MIRROR 2: MissAV (Direct URL) --------------------------------------
-            launch {
-                runCatching {
-                    val missAvVideoUrl = "https://missav.ws/en/$cleanCode"
-                    val response = app.get(missAvVideoUrl, timeout = 15, headers = browserHeaders)
-
-                    if (response.code == 200) {
-                        val unpackedText = getAndUnpack(response.text)
-                        var finalLink = Regex("""source\s*[:=]\s*['"](.*?)['"]""").find(unpackedText)?.groupValues?.get(1)
-                        
-                        if (finalLink?.startsWith("aHR0c") == true) {
-                            finalLink = String(Base64.decode(finalLink, Base64.DEFAULT))
-                        }
-                        
-                        if (finalLink.isNullOrBlank()) {
-                            val b64Match = Regex("""['"](aHR0c[a-zA-Z0-9+/=]+)['"]""").find(unpackedText)?.groupValues?.get(1)
-                            if (b64Match != null) {
-                                val decoded = String(Base64.decode(b64Match, Base64.DEFAULT))
-                                if (decoded.contains(".m3u8") || decoded.contains(".mp4")) {
-                                    finalLink = decoded
+                                val embedHtml = app.get(embedUrl, referer = "https://123av.com", interceptor = CloudflareKiller()).text
+                                val unpackedHtml = runCatching { getAndUnpack(embedHtml) }.getOrDefault(embedHtml)
+                                
+                                val fallbackRegex = Regex("""(?:file|src|url|source)\s*[:=]\s*['"](https?://[^'"]+\.m3u8[^'"]*)['"]""")
+                                m3u8Url = fallbackRegex.find(unpackedHtml)?.groupValues?.get(1) 
+                                    ?: fallbackRegex.find(embedHtml)?.groupValues?.get(1)
+                                    
+                                if (m3u8Url.isNullOrBlank()) {
+                                    m3u8Url = Regex("""https?://[^"'\s]+?\.m3u8[^"'\s]*""").find(unpackedHtml.replace("\\/", "/"))?.value
+                                        ?: Regex("""https?://[^"'\s]+?\.m3u8[^"'\s]*""").find(embedHtml.replace("\\/", "/"))?.value
                                 }
                             }
-                        }
-                        
-                        if (finalLink.isNullOrBlank()) {
-                            finalLink = Regex("""https?://[^"'\s]+?\.m3u8[^"'\s]*""").find(unpackedText.replace("\\/", "/"))?.value
-                        }
 
-                        if (!finalLink.isNullOrBlank()) {
-                            callback.invoke(
-                                newExtractorLink(
-                                    "MissAV",
-                                    "MissAV",
-                                    finalLink,
-                                    ExtractorLinkType.M3U8
-                                ) {
-                                    this.referer = "https://missav.ws"
-                                    this.quality = Qualities.Unknown.value 
-                                }
-                            )
-                            foundStream.set(true)
-                        }
-                    }
-                }
-            }
-
-            // ---- MIRROR 3: Javdock (Direct URL + Smart Embedded Server Bypass) --------
-            launch {
-                runCatching {
-                    val urlJavdock = "https://www.javdock.com/video/$cleanCode/"
-                    val docJavdock = app.get(urlJavdock, timeout = 15, headers = browserHeaders).document
-                    
-                    docJavdock.select("iframe").forEach { iframe ->
-                        val src = iframe.attr("src").ifBlank { iframe.attr("data-src") }
-                        if (src.isNotBlank()) {
-                            val embedUrl = if (src.startsWith("//")) "https:$src" else if (src.startsWith("/")) "https://www.javdock.com$src" else src
-                            
-                            // Let Cloudstream's native extractors handle standard hosts if recognized
-                            loadExtractor(embedUrl, subtitleCallback, callback)
-
-                            val embedHtml = app.get(embedUrl, headers = mapOf("Referer" to urlJavdock) + browserHeaders, timeout = 15).text
-                            val unpackedHtml = runCatching { getAndUnpack(embedHtml) }.getOrDefault(embedHtml)
-                            val embedDoc = Jsoup.parse(unpackedHtml)
-
-                            // Deep scan: Intercepts server buttons hiding m3u8 URLs inside data-attributes
-                            embedDoc.select("[data-src], [data-video], [data-url], [data-link]").forEach { el ->
-                                val data = el.attr("data-src").ifBlank { el.attr("data-video") }.ifBlank { el.attr("data-url") }.ifBlank { el.attr("data-link") }
-                                if (data.isNotBlank()) {
-                                    var link = data
-                                    if (data.startsWith("aHR0c")) {
-                                        link = runCatching { String(Base64.decode(data, Base64.DEFAULT)) }.getOrDefault(data)
-                                    }
-                                    if (link.contains(".m3u8")) {
-                                        // COMPILER ERROR FIX: Passed link variables inside the ExtractorLink lambda block
-                                        callback.invoke(
-                                            newExtractorLink(
-                                                "Javdock",
-                                                "Javdock Server",
-                                                link,
-                                                ExtractorLinkType.M3U8
-                                            ) {
-                                                this.referer = embedUrl
-                                                this.quality = Qualities.Unknown.value
-                                            }
-                                        )
-                                        foundStream.set(true)
-                                    }
-                                }
-                            }
-                            
-                            // Regex fallback to catch any unhidden streams in the unpacked HTML
-                            Regex("""(https?://[^\s'\"<>]+?\.m3u8[^\s'\"<>]*)""").findAll(unpackedHtml.replace("\\/", "/")).forEach { match ->
-                                // COMPILER ERROR FIX: Passed link variables inside the ExtractorLink lambda block
+                            if (!m3u8Url.isNullOrBlank()) {
                                 callback.invoke(
                                     newExtractorLink(
-                                        "Javdock",
-                                        "Javdock",
-                                        match.groupValues[1],
+                                        sourceName,
+                                        sourceName,
+                                        m3u8Url,
                                         ExtractorLinkType.M3U8
                                     ) {
-                                        this.referer = embedUrl
-                                        this.quality = Qualities.Unknown.value
+                                        this.referer = "https://javplayer.cc/" 
+                                        this.quality = Qualities.Unknown.value 
+                                    }
+                                )
+                                foundStream.set(true)
+                            }
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
+            }
+
+            // ---- MIRROR 2: MissAV (Direct URL + Variants) --------------------------------------
+            val variantsMissAv = listOf(
+                cleanCode to "MissAV",
+                "$cleanCode-uncensored-leak" to "MissAV [Uncensored]",
+                "$cleanCode-english-subtitle" to "MissAV [English Subtitle]"
+            )
+
+            variantsMissAv.forEach { (vCode, sourceName) ->
+                launch {
+                    runCatching {
+                        val missAvVideoUrl = "https://missav.ws/en/$vCode"
+                        val response = app.get(missAvVideoUrl, timeout = 15, headers = browserHeaders)
+
+                        if (response.code == 200) {
+                            val unpackedText = getAndUnpack(response.text)
+                            var finalLink = Regex("""source\s*[:=]\s*['"](.*?)['"]""").find(unpackedText)?.groupValues?.get(1)
+                            
+                            if (finalLink?.startsWith("aHR0c") == true) {
+                                finalLink = String(Base64.decode(finalLink, Base64.DEFAULT))
+                            }
+                            
+                            if (finalLink.isNullOrBlank()) {
+                                val b64Match = Regex("""['"](aHR0c[a-zA-Z0-9+/=]+)['"]""").find(unpackedText)?.groupValues?.get(1)
+                                if (b64Match != null) {
+                                    val decoded = String(Base64.decode(b64Match, Base64.DEFAULT))
+                                    if (decoded.contains(".m3u8") || decoded.contains(".mp4")) {
+                                        finalLink = decoded
+                                    }
+                                }
+                            }
+                            
+                            if (finalLink.isNullOrBlank()) {
+                                finalLink = Regex("""https?://[^"'\s]+?\.m3u8[^"'\s]*""").find(unpackedText.replace("\\/", "/"))?.value
+                            }
+
+                            if (!finalLink.isNullOrBlank()) {
+                                callback.invoke(
+                                    newExtractorLink(
+                                        sourceName,
+                                        sourceName,
+                                        finalLink,
+                                        ExtractorLinkType.M3U8
+                                    ) {
+                                        this.referer = "https://missav.ws"
+                                        this.quality = Qualities.Unknown.value 
                                     }
                                 )
                                 foundStream.set(true)
@@ -343,7 +315,7 @@ class JavHubProvider : MainAPI() {
                 }
             }
 
-            // ---- MIRROR 4: Jable (Direct URL) ---------------------------------------
+            // ---- MIRROR 3: Jable (Direct URL) ---------------------------------------
             launch {
                 runCatching {
                     val urlJable = "https://jable.tv/videos/$cleanCode/?lang=en"
