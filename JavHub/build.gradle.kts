@@ -1,10 +1,10 @@
 // use an integer for version numbers
-version = 1
+version = 6
 
 cloudstream {
     // All of these properties are optional, you can safely remove them
 
-    description = "Multi Server Jav Provider"
+    description = "Multi Server JAV Provider"
     language = "en"
     authors = listOf("ChocoCooper")
 
