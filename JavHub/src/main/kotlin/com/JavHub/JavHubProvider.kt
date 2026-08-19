@@ -49,7 +49,7 @@ class JavHubProvider : MainAPI() {
     private val missAvUrl      = "https://missav.ws"
 
     override val mainPage = mainPageOf(
-        "$mainUrl/channel/madonna/" to "Madonna",
+        "$mainUrl/channel/madonna-new/" to "Madonna",
         "$mainUrl/channel/nagae-style-new/" to "Nagae Style",
         "$mainUrl/channel/attackers-new/" to "Attackers",
         "$mainUrl/channel/moodyz-new/" to "Moodyz"
@@ -100,7 +100,6 @@ class JavHubProvider : MainAPI() {
         
         if (href.contains("/search/") || href.contains("/channel/") || href.contains("/tag/")) return null
         
-        // Strict attribute fetch with no fallbacks
         val rawTitle = this.attr("title")
         val title = rawTitle.replace("(?i)Mosaic|English Sub|Uncensored".toRegex(), "")
             .trim('-', '_', '|', ' ')
@@ -112,14 +111,12 @@ class JavHubProvider : MainAPI() {
         if (code == null) return null
 
         val imgEl = this.selectFirst("img") ?: return null
-        // Strict src attribute fetch with no data-src or data-original fallbacks
         val posterUrl = fixUrlNull(imgEl.attr("src"))
 
         val loadUrl = LoadData(href, posterUrl).toJson()
 
         return newMovieSearchResponse(title, loadUrl, TvType.NSFW) {
             this.posterUrl = posterUrl
-            // Injects referer header to bypass potential 403 Forbidden hotlink blocks
             this.posterHeaders = mapOf("Referer" to "https://javhd.today/")
         }
     }
@@ -128,7 +125,6 @@ class JavHubProvider : MainAPI() {
         val loadData = runCatching { parseJson<LoadData>(url) }.getOrNull() ?: LoadData(url, null)
         val document = app.get(loadData.url, headers = browserHeaders).document
 
-        // Strict h1 fetch with no fallbacks
         val rawTitle = document.selectFirst("h1")?.text()?.trim()?.decodeHtmlEntities() ?: "Unknown"
         val title = rawTitle.replace("(?i)Mosaic|English Sub|Uncensored".toRegex(), "")
             .trim('-', '_', '|', ' ')
@@ -139,18 +135,23 @@ class JavHubProvider : MainAPI() {
 
         val verticalPoster = loadData.poster
         var fetchedDescription: String? = null
-        var horizontalPoster: String? = null
+        
+        // Dynamically inject the fourhoi image as the horizontal background poster
+        val horizontalPoster = if (cleanCode != null) "https://fourhoi.com/$cleanCode/cover-n.jpg" else null
 
-        if (!code.isNullOrBlank()) {
+        if (!cleanCode.isNullOrBlank()) {
             runCatching {
                 val missAvDoc = app.get("$missAvUrl/en/$cleanCode", timeout = 10, headers = browserHeaders).document
                 
-                // Strict CSS path fetch with no fallback layout selectors
-                val descEl = missAvDoc.selectFirst("html > body > div:nth-of-type(2) > div:nth-of-type(3) > div > div:nth-of-type(2) > div:nth-of-type(6) > div:nth-of-type(2) > div:nth-of-type(1) > div > div:nth-of-type(1) > div:nth-of-type(1)")
-                fetchedDescription = descEl?.text()?.trim()?.decodeHtmlEntities()
+                // Cloudstream uses Jsoup (Raw HTML). We must use raw HTML classes or meta tags.
+                val descEl = missAvDoc.selectFirst("div.mb-1.text-secondary") 
+                    ?: missAvDoc.selectFirst("meta[property=og:description]")
 
-                // Strict og:image fetch with no video tag or fourhoi fallbacks
-                horizontalPoster = missAvDoc.selectFirst("meta[property=og:image]")?.attr("content")
+                fetchedDescription = if (descEl?.tagName() == "meta") {
+                    descEl.attr("content").decodeHtmlEntities()
+                } else {
+                    descEl?.text()?.trim()?.decodeHtmlEntities()
+                }
             }
         }
 
