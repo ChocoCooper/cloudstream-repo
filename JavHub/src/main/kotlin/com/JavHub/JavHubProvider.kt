@@ -17,6 +17,12 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 private fun String.decodeHtmlEntities(): String = Parser.unescapeEntities(this, false)
 
+// Upgrades a single-resolution HLS URL to the multi-resolution master playlist
+// WHEN we can clearly tell it's a per-resolution variant (a "/1920x1080/" or
+// "/1080p/" style segment in the path). If the URL doesn't match that shape,
+// it is left completely untouched — different mirrors use different master
+// filenames (or already return the master directly), and forcing every URL
+// to literally end in "playlist.m3u8" breaks mirrors that don't use that name.
 private fun String.toPlaylistM3u8(): String {
     val perResolutionSegment = Regex("""/(?:\d{3,5}x\d{3,5}|\d{3,4}p)/[^/]+\.m3u8""")
     return when {
@@ -41,7 +47,7 @@ data class JavHDAjaxResponse(
 
 class JavHubProvider : MainAPI() {
     override var mainUrl              = "https://javhd.today"
-    override var name                 = "JavHub"
+    override var name                 = "JavHD"
     override val hasMainPage          = true
     override var lang                 = "en"
     override val hasDownloadSupport   = true
@@ -427,6 +433,75 @@ class JavHubProvider : MainAPI() {
                             }
                         )
                         foundStream.set(true)
+                    }
+                }
+            }
+
+            // ---- MIRROR 4: Javmost (page -> #show_player iframe -> dooplayer embed -> mostplayer stream) --
+            val variantsJavmost = listOf(
+                code to "Javmost",
+                "$code-UNCENSORED-edit" to "Javmost [Uncensored]"
+            )
+
+            variantsJavmost.forEach { (vCode, sourceName) ->
+                launch {
+                    runCatching {
+                        val javmostUrl = "https://www.javmost.ws/$vCode/"
+                        val pageDoc = app.get(javmostUrl, timeout = 15, headers = browserHeaders).document
+
+                        val iframeSrc = pageDoc.selectFirst("#show_player iframe")?.attr("src")
+                            ?.ifBlank { null }
+                            ?: pageDoc.selectFirst("#show_player iframe")?.attr("data-src")?.ifBlank { null }
+
+                        if (!iframeSrc.isNullOrBlank()) {
+                            val embedUrl = if (iframeSrc.startsWith("//")) "https:$iframeSrc" else iframeSrc
+
+                            val embedHtml = app.get(
+                                embedUrl,
+                                timeout = 15,
+                                headers = browserHeaders,
+                                referer = javmostUrl
+                            ).text
+
+                            val unpackedHtml = runCatching { getAndUnpack(embedHtml) }.getOrDefault(embedHtml)
+
+                            // The embed page loads its actual manifest from mostplayer's CDN
+                            // via a tokenized "stream?t=" request — capture that directly when
+                            // present, since it's the confirmed real stream endpoint.
+                            var streamUrl = Regex("""https?://cdn\.mostplayer\.com/stream\?t=[^"'\s<>]+""")
+                                .find(unpackedHtml.replace("\\/", "/"))?.value
+                                ?: Regex("""https?://cdn\.mostplayer\.com/stream\?t=[^"'\s<>]+""")
+                                    .find(embedHtml.replace("\\/", "/"))?.value
+
+                            if (streamUrl.isNullOrBlank()) {
+                                val fallbackRegex = Regex("""(?:file|src|url|source)\s*[:=]\s*['"](https?://[^'"]+\.m3u8[^'"]*)['"]""")
+                                streamUrl = fallbackRegex.find(unpackedHtml)?.groupValues?.get(1)
+                                    ?: fallbackRegex.find(embedHtml)?.groupValues?.get(1)
+                            }
+
+                            if (streamUrl.isNullOrBlank()) {
+                                streamUrl = Regex("""https?://[^"'\s<>]+?\.m3u8[^"'\s<>]*""")
+                                    .find(unpackedHtml.replace("\\/", "/"))?.value
+                                    ?: Regex("""https?://[^"'\s<>]+?\.m3u8[^"'\s<>]*""")
+                                        .find(embedHtml.replace("\\/", "/"))?.value
+                            }
+
+                            if (!streamUrl.isNullOrBlank()) {
+                                callback.invoke(
+                                    newExtractorLink(
+                                        sourceName,
+                                        sourceName,
+                                        streamUrl.toPlaylistM3u8(),
+                                        ExtractorLinkType.M3U8
+                                    ) {
+                                        // Site's own domain as referer, per playback requirements.
+                                        this.referer = "https://www.javmost.ws/"
+                                        this.quality = Qualities.Unknown.value
+                                    }
+                                )
+                                foundStream.set(true)
+                            }
+                        }
                     }
                 }
             }
