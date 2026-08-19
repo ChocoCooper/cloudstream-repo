@@ -38,6 +38,16 @@ data class JavHDAjaxResponse(
     @JsonProperty("html") val html: String? = null
 )
 
+data class JavmostEmbedResponse(
+    @JsonProperty("status") val status: String? = null,
+    @JsonProperty("data") val data: List<String>? = null
+)
+
+data class DooplayerStreamResponse(
+    @JsonProperty("ok") val ok: Boolean? = null,
+    @JsonProperty("url") val url: String? = null
+)
+
 class JavHubProvider : MainAPI() {
     override var mainUrl              = "https://javhd.today"
     override var name                 = "JavHub"
@@ -229,6 +239,7 @@ class JavHubProvider : MainAPI() {
 
         coroutineScope {
 
+            // 1. MISSAV
             val variantsMissAv = listOf(
                 cleanCode to "MissAV",
                 "$cleanCode-uncensored-leak" to "MissAV [Uncensored]",
@@ -282,6 +293,7 @@ class JavHubProvider : MainAPI() {
                 }
             }
 
+            // 2. 123AV
             val variants123av = listOf(
                 cleanCode to "123AV",
                 "$cleanCode-uncensored-leaked" to "123AV [Uncensored]"
@@ -348,6 +360,71 @@ class JavHubProvider : MainAPI() {
                 }
             }
 
+            // 3. JAVMOST
+            val variantsJavmost = listOf(
+                code to "Javmost",
+                "$code-UNCENSORED-edit" to "Javmost [Uncensored]"
+            )
+
+            variantsJavmost.forEach { (vCode, sourceName) ->
+                launch {
+                    runCatching {
+                        val javmostUrl = "https://www.javmost.ws/$vCode/"
+                        val doc = app.get(javmostUrl, timeout = 15, headers = browserHeaders).document
+
+                        val scriptContent = doc.select("script").html()
+                        val apiEndpointMatch = Regex("""\$\.post\(\s*['"]/?([a-zA-Z0-9]{8,15})/?['"]""").find(scriptContent)?.groupValues?.get(1)
+                        val apiEndpoint = apiEndpointMatch ?: "ri3123o235r"
+
+                        val embedApiResponse = app.post(
+                            "https://www.javmost.ws/$apiEndpoint/",
+                            headers = mapOf(
+                                "Referer" to javmostUrl,
+                                "X-Requested-With" to "XMLHttpRequest",
+                                "User-Agent" to browserHeaders["User-Agent"]!!
+                            )
+                        ).text
+
+                        val embedData = runCatching { parseJson<JavmostEmbedResponse>(embedApiResponse) }.getOrNull()
+                        val embedUrl = embedData?.data?.firstOrNull()
+
+                        if (!embedUrl.isNullOrBlank()) {
+                            val embedId = embedUrl.substringAfter("/e/").trim('/')
+
+                            if (embedId.isNotBlank()) {
+                                val streamApiResponse = app.post(
+                                    "https://www.dooplayer.com/api/stream/$embedId",
+                                    headers = mapOf(
+                                        "Referer" to "https://www.dooplayer.com/embed/e/$embedId",
+                                        "X-Requested-With" to "XMLHttpRequest",
+                                        "User-Agent" to browserHeaders["User-Agent"]!!
+                                    )
+                                ).text
+
+                                val streamData = runCatching { parseJson<DooplayerStreamResponse>(streamApiResponse) }.getOrNull()
+                                val finalStreamUrl = streamData?.url
+
+                                if (!finalStreamUrl.isNullOrBlank()) {
+                                    callback.invoke(
+                                        newExtractorLink(
+                                            sourceName,
+                                            sourceName,
+                                            finalStreamUrl.toPlaylistM3u8(),
+                                            ExtractorLinkType.M3U8
+                                        ) {
+                                            this.referer = "https://www.dooplayer.com/"
+                                            this.quality = Qualities.Unknown.value
+                                        }
+                                    )
+                                    foundStream.set(true)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 4. JABLE
             launch {
                 runCatching {
                     val urlJable = "https://jable.tv/videos/$cleanCode/?lang=en"
@@ -373,70 +450,7 @@ class JavHubProvider : MainAPI() {
                 }
             }
 
-            val variantsJavmost = listOf(
-                code to "Javmost",
-                "$code-UNCENSORED-edit" to "Javmost [Uncensored]"
-            )
-
-            variantsJavmost.forEach { (vCode, sourceName) ->
-                launch {
-                    runCatching {
-                        val javmostUrl = "https://www.javmost.ws/$vCode/"
-                        val pageDoc = app.get(javmostUrl, timeout = 15, headers = browserHeaders).document
-
-                        val iframeSrc = pageDoc.selectFirst("#show_player iframe")?.attr("src")
-                            ?.ifBlank { null }
-                            ?: pageDoc.selectFirst("#show_player iframe")?.attr("data-src")?.ifBlank { null }
-
-                        if (!iframeSrc.isNullOrBlank()) {
-                            val embedUrl = if (iframeSrc.startsWith("//")) "https:$iframeSrc" else iframeSrc
-
-                            val embedHtml = app.get(
-                                embedUrl,
-                                timeout = 15,
-                                headers = browserHeaders,
-                                referer = javmostUrl
-                            ).text
-
-                            val unpackedHtml = runCatching { getAndUnpack(embedHtml) }.getOrDefault(embedHtml)
-
-                            var streamUrl = Regex("""https?://cdn\.mostplayer\.com/stream\?t=[^"'\s<>]+""")
-                                .find(unpackedHtml.replace("\\/", "/"))?.value
-                                ?: Regex("""https?://cdn\.mostplayer\.com/stream\?t=[^"'\s<>]+""")
-                                    .find(embedHtml.replace("\\/", "/"))?.value
-
-                            if (streamUrl.isNullOrBlank()) {
-                                val fallbackRegex = Regex("""(?:file|src|url|source)\s*[:=]\s*['"](https?://[^'"]+\.m3u8[^'"]*)['"]""")
-                                streamUrl = fallbackRegex.find(unpackedHtml)?.groupValues?.get(1)
-                                    ?: fallbackRegex.find(embedHtml)?.groupValues?.get(1)
-                            }
-
-                            if (streamUrl.isNullOrBlank()) {
-                                streamUrl = Regex("""https?://[^"'\s<>]+?\.m3u8[^"'\s<>]*""")
-                                    .find(unpackedHtml.replace("\\/", "/"))?.value
-                                    ?: Regex("""https?://[^"'\s<>]+?\.m3u8[^"'\s<>]*""")
-                                        .find(embedHtml.replace("\\/", "/"))?.value
-                            }
-
-                            if (!streamUrl.isNullOrBlank()) {
-                                callback.invoke(
-                                    newExtractorLink(
-                                        sourceName,
-                                        sourceName,
-                                        streamUrl.toPlaylistM3u8(),
-                                        ExtractorLinkType.M3U8
-                                    ) {
-                                        this.referer = "https://www.javmost.ws/"
-                                        this.quality = Qualities.Unknown.value
-                                    }
-                                )
-                                foundStream.set(true)
-                            }
-                        }
-                    }
-                }
-            }
-
+            // SUBTITLES
             launch {
                 runCatching {
                     val searchDoc = app.get("$subtitleCatUrl/index.php?search=$code", timeout = 15, headers = browserHeaders).document
