@@ -17,10 +17,15 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 private fun String.decodeHtmlEntities(): String = Parser.unescapeEntities(this, false)
 
-// Extension function to force Master Playlist containing all resolutions
 private fun String.toPlaylistM3u8(): String {
-    return this.replace(Regex("""/[0-9]+x[0-9]+/[^/]+\.m3u8"""), "/playlist.m3u8")
-               .replace("video.m3u8", "playlist.m3u8")
+    val perResolutionSegment = Regex("""/(?:\d{3,5}x\d{3,5}|\d{3,4}p)/[^/]+\.m3u8""")
+    return when {
+        perResolutionSegment.containsMatchIn(this) ->
+            perResolutionSegment.replace(this, "/playlist.m3u8")
+        this.endsWith("/video.m3u8") ->
+            this.replace(Regex("""/video\.m3u8$"""), "/playlist.m3u8")
+        else -> this
+    }
 }
 
 // Added 'code' to pass the exact JAV code directly from the UI grid to the extractors
@@ -36,7 +41,7 @@ data class JavHDAjaxResponse(
 
 class JavHubProvider : MainAPI() {
     override var mainUrl              = "https://javhd.today"
-    override var name                 = "JavHD"
+    override var name                 = "JavHub"
     override val hasMainPage          = true
     override var lang                 = "en"
     override val hasDownloadSupport   = true
@@ -331,7 +336,9 @@ class JavHubProvider : MainAPI() {
                                         m3u8Url.toPlaylistM3u8(),
                                         ExtractorLinkType.M3U8
                                     ) {
-                                        this.referer = "https://javplayer.cc/"
+                                        // Use the site's own domain as referer for playback,
+                                        // not the embed/player domain used to fetch the URL.
+                                        this.referer = "https://123av.com/"
                                         this.quality = Qualities.Unknown.value
                                     }
                                 )
