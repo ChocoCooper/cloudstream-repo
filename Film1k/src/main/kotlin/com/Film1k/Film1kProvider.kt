@@ -19,38 +19,53 @@ class Film1kProvider : MainAPI() {
         "$mainUrl/tag/1990s" to "1990s Movies"
     )
 
+    private fun cleanTitle(raw: String): String {
+        return raw
+            .replace(Regex("movie poster watch online", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("watch movie online", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("watch tv online", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("watch series online", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("movie poster", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("watch online", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("\\s+"), " ")
+            .trim(' ', '-', '|', ':')
+            .trim()
+    }
+
+    private val isHorizontalImages = true
+
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-        val homeDoc = app.get("$mainUrl/", verify = false).document
-        val usaDoc = app.get("$mainUrl/tag/usa", verify = false).document
-        val nintiesDoc = app.get("$mainUrl/tag/1990s", verify = false).document
+        val homeDoc = app.get("$mainUrl/", verify = false, cacheTime = 0).document
+        val usaDoc = app.get("$mainUrl/tag/usa", verify = false, cacheTime = 0).document
+        val nintiesDoc = app.get("$mainUrl/tag/1990s", verify = false, cacheTime = 0).document
 
         val homePageList = mutableListOf<HomePageList>()
 
         val latestTitle = homeDoc.selectFirst("#Ez-Wp > div > div > div > main > section > div.page-top > h3")?.text() ?: "Latest Movies"
         val latestItems = parseArticles(homeDoc)
         if (latestItems.isNotEmpty()) {
-            homePageList.add(HomePageList(latestTitle, latestItems, isHorizontalImages = false))
+            homePageList.add(HomePageList(latestTitle, latestItems, isHorizontalImages = isHorizontalImages))
         }
 
         val usaTitle = usaDoc.selectFirst("#Ez-Wp > div > div > div > main > section > div.page-top > h3")?.text() ?: "USA Movies"
         val usaItems = parseArticles(usaDoc)
         if (usaItems.isNotEmpty()) {
-            homePageList.add(HomePageList(usaTitle, usaItems, isHorizontalImages = false))
+            homePageList.add(HomePageList(usaTitle, usaItems, isHorizontalImages = isHorizontalImages))
         }
 
         val nintiesTitle = nintiesDoc.selectFirst("#Ez-Wp > div > div > div > main > section > div.page-top > h3")?.text() ?: "1990s Movies"
         val nintiesItems = parseArticles(nintiesDoc)
         if (nintiesItems.isNotEmpty()) {
-            homePageList.add(HomePageList(nintiesTitle, nintiesItems, isHorizontalImages = false))
+            homePageList.add(HomePageList(nintiesTitle, nintiesItems, isHorizontalImages = isHorizontalImages))
         }
 
         val usaUrls = usaItems.map { it.url }.toSet()
         val intersectionItems = nintiesItems.filter { usaUrls.contains(it.url) }
         if (intersectionItems.isNotEmpty()) {
-            homePageList.add(HomePageList("1990s USA Movies", intersectionItems, isHorizontalImages = false))
+            homePageList.add(HomePageList("1990s USA Movies", intersectionItems, isHorizontalImages = isHorizontalImages))
         }
 
         return newHomePageResponse(homePageList)
@@ -66,9 +81,6 @@ class Film1kProvider : MainAPI() {
             emptyList()
         }
 
-        // Page 2 may not exist for queries with few results (404, or a page
-        // with no <article> elements) — treat that as "no more results"
-        // rather than a hard failure.
         val page2Items = try {
             parseArticles(app.get(page2Url, verify = false).document)
         } catch (e: Exception) {
@@ -88,7 +100,7 @@ class Film1kProvider : MainAPI() {
 
             val rawName = article.selectFirst("header > a > h2")?.text()?.trim()?.takeIf { it.isNotBlank() }
                 ?: aHeader.text().trim()
-            val mediaName = rawName.replace("movie poster watch online", "", ignoreCase = true).trim()
+            val mediaName = cleanTitle(rawName)
 
             val imgEl = article.selectFirst("header > a > figure > img")
 
@@ -121,7 +133,7 @@ class Film1kProvider : MainAPI() {
             ?: doc.selectFirst("meta[property=og:title]")?.attr("content")?.takeIf { it.isNotBlank() }
             ?: doc.title()
 
-        val mediaName = rawName.replace("movie poster watch online", "", ignoreCase = true).trim()
+        val mediaName = cleanTitle(rawName)
 
         var plot: String? = null
         val descContainer = doc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div")
@@ -179,12 +191,6 @@ class Film1kProvider : MainAPI() {
             return filtered.ifBlank { text }.ifBlank { null }
         }
 
-        // No further fallback beyond this — if neither an explicit
-        // "Description"/"Plot" label nor a title-lead paragraph is found,
-        // leave plot unset (null) rather than dumping the whole metadata
-        // block (runtime/genres/director/etc). Some pages genuinely have an
-        // empty <h3>Description:</h3> with nothing after it; Cloudstream's
-        // own "no plot found" UI handles that case better than a garbled dump.
         plot = extractAfterLabel("Description") ?: extractAfterLabel("Plot") ?: extractTitleLeadParagraph()
 
         plot = plot?.let { cleanupText(it) }
