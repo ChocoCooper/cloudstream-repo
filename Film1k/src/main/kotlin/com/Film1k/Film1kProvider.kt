@@ -283,15 +283,10 @@ class Film1kProvider : MainAPI() {
         val dedupingCallback: (ExtractorLink) -> Unit = { link ->
             if (seenStreamUrls.add(link.url)) {
                 callback.invoke(
-                    newExtractorLink(
+                    link.copy(
                         name = this.name,
-                        source = this.name,
-                        url = link.url,
-                        type = link.type
-                    ) {
-                        this.referer = link.referer
-                        this.quality = link.quality
-                    }
+                        source = this.name
+                    )
                 )
             }
         }
