@@ -255,8 +255,8 @@ class Film1kProvider : MainAPI() {
             if (isDirectMedia) {
                 collectingCallback.invoke(
                     newExtractorLink(
-                        name = this.name,
-                        source = this.name,
+                        name = "Film1k",
+                        source = "Film1k",
                         url = videoUrl,
                         type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                     ) {
@@ -269,20 +269,25 @@ class Film1kProvider : MainAPI() {
             }
         }
 
-        val seenStreamUrls = mutableSetOf<String>()
-        for (link in collectedLinks) {
-            if (seenStreamUrls.add(link.url)) {
+        // Deduplicate thoroughly by only emitting ONE optimal link. 
+        // Prioritizes M3U8 (which internally handles all qualities).
+        var emitted = false
+        val sortedLinks = collectedLinks.sortedByDescending { it.type == ExtractorLinkType.M3U8 }
+
+        for (link in sortedLinks) {
+            if (!emitted) {
                 callback.invoke(
                     newExtractorLink(
-                        name = this.name,
-                        source = this.name,
+                        name = "Film1k",
+                        source = "Film1k",
                         url = link.url,
                         type = link.type
                     ) {
                         this.referer = link.referer
-                        this.quality = link.quality
+                        this.quality = Qualities.Unknown.value
                     }
                 )
+                emitted = true // Break after the first valid link is sent
             }
         }
 
