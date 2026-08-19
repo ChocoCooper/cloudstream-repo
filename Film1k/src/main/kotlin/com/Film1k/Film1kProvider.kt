@@ -6,6 +6,14 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.jsoup.nodes.TextNode
 
+data class OpenSubtitleResult(
+    val SubDownloadLink: String? = null,
+    val SubLanguageID: String? = null,
+    val LanguageName: String? = null,
+    val SubFormat: String? = null,
+    val SubFileName: String? = null
+)
+
 class Film1kProvider : MainAPI() {
     override var mainUrl = "https://www.film1k.com"
     override var name = "Film1k"
@@ -21,15 +29,14 @@ class Film1kProvider : MainAPI() {
 
     private val isHorizontalImages = false
 
+    private val titleJunkRegex = Regex(
+        "full movie online|movie poster watch online|watch movie online|watch tv online|watch series online|movie poster|watch online",
+        RegexOption.IGNORE_CASE
+    )
+
     private fun cleanTitle(raw: String): String {
         return raw
-            .replace(Regex("movie poster watch online", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("watch movie online", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("watch tv online", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("watch series online", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("full movie online", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("movie poster", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("watch online", RegexOption.IGNORE_CASE), "")
+            .replace(titleJunkRegex, "")
             .replace(Regex("\\s+"), " ")
             .trim(' ', '-', '|', ':')
             .trim()
@@ -39,9 +46,9 @@ class Film1kProvider : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-        val homeDoc = app.get("$mainUrl/", verify = false, cacheTime = 0).document
-        val usaDoc = app.get("$mainUrl/tag/usa", verify = false, cacheTime = 0).document
-        val nintiesDoc = app.get("$mainUrl/tag/1990s", verify = false, cacheTime = 0).document
+        val homeDoc = app.get("$mainUrl/", verify = false).document
+        val usaDoc = app.get("$mainUrl/tag/usa", verify = false).document
+        val nintiesDoc = app.get("$mainUrl/tag/1990s", verify = false).document
 
         val homePageList = mutableListOf<HomePageList>()
 
@@ -211,6 +218,30 @@ class Film1kProvider : MainAPI() {
         }
     }
 
+    private suspend fun invokeOpenSubtitles(imdbId: String, subtitleCallback: (SubtitleFile) -> Unit) {
+        try {
+            val cleanId = imdbId.removePrefix("tt").trimStart('0').ifBlank { "0" }
+            val res = app.get(
+                "https://rest.opensubtitles.org/search/imdbid-$cleanId/sublanguageid/eng",
+                headers = mapOf("X-User-Agent" to "TemporaryUserAgent")
+            ).text
+
+            val results = AppUtils.parseJson<List<OpenSubtitleResult>>(res)
+            val seenSubUrls = mutableSetOf<String>()
+
+            results
+                .filter { it.SubLanguageID.equals("eng", ignoreCase = true) && !it.SubDownloadLink.isNullOrBlank() }
+                .forEach { sub ->
+                    val subUrl = sub.SubDownloadLink!!
+                    if (seenSubUrls.add(subUrl)) {
+                        subtitleCallback.invoke(SubtitleFile("English", subUrl))
+                    }
+                }
+        } catch (e: Exception) {
+            // no subtitles available for this title, or the API is unreachable
+        }
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -219,6 +250,13 @@ class Film1kProvider : MainAPI() {
     ): Boolean {
         val doc = app.get(data, verify = false).document
         val extractedUrls = mutableSetOf<String>()
+
+        val imdbId = doc.selectFirst("#Ez-Wp > div > div.Container > div > aside a[href*=imdb.com/title/]")
+            ?.attr("href")
+            ?.let { Regex("tt\\d+").find(it)?.value }
+        if (imdbId != null) {
+            invokeOpenSubtitles(imdbId, subtitleCallback)
+        }
 
         fun realSrc(el: Element): String? {
             return el.attr("data-src").takeIf { it.isNotBlank() }
@@ -241,6 +279,23 @@ class Film1kProvider : MainAPI() {
             if (href.isNotBlank()) extractedUrls.add(fixUrl(href))
         }
 
+        val seenStreamUrls = mutableSetOf<String>()
+        val dedupingCallback: (ExtractorLink) -> Unit = { link ->
+            if (seenStreamUrls.add(link.url)) {
+                callback.invoke(
+                    newExtractorLink(
+                        name = this.name,
+                        source = this.name,
+                        url = link.url,
+                        type = link.type
+                    ) {
+                        this.referer = link.referer
+                        this.quality = link.quality
+                    }
+                )
+            }
+        }
+
         for (videoUrl in extractedUrls) {
             val isM3u8 = videoUrl.contains(".m3u8")
             val isMp4 = videoUrl.contains(".mp4")
@@ -251,7 +306,7 @@ class Film1kProvider : MainAPI() {
                 !videoUrl.contains("/v/")
 
             if (isDirectMedia) {
-                callback.invoke(
+                dedupingCallback.invoke(
                     newExtractorLink(
                         name = this.name,
                         source = this.name,
@@ -263,7 +318,7 @@ class Film1kProvider : MainAPI() {
                     }
                 )
             } else {
-                Film1kExtractor().getUrl(videoUrl, mainUrl, subtitleCallback, callback)
+                Film1kExtractor().getUrl(videoUrl, mainUrl, subtitleCallback, dedupingCallback)
             }
         }
 
