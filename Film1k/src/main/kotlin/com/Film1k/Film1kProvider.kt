@@ -279,17 +279,8 @@ class Film1kProvider : MainAPI() {
             if (href.isNotBlank()) extractedUrls.add(fixUrl(href))
         }
 
-        val seenStreamUrls = mutableSetOf<String>()
-        val dedupingCallback: (ExtractorLink) -> Unit = { link ->
-            if (seenStreamUrls.add(link.url)) {
-                callback.invoke(
-                    link.copy(
-                        name = this.name,
-                        source = this.name
-                    )
-                )
-            }
-        }
+        val collectedLinks = mutableListOf<ExtractorLink>()
+        val collectingCallback: (ExtractorLink) -> Unit = { link -> collectedLinks.add(link) }
 
         for (videoUrl in extractedUrls) {
             val isM3u8 = videoUrl.contains(".m3u8")
@@ -301,7 +292,7 @@ class Film1kProvider : MainAPI() {
                 !videoUrl.contains("/v/")
 
             if (isDirectMedia) {
-                dedupingCallback.invoke(
+                collectingCallback.invoke(
                     newExtractorLink(
                         name = this.name,
                         source = this.name,
@@ -313,7 +304,24 @@ class Film1kProvider : MainAPI() {
                     }
                 )
             } else {
-                Film1kExtractor().getUrl(videoUrl, mainUrl, subtitleCallback, dedupingCallback)
+                Film1kExtractor().getUrl(videoUrl, mainUrl, subtitleCallback, collectingCallback)
+            }
+        }
+
+        val seenStreamUrls = mutableSetOf<String>()
+        for (link in collectedLinks) {
+            if (seenStreamUrls.add(link.url)) {
+                callback.invoke(
+                    newExtractorLink(
+                        name = this.name,
+                        source = this.name,
+                        url = link.url,
+                        type = link.type
+                    ) {
+                        this.referer = link.referer
+                        this.quality = link.quality
+                    }
+                )
             }
         }
 
