@@ -6,14 +6,6 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.jsoup.nodes.TextNode
 
-data class OpenSubtitleResult(
-    val SubDownloadLink: String? = null,
-    val SubLanguageID: String? = null,
-    val LanguageName: String? = null,
-    val SubFormat: String? = null,
-    val SubFileName: String? = null
-)
-
 class Film1kProvider : MainAPI() {
     override var mainUrl = "https://www.film1k.com"
     override var name = "Film1k"
@@ -218,30 +210,6 @@ class Film1kProvider : MainAPI() {
         }
     }
 
-    private suspend fun invokeOpenSubtitles(imdbId: String, subtitleCallback: (SubtitleFile) -> Unit) {
-        try {
-            val cleanId = imdbId.removePrefix("tt").trimStart('0').ifBlank { "0" }
-            val res = app.get(
-                "https://rest.opensubtitles.org/search/imdbid-$cleanId/sublanguageid/eng",
-                headers = mapOf("X-User-Agent" to "TemporaryUserAgent")
-            ).text
-
-            val results = AppUtils.parseJson<List<OpenSubtitleResult>>(res)
-            val seenSubUrls = mutableSetOf<String>()
-
-            results
-                .filter { it.SubLanguageID.equals("eng", ignoreCase = true) && !it.SubDownloadLink.isNullOrBlank() }
-                .forEach { sub ->
-                    val subUrl = sub.SubDownloadLink!!
-                    if (seenSubUrls.add(subUrl)) {
-                        subtitleCallback.invoke(SubtitleFile("English", subUrl))
-                    }
-                }
-        } catch (e: Exception) {
-            // no subtitles available for this title, or the API is unreachable
-        }
-    }
-
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -250,13 +218,6 @@ class Film1kProvider : MainAPI() {
     ): Boolean {
         val doc = app.get(data, verify = false).document
         val extractedUrls = mutableSetOf<String>()
-
-        val imdbId = doc.selectFirst("#Ez-Wp > div > div.Container > div > aside a[href*=imdb.com/title/]")
-            ?.attr("href")
-            ?.let { Regex("tt\\d+").find(it)?.value }
-        if (imdbId != null) {
-            invokeOpenSubtitles(imdbId, subtitleCallback)
-        }
 
         fun realSrc(el: Element): String? {
             return el.attr("data-src").takeIf { it.isNotBlank() }
