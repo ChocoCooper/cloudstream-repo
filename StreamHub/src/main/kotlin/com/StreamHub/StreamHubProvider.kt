@@ -3,6 +3,7 @@ package com.StreamHub
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -161,6 +162,24 @@ class StreamHubProvider : MainAPI() {
         }
     }
 
+    private suspend fun fetchShowsStManifest(tmdbId: String): JSONObject? {
+        val url = "https://api.shows.st/movie?id=$tmdbId&mode=json&sources=vidapi"
+        val headers = mapOf(
+            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer" to "https://111movies.net/movie/$tmdbId",
+            "Accept" to "application/json, text/plain, */*",
+            "X-Requested-With" to "XMLHttpRequest"
+        )
+        return try {
+            val response = app.get(url, headers = headers, timeout = 15L)
+            if (response.isSuccessful) {
+                JSONObject(response.text)
+            } else null
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -190,12 +209,81 @@ class StreamHubProvider : MainAPI() {
         }
 
         return coroutineScope {
-            val extractorJobs = listOf(
-                async { VidcoreExtractor.getStream(embedData, callback) },
-                async { VidlinkExtractor.getStream(embedData, callback) },
-                async { KisskhExtractor.getStream(cleanTitle, year, season, episode, mappedSubCallback, callback) },
-                async { OnetouchtvExtractor.getStream(cleanTitle, year, season, episode, mappedSubCallback, callback) }
-            )
+            val extractorJobs = mutableListOf<Deferred<Boolean>>()
+
+            // Existing extractors
+            extractorJobs.add(async { VidcoreExtractor.getStream(embedData, callback) })
+            extractorJobs.add(async { VidlinkExtractor.getStream(embedData, callback) })
+            extractorJobs.add(async { KisskhExtractor.getStream(cleanTitle, year, season, episode, mappedSubCallback, callback) })
+            extractorJobs.add(async { OnetouchtvExtractor.getStream(cleanTitle, year, season, episode, mappedSubCallback, callback) })
+
+            // New 111movies extractor (only for movies)
+            if (isMovie) {
+                extractorJobs.add(
+                    async {
+                        try {
+                            val json = fetchShowsStManifest(tmdbId) ?: return@async false
+                            val sourceObj = json.optJSONObject("source") ?: return@async false
+                            val manifest = sourceObj.optString("manifest")
+                            if (manifest.isBlank()) return@async false
+
+                            var currentBandwidth = 0
+                            var currentResolution = ""
+                            var currentCodecs = ""
+
+                            manifest.lines().forEach { line ->
+                                val trimmed = line.trim()
+                                when {
+                                    trimmed.startsWith("#EXT-X-STREAM-INF") -> {
+                                        val attrs = trimmed.substringAfter(":").split(",").mapNotNull { attr ->
+                                            val parts = attr.split("=")
+                                            if (parts.size == 2) parts[0] to parts[1].trim('"') else null
+                                        }.toMap()
+                                        currentBandwidth = attrs["BANDWIDTH"]?.toIntOrNull() ?: 0
+                                        currentResolution = attrs["RESOLUTION"] ?: ""
+                                        currentCodecs = attrs["CODECS"] ?: ""
+                                    }
+                                    trimmed.startsWith("http") -> {
+                                        val quality = when {
+                                            currentBandwidth > 4000000 -> Qualities.P1080.value
+                                            currentBandwidth > 2000000 -> Qualities.P720.value
+                                            currentBandwidth > 1000000 -> Qualities.P480.value
+                                            else -> Qualities.P360.value
+                                        }
+                                        val linkName = if (currentResolution.isNotBlank()) "$currentResolution ($currentCodecs)" else "HLS"
+                                        callback.invoke(
+                                            ExtractorLink(
+                                                source = "111movies",
+                                                name = linkName,
+                                                url = trimmed,
+                                                referer = "https://111movies.net/",
+                                                quality = quality,
+                                                isM3u8 = true
+                                            )
+                                        )
+                                    }
+                                }
+                            }
+
+                            // Add English subtitles if available
+                            val subtitlesArray = json.optJSONArray("subtitles")
+                            if (subtitlesArray != null) {
+                                for (i in 0 until subtitlesArray.length()) {
+                                    val subObj = subtitlesArray.optJSONObject(i) ?: continue
+                                    val subUrl = subObj.optString("file")
+                                    val label = subObj.optString("label")
+                                    if (subUrl.isNotBlank() && label.contains("English", ignoreCase = true)) {
+                                        subtitleCallback.invoke(SubtitleFile("English", subUrl))
+                                    }
+                                }
+                            }
+                            true
+                        } catch (e: Exception) {
+                            false
+                        }
+                    }
+                )
+            }
 
             val subJobs = listOf(
                 async {
