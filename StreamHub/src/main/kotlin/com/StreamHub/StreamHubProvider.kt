@@ -193,9 +193,8 @@ class StreamHubProvider : MainAPI() {
         return coroutineScope {
             val extractorJobs = mutableListOf<Deferred<Boolean>>()
 
-            // 111movies extractor – NO context parameter needed anymore
             extractorJobs.add(async {
-                ShowsStExtractor.getStreams(
+                VidloveExtractor.getStreams(
                     tmdbId = tmdbId,
                     isMovie = isMovie,
                     season = season,
