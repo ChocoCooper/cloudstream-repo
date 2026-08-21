@@ -37,7 +37,7 @@ object ShowsStExtractor {
         val pageUrl = if (isMovie) "https://111movies.net/movie/$tmdbId"
                       else "https://111movies.net/tv/$tmdbId/$season/$episode"
 
-        val semaphore = Semaphore(2)  // Limit concurrent WebViews
+        val semaphore = Semaphore(2)
         val addedSubtitles = mutableSetOf<String>()
 
         return coroutineScope {
@@ -128,8 +128,8 @@ object ShowsStExtractor {
             suspendCancellableCoroutine { continuation ->
                 var webView: WebView? = null
                 try {
-                    // Get activity context from CloudStream
-                    val activity = ActivityGetter.getActivity()
+                    // Use UIHelper to get the current activity (standard in Cloudstream)
+                    val activity = UIHelper.getActivity()
                     if (activity == null) {
                         if (continuation.isActive) continuation.resume(null)
                         return@suspendCancellableCoroutine
