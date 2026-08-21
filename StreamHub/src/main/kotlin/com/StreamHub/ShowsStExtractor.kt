@@ -23,9 +23,6 @@ object ShowsStExtractor {
     private const val TAG = "ShowsStExtractor"
     private const val SOURCE_PREFIX = "111movies"
 
-    /**
-     * Main entry point – no Context parameter needed; uses CloudStreamApp.context internally.
-     */
     suspend fun getStreams(
         tmdbId: String,
         isMovie: Boolean,
@@ -36,7 +33,14 @@ object ShowsStExtractor {
     ): Boolean {
         Log.d(TAG, "getStreams called: tmdbId=$tmdbId, isMovie=$isMovie, season=$season, episode=$episode")
 
-        val sources = listOf("vidapi", "moviebox2", "cinefreak", "warden", "ipcloud", "tcloud", "moviebox")
+        // 1. Fetch available sources dynamically
+        val sources = fetchAvailableSources(isMovie)
+        if (sources.isNullOrEmpty()) {
+            Log.w(TAG, "No sources available for ${if (isMovie) "movie" else "tv"} - cannot proceed")
+            return false
+        }
+        Log.d(TAG, "Available sources: $sources")
+
         val pageUrl = if (isMovie) "https://111movies.net/movie/$tmdbId"
                       else "https://111movies.net/tv/$tmdbId/$season/$episode"
 
@@ -61,6 +65,38 @@ object ShowsStExtractor {
             }
             val results = jobs.awaitAll()
             results.any { it }
+        }
+    }
+
+    /**
+     * Fetches the list of available sources from api.shows.st/source-order.
+     * Uses WebView to bypass Cloudflare/TLS fingerprinting.
+     */
+    private suspend fun fetchAvailableSources(isMovie: Boolean): List<String>? {
+        val url = "https://api.shows.st/source-order"
+        val headers = mapOf(
+            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept" to "application/json, text/plain, */*",
+            "X-Requested-With" to "XMLHttpRequest"
+        )
+        val jsonText = withTimeoutOrNull(15000) { fetchUrlWithWebView(url, headers) }
+        if (jsonText.isNullOrBlank()) {
+            Log.e(TAG, "Failed to fetch source-order")
+            return null
+        }
+        return try {
+            val json = JSONObject(jsonText)
+            val key = if (isMovie) "movie" else "tv"
+            val arr = json.optJSONArray(key)
+            if (arr == null) {
+                Log.e(TAG, "No '$key' array in source-order")
+                null
+            } else {
+                (0 until arr.length()).map { arr.getString(it) }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error parsing source-order", e)
+            null
         }
     }
 
@@ -134,7 +170,6 @@ object ShowsStExtractor {
             suspendCancellableCoroutine { continuation ->
                 var webView: WebView? = null
                 try {
-                    // Use the global application context from CloudStream
                     val context = CloudStreamApp.context
                     if (context == null) {
                         Log.e(TAG, "CloudStreamApp.context is null")
