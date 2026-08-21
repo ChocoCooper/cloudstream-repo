@@ -198,10 +198,9 @@ class StreamHubProvider : MainAPI() {
                 OnetouchtvExtractor.getStream(cleanTitle, year, season, episode, mappedSubCallback, callback)
             })
 
-            // 111movies extractor – pass context explicitly
+            // 111movies extractor – NO context parameter needed anymore
             extractorJobs.add(async {
                 ShowsStExtractor.getStreams(
-                    context = this@StreamHubProvider.context,
                     tmdbId = tmdbId,
                     isMovie = isMovie,
                     season = season,
