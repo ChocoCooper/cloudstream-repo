@@ -29,6 +29,18 @@ object ShowsStExtractor {
     private const val TAG = "ShowsStExtractor"
     private const val SOURCE_PREFIX = "111movies"
 
+    /** Extracts "scheme://host[:port]" from a full URL, with a trailing slash. */
+    private fun originWithSlash(url: String): String {
+        return try {
+            val u = java.net.URL(url)
+            val portPart = if (u.port != -1 && u.port != u.defaultPort) ":${u.port}" else ""
+            "${u.protocol}://${u.host}$portPart/"
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to parse origin from '$url', falling back to it as-is: $e")
+            if (url.endsWith("/")) url else "$url/"
+        }
+    }
+
     suspend fun getStreams(
         tmdbId: String,
         isMovie: Boolean,
@@ -74,13 +86,24 @@ object ShowsStExtractor {
                 return false
             }
 
+            // Use the ACTUAL page the session settled on (e.g.
+            // https://player.vidlove.cc/embed/movie/24428 after redirect),
+            // not the original 111movies.net URL we navigated to. The manifest
+            // host (d.shows.st) validates Referer against this real origin --
+            // using the pre-redirect domain here is exactly what caused
+            // ExoPlayer's playback requests to get 403'd even after the API
+            // fetch itself succeeded.
+            val realReferer = session.settledUrl?.let { originWithSlash(it) }
+                ?: originWithSlash(pageUrl)
+            Log.d(TAG, "Using referer for extracted links: $realReferer")
+
             coroutineScope {
                 val jobs = sources.map { source ->
                     async {
                         try {
                             processSource(
                                 session, source, tmdbId, isMovie, season, episode,
-                                callback, subtitleCallback, addedSubtitles
+                                realReferer, callback, subtitleCallback, addedSubtitles
                             )
                         } catch (e: Exception) {
                             Log.e(TAG, "Error processing source $source", e)
@@ -160,6 +183,7 @@ object ShowsStExtractor {
         isMovie: Boolean,
         season: Int?,
         episode: Int?,
+        referer: String,
         callback: (ExtractorLink) -> Unit,
         subtitleCallback: (SubtitleFile) -> Unit,
         addedSubtitles: MutableSet<String>
@@ -200,7 +224,7 @@ object ShowsStExtractor {
         }
 
         Log.d(TAG, "Manifest found for $source")
-        parseHlsManifest(manifest, "$SOURCE_PREFIX [$source]", callback)
+        parseHlsManifest(manifest, "$SOURCE_PREFIX [$source]", referer, callback)
         addShowsStSubtitles(json, subtitleCallback, addedSubtitles)
         return true
     }
@@ -271,6 +295,7 @@ object ShowsStExtractor {
     private suspend fun parseHlsManifest(
         manifest: String,
         sourceName: String,
+        referer: String,
         callback: (ExtractorLink) -> Unit
     ) {
         var currentBandwidth = 0
@@ -301,7 +326,7 @@ object ShowsStExtractor {
                             url = trimmed,
                             type = ExtractorLinkType.M3U8
                         ) {
-                            this.referer = "https://111movies.net/"
+                            this.referer = referer
                             this.quality = quality
                         }
                     )
@@ -350,6 +375,17 @@ object ShowsStExtractor {
         private val mainHandler = Handler(Looper.getMainLooper())
 
         /**
+         * The page URL the session actually settled on, AFTER following any
+         * redirect (e.g. 111movies.net/movie/id -> player.vidlove.cc/embed/movie/id).
+         * This is the real Origin that api.shows.st / d.shows.st validate
+         * requests against, so it must be used (not the original pageUrl
+         * passed to [open]) when building Referer headers for extracted links.
+         */
+        @Volatile
+        var settledUrl: String? = null
+            private set
+
+        /**
          * JS-exposed bridge. The page's injected fetch script calls
          * AndroidBridge.onFetchResult(requestId, resultText) once its
          * promise resolves (or rejects, in which case resultText carries
@@ -388,7 +424,8 @@ object ShowsStExtractor {
                             settleRunnable?.let { mainHandler.removeCallbacks(it) }
                             val runnable = Runnable {
                                 if (!ready.isCompleted) {
-                                    Log.d(TAG, "Content page session ready at: ${webView?.url}")
+                                    settledUrl = webView?.url
+                                    Log.d(TAG, "Content page session ready at: $settledUrl")
                                     ready.complete(true)
                                 }
                             }
