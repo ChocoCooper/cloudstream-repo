@@ -121,6 +121,7 @@ object ShowsStExtractor {
     /**
      * Loads a URL in a hidden WebView and returns the page's text content.
      * This bypasses TLS fingerprinting because it uses the system browser engine.
+     * Uses appContext (Application context) to avoid Activity dependency.
      */
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun fetchUrlWithWebView(url: String, headers: Map<String, String>): String? =
@@ -128,14 +129,15 @@ object ShowsStExtractor {
             suspendCancellableCoroutine { continuation ->
                 var webView: WebView? = null
                 try {
-                    // Use UIHelper to get the current activity (standard in Cloudstream)
-                    val activity = UIHelper.getActivity()
-                    if (activity == null) {
+                    // Use the global application context provided by CloudStream
+                    val context = appContext
+                    if (context == null) {
+                        Log.e(TAG, "appContext is null")
                         if (continuation.isActive) continuation.resume(null)
                         return@suspendCancellableCoroutine
                     }
 
-                    webView = WebView(activity).apply {
+                    webView = WebView(context).apply {
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
                         settings.blockNetworkImage = true
