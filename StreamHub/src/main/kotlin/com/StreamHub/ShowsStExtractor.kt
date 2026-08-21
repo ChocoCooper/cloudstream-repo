@@ -1,6 +1,9 @@
 package com.StreamHub
 
+import android.annotation.SuppressLint
 import android.util.Log
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import kotlinx.coroutines.Dispatchers
@@ -9,25 +12,16 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
-import okhttp3.Request
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
-import java.util.concurrent.TimeUnit
+import kotlin.coroutines.resume
 
 object ShowsStExtractor {
 
     private const val TAG = "ShowsStExtractor"
     private const val SOURCE_PREFIX = "111movies"
-
-    // Create a single OkHttp client with DdosGuardKiller interceptor
-    private val client by lazy {
-        OkHttpClient.Builder()
-            .addInterceptor(DdosGuardKiller(alwaysBypass = false))
-            .connectTimeout(20, TimeUnit.SECONDS)
-            .readTimeout(20, TimeUnit.SECONDS)
-            .build()
-    }
 
     suspend fun getStreams(
         tmdbId: String,
@@ -43,7 +37,7 @@ object ShowsStExtractor {
         val pageUrl = if (isMovie) "https://111movies.net/movie/$tmdbId"
                       else "https://111movies.net/tv/$tmdbId/$season/$episode"
 
-        val semaphore = Semaphore(2)
+        val semaphore = Semaphore(2)  // Limit concurrent WebViews
         val addedSubtitles = mutableSetOf<String>()
 
         return coroutineScope {
@@ -93,34 +87,16 @@ object ShowsStExtractor {
             "X-Requested-With" to "XMLHttpRequest"
         )
 
-        // Build OkHttp request
-        val requestBuilder = Request.Builder()
-            .url(apiUrl)
-            .get()
-        headers.forEach { (key, value) -> requestBuilder.header(key, value) }
-        val request = requestBuilder.build()
-
-        // Execute with the custom client (which includes DdosGuardKiller interceptor)
-        val response = withContext(Dispatchers.IO) {
-            client.newCall(request).execute()
-        }
-
-        Log.d(TAG, "API response for $source: ${response.code}")
-        if (!response.isSuccessful) {
-            response.close()
-            Log.w(TAG, "Source $source failed: ${response.code}")
+        // Fetch JSON using WebView (bypasses TLS fingerprint)
+        val jsonText = withTimeoutOrNull(30000) { fetchUrlWithWebView(apiUrl, headers) }
+        if (jsonText.isNullOrBlank()) {
+            Log.w(TAG, "WebView returned empty or timed out for $source")
             return false
         }
 
-        val body = response.body?.string()
-        response.close()
-        if (body.isNullOrBlank()) {
-            Log.w(TAG, "Empty body for $source")
-            return false
-        }
-
+        Log.d(TAG, "Got response for $source, length=${jsonText.length}")
         val json = try {
-            JSONObject(body)
+            JSONObject(jsonText)
         } catch (e: Exception) {
             Log.e(TAG, "JSON parse error for $source: $e")
             return false
@@ -141,6 +117,55 @@ object ShowsStExtractor {
         addShowsStSubtitles(json, subtitleCallback, addedSubtitles)
         return true
     }
+
+    /**
+     * Loads a URL in a hidden WebView and returns the page's text content.
+     * This bypasses TLS fingerprinting because it uses the system browser engine.
+     */
+    @SuppressLint("SetJavaScriptEnabled")
+    private suspend fun fetchUrlWithWebView(url: String, headers: Map<String, String>): String? =
+        withContext(Dispatchers.Main) {
+            suspendCancellableCoroutine { continuation ->
+                var webView: WebView? = null
+                try {
+                    // Get activity context from CloudStream
+                    val activity = ActivityGetter.getActivity()
+                    if (activity == null) {
+                        if (continuation.isActive) continuation.resume(null)
+                        return@suspendCancellableCoroutine
+                    }
+
+                    webView = WebView(activity).apply {
+                        settings.javaScriptEnabled = true
+                        settings.domStorageEnabled = true
+                        settings.blockNetworkImage = true
+                        settings.blockNetworkLoads = false
+                        webViewClient = object : WebViewClient() {
+                            override fun onPageFinished(view: WebView?, url: String?) {
+                                super.onPageFinished(view, url)
+                                view?.evaluateJavascript(
+                                    "(function() { return document.body ? document.body.innerText : document.documentElement.innerText; })();"
+                                ) { result ->
+                                    val cleaned = result?.trim()?.removeSurrounding("\"") ?: ""
+                                    if (continuation.isActive) {
+                                        continuation.resume(cleaned)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    webView?.loadUrl(url, headers)
+                } catch (e: Exception) {
+                    Log.e(TAG, "WebView error: $e")
+                    if (continuation.isActive) continuation.resume(null)
+                }
+
+                continuation.invokeOnCancellation {
+                    webView?.destroy()
+                    webView = null
+                }
+            }
+        }
 
     private suspend fun parseHlsManifest(
         manifest: String,
