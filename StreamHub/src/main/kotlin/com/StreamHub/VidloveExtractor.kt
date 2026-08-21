@@ -210,7 +210,7 @@ object VidloveExtractor {
         return true
     }
 
-    private fun parseRawManifest(
+    private suspend fun parseRawManifest(
         manifest: String, 
         referer: String, 
         callback: (ExtractorLink) -> Unit
