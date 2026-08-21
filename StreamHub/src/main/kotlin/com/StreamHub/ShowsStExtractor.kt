@@ -3,12 +3,12 @@ package com.StreamHub
 import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
-import org.json.JSONObject
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import org.json.JSONObject
 
 object ShowsStExtractor {
 
@@ -29,16 +29,18 @@ object ShowsStExtractor {
         val pageUrl = if (isMovie) "https://111movies.net/movie/$tmdbId"
                       else "https://111movies.net/tv/$tmdbId/$season/$episode"
 
-        // Limit concurrent WebView requests to avoid overload
-        val semaphore = Semaphore(2)
-        val addedSubtitles = mutableSetOf<String>()  // To avoid duplicate subtitle languages
+        val semaphore = Semaphore(2)  // Limit concurrent WebViews
+        val addedSubtitles = mutableSetOf<String>()
 
         return coroutineScope {
             val jobs = sources.map { source ->
                 async {
                     semaphore.withPermit {
                         try {
-                            processSource(source, tmdbId, isMovie, season, episode, pageUrl, callback, subtitleCallback, addedSubtitles)
+                            processSource(
+                                source, tmdbId, isMovie, season, episode,
+                                pageUrl, callback, subtitleCallback, addedSubtitles
+                            )
                         } catch (e: Exception) {
                             Log.e(TAG, "Error processing source $source", e)
                             false
@@ -70,26 +72,33 @@ object ShowsStExtractor {
             "https://api.shows.st/tv?id=$tmdbId&season=$season&episode=$episode&mode=json&sources=$source"
         }
 
-        // Use CloudflareKiller to bypass TLS fingerprinting / Cloudflare
-        val killer = CloudflareKiller()
-        val response = killer.get(
+        val headers = mapOf(
+            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer" to pageUrl,
+            "Accept" to "application/json, text/plain, */*",
+            "X-Requested-With" to "XMLHttpRequest"
+        )
+
+        // Use CloudflareKiller to fetch the JSON (WebView-based, bypasses TLS fingerprint)
+        val jsonText = CloudflareKiller().get(
             url = apiUrl,
-            headers = mapOf(
-                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Referer" to pageUrl,
-                "Accept" to "application/json, text/plain, */*",
-                "X-Requested-With" to "XMLHttpRequest"
-            ),
+            headers = headers,
             timeout = 20L
         )
 
-        Log.d(TAG, "API status for $source: ${response.status}")
-        if (!response.isSuccessful) {
-            Log.w(TAG, "Source $source failed: ${response.status}")
+        if (jsonText.isNullOrBlank()) {
+            Log.w(TAG, "CloudflareKiller returned empty for $source")
             return false
         }
 
-        val json = JSONObject(response.text)
+        Log.d(TAG, "Got response for $source, length=${jsonText.length}")
+        val json = try {
+            JSONObject(jsonText)
+        } catch (e: Exception) {
+            Log.e(TAG, "JSON parse error for $source: $e")
+            return false
+        }
+
         val sourceObj = json.optJSONObject("source") ?: run {
             Log.w(TAG, "No 'source' object for $source")
             return false
@@ -102,20 +111,16 @@ object ShowsStExtractor {
 
         Log.d(TAG, "Manifest found for $source")
         parseHlsManifest(manifest, "$SOURCE_PREFIX [$source]", callback)
-
-        // Add subtitles (deduplicated)
         addShowsStSubtitles(json, subtitleCallback, addedSubtitles)
         return true
     }
 
-    private fun parseHlsManifest(
+    private suspend fun parseHlsManifest(
         manifest: String,
         sourceName: String,
         callback: (ExtractorLink) -> Unit
     ) {
         var currentBandwidth = 0
-        var currentResolution = ""
-        var currentCodecs = ""
 
         manifest.lines().forEach { line ->
             val trimmed = line.trim()
@@ -126,11 +131,8 @@ object ShowsStExtractor {
                         if (parts.size == 2) parts[0] to parts[1].trim('"') else null
                     }.toMap()
                     currentBandwidth = attrs["BANDWIDTH"]?.toIntOrNull() ?: 0
-                    currentResolution = attrs["RESOLUTION"] ?: ""
-                    currentCodecs = attrs["CODECS"] ?: ""
                 }
                 trimmed.startsWith("http") -> {
-                    // Determine quality for internal use (not shown in source name)
                     val quality = when {
                         currentBandwidth > 4000000 -> Qualities.P1080.value
                         currentBandwidth > 2000000 -> Qualities.P720.value
