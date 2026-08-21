@@ -118,8 +118,8 @@ class StreamHubProvider : MainAPI() {
         return buildLoadResponse(details, isMovie, tmdbId)
     }
 
-    // Helper to build LoadResponse (movie or TV)
-    private fun buildLoadResponse(details: TmdbDetails, isMovie: Boolean, tmdbId: String): LoadResponse? {
+    // Helper to build LoadResponse (movie or TV) - now suspend
+    private suspend fun buildLoadResponse(details: TmdbDetails, isMovie: Boolean, tmdbId: String): LoadResponse? {
         val title       = details.title ?: details.name ?: return null
         val poster      = details.posterPath?.let { "$imageBase$it" }
         val backdrop    = details.backdropPath?.let { "$backdropBase$it" }
@@ -166,102 +166,6 @@ class StreamHubProvider : MainAPI() {
         }
     }
 
-    // ------------------- Stream Extraction -------------------
-    private suspend fun fetchShowsStManifest(tmdbId: String): JSONObject? {
-        val url = "https://api.shows.st/movie?id=$tmdbId&mode=json&sources=vidapi"
-        val headers = mapOf(
-            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer" to "https://111movies.net/movie/$tmdbId",
-            "Accept" to "application/json, text/plain, */*",
-            "X-Requested-With" to "XMLHttpRequest"
-        )
-        return try {
-            val response = app.get(url, headers = headers, timeout = 15L)
-            if (response.isSuccessful) JSONObject(response.text) else null
-        } catch (e: Exception) { null }
-    }
-
-    // Helper to parse HLS master playlist and invoke callback for each variant
-    private fun parseHlsManifest(manifest: String, sourceName: String, callback: (ExtractorLink) -> Unit) {
-        var currentBandwidth = 0
-        var currentResolution = ""
-        var currentCodecs = ""
-
-        manifest.lines().forEach { line ->
-            val trimmed = line.trim()
-            when {
-                trimmed.startsWith("#EXT-X-STREAM-INF") -> {
-                    val attrs = trimmed.substringAfter(":").split(",").mapNotNull { attr ->
-                        val parts = attr.split("=")
-                        if (parts.size == 2) parts[0] to parts[1].trim('"') else null
-                    }.toMap()
-                    currentBandwidth = attrs["BANDWIDTH"]?.toIntOrNull() ?: 0
-                    currentResolution = attrs["RESOLUTION"] ?: ""
-                    currentCodecs = attrs["CODECS"] ?: ""
-                }
-                trimmed.startsWith("http") -> {
-                    val quality = when {
-                        currentBandwidth > 4000000 -> Qualities.P1080.value
-                        currentBandwidth > 2000000 -> Qualities.P720.value
-                        currentBandwidth > 1000000 -> Qualities.P480.value
-                        else -> Qualities.P360.value
-                    }
-                    val linkName = if (currentResolution.isNotBlank()) "$currentResolution ($currentCodecs)" else "HLS"
-                    callback(
-                        newExtractorLink(
-                            source = sourceName,
-                            name = linkName,
-                            url = trimmed,
-                            referer = "https://111movies.net/",
-                            quality = quality,
-                            isM3u8 = true
-                        )
-                    )
-                }
-            }
-        }
-    }
-
-    // Add English subtitles from api.shows.st response
-    private fun addShowsStSubtitles(json: JSONObject, subtitleCallback: (SubtitleFile) -> Unit) {
-        val subtitlesArray = json.optJSONArray("subtitles") ?: return
-        for (i in 0 until subtitlesArray.length()) {
-            val subObj = subtitlesArray.optJSONObject(i) ?: continue
-            val subUrl = subObj.optString("file")
-            val label = subObj.optString("label")
-            if (subUrl.isNotBlank() && label.contains("English", ignoreCase = true)) {
-                subtitleCallback.invoke(SubtitleFile("English", subUrl))
-            }
-        }
-    }
-
-    // Fetch and add OpenSubtitles
-    private suspend fun addOpenSubtitles(
-        imdbId: String?,
-        isMovie: Boolean,
-        season: Int?,
-        episode: Int?,
-        subtitleCallback: (SubtitleFile) -> Unit
-    ) {
-        if (imdbId == null) return
-        try {
-            val osUrl = if (isMovie) {
-                "https://opensubtitles-v3.strem.io/subtitles/movie/$imdbId.json"
-            } else {
-                "https://opensubtitles-v3.strem.io/subtitles/series/$imdbId:$season:$episode.json"
-            }
-            val subs = JSONObject(app.get(osUrl, timeout = 8L).text).optJSONArray("subtitles") ?: return
-            for (i in 0 until subs.length()) {
-                val sub = subs.getJSONObject(i)
-                val url = sub.optString("url")
-                val lang = expandLang(sub.optString("lang"))
-                if (url.isNotBlank() && lang.equals("English", ignoreCase = true)) {
-                    subtitleCallback.invoke(SubtitleFile(lang, url))
-                }
-            }
-        } catch (e: Exception) {}
-    }
-
     // ------------------- Load Links -------------------
     override suspend fun loadLinks(
         data: String,
@@ -275,14 +179,10 @@ class StreamHubProvider : MainAPI() {
         val season    = if (!isMovie) Regex("""/tv/\d+/(\d+)""").find(cleanData)?.groupValues?.get(1)?.toIntOrNull() else null
         val episode   = if (!isMovie) Regex("""/tv/\d+/\d+/(\d+)""").find(cleanData)?.groupValues?.get(1)?.toIntOrNull() else null
         val imdbId    = data.substringAfter("imdb=", "").substringBefore("&").takeIf { it.isNotBlank() && it != "null" }
-
-        // Fetch TMDB metadata (needed for Onetouchtv)
         val metaUrl = if (isMovie) "$tmdbBase/movie/$tmdbId?api_key={API_KEY}" else "$tmdbBase/tv/$tmdbId?api_key={API_KEY}"
         val details = fetchTmdb<TmdbDetails>(metaUrl) ?: return false
         val cleanTitle = details.title ?: details.name ?: return false
         val year = (details.releaseDate ?: details.firstAirDate)?.substringBefore("-")
-
-        // Filter to only English subs for extractors that need it
         val mappedSubCallback = { sub: SubtitleFile ->
             val expandedLang = expandLang(sub.lang)
             if (expandedLang.equals("English", ignoreCase = true)) {
@@ -298,27 +198,42 @@ class StreamHubProvider : MainAPI() {
                 OnetouchtvExtractor.getStream(cleanTitle, year, season, episode, mappedSubCallback, callback)
             })
 
-            // 111movies extractor (movies only)
-            if (isMovie) {
-                extractorJobs.add(async {
-                    try {
-                        val json = fetchShowsStManifest(tmdbId) ?: return@async false
-                        val sourceObj = json.optJSONObject("source") ?: return@async false
-                        val manifest = sourceObj.optString("manifest")
-                        if (manifest.isBlank()) return@async false
-
-                        parseHlsManifest(manifest, "111movies", callback)
-                        addShowsStSubtitles(json, subtitleCallback)
-                        true
-                    } catch (e: Exception) {
-                        false
-                    }
-                })
-            }
+            // 111movies extractor (movies and TV)
+            extractorJobs.add(async {
+                ShowsStExtractor.getStream(
+                    tmdbId = tmdbId,
+                    isMovie = isMovie,
+                    season = season,
+                    episode = episode,
+                    subtitleCallback = subtitleCallback,
+                    callback = callback
+                )
+            })
 
             // OpenSubtitles (parallel)
             val subJobs = listOf(
-                async { addOpenSubtitles(imdbId, isMovie, season, episode, subtitleCallback) }
+                async {
+                    if (imdbId != null) {
+                        try {
+                            val osUrl = if (isMovie) {
+                                "https://opensubtitles-v3.strem.io/subtitles/movie/$imdbId.json"
+                            } else {
+                                "https://opensubtitles-v3.strem.io/subtitles/series/$imdbId:$season:$episode.json"
+                            }
+                            val subs = JSONObject(app.get(osUrl, timeout = 8L).text).optJSONArray("subtitles")
+                            if (subs != null) {
+                                for (i in 0 until subs.length()) {
+                                    val sub = subs.getJSONObject(i)
+                                    val url = sub.optString("url")
+                                    val lang = expandLang(sub.optString("lang"))
+                                    if (url.isNotBlank() && lang.equals("English", ignoreCase = true)) {
+                                        subtitleCallback.invoke(SubtitleFile(lang, url))
+                                    }
+                                }
+                            }
+                        } catch (e: Exception) {}
+                    }
+                }
             )
 
             val results = extractorJobs.awaitAll()
