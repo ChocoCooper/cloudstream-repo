@@ -3,17 +3,31 @@ package com.StreamHub
 import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
+import okhttp3.OkHttpClient
+import okhttp3.Request
 import org.json.JSONObject
+import java.util.concurrent.TimeUnit
 
 object ShowsStExtractor {
 
     private const val TAG = "ShowsStExtractor"
     private const val SOURCE_PREFIX = "111movies"
+
+    // Create a single OkHttp client with DdosGuardKiller interceptor
+    private val client by lazy {
+        OkHttpClient.Builder()
+            .addInterceptor(DdosGuardKiller(alwaysBypass = false))
+            .connectTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(20, TimeUnit.SECONDS)
+            .build()
+    }
 
     suspend fun getStreams(
         tmdbId: String,
@@ -29,7 +43,7 @@ object ShowsStExtractor {
         val pageUrl = if (isMovie) "https://111movies.net/movie/$tmdbId"
                       else "https://111movies.net/tv/$tmdbId/$season/$episode"
 
-        val semaphore = Semaphore(2)  // Limit concurrent WebViews
+        val semaphore = Semaphore(2)
         val addedSubtitles = mutableSetOf<String>()
 
         return coroutineScope {
@@ -79,21 +93,34 @@ object ShowsStExtractor {
             "X-Requested-With" to "XMLHttpRequest"
         )
 
-        // Use CloudflareKiller to fetch the JSON (WebView-based, bypasses TLS fingerprint)
-        val jsonText = CloudflareKiller().get(
-            url = apiUrl,
-            headers = headers,
-            timeout = 20L
-        )
+        // Build OkHttp request
+        val requestBuilder = Request.Builder()
+            .url(apiUrl)
+            .get()
+        headers.forEach { (key, value) -> requestBuilder.header(key, value) }
+        val request = requestBuilder.build()
 
-        if (jsonText.isNullOrBlank()) {
-            Log.w(TAG, "CloudflareKiller returned empty for $source")
+        // Execute with the custom client (which includes DdosGuardKiller interceptor)
+        val response = withContext(Dispatchers.IO) {
+            client.newCall(request).execute()
+        }
+
+        Log.d(TAG, "API response for $source: ${response.code}")
+        if (!response.isSuccessful) {
+            response.close()
+            Log.w(TAG, "Source $source failed: ${response.code}")
             return false
         }
 
-        Log.d(TAG, "Got response for $source, length=${jsonText.length}")
+        val body = response.body?.string()
+        response.close()
+        if (body.isNullOrBlank()) {
+            Log.w(TAG, "Empty body for $source")
+            return false
+        }
+
         val json = try {
-            JSONObject(jsonText)
+            JSONObject(body)
         } catch (e: Exception) {
             Log.e(TAG, "JSON parse error for $source: $e")
             return false
