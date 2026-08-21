@@ -1,22 +1,27 @@
 package com.StreamHub
 
 import android.annotation.SuppressLint
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
+import android.webkit.JavascriptInterface
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import kotlinx.coroutines.CancellableContinuation
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import org.json.JSONTokener
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.coroutines.resume
 
 object ShowsStExtractor {
@@ -45,17 +50,37 @@ object ShowsStExtractor {
         val pageUrl = if (isMovie) "https://111movies.net/movie/$tmdbId"
                       else "https://111movies.net/tv/$tmdbId/$season/$episode"
 
-        val semaphore = Semaphore(2)
+        val context = CloudStreamApp.context
+        if (context == null) {
+            Log.e(TAG, "CloudStreamApp.context is null")
+            return false
+        }
+
+        // IMPORTANT: api.shows.st validates the request's Origin against the
+        // real embed page (111movies.net redirects to player.vidlove.cc/embed/...).
+        // A raw request/navigation straight to the API URL has no Origin context
+        // and gets rejected with 403 "forbidden" for EVERY source, regardless of
+        // source name. The fix is to load the actual content page once (following
+        // its redirect), then fire fetch() calls from *inside that page's own JS
+        // context* -- exactly what the site's own embedded script does -- so the
+        // browser attaches the correct Origin/cookies automatically.
+        val session = WebViewPageSession(context)
         val addedSubtitles = mutableSetOf<String>()
 
-        return coroutineScope {
-            val jobs = sources.map { source ->
-                async {
-                    semaphore.withPermit {
+        return try {
+            val opened = withTimeoutOrNull(20000) { session.open(pageUrl) } ?: false
+            if (!opened) {
+                Log.e(TAG, "Failed to open/settle content page for session")
+                return false
+            }
+
+            coroutineScope {
+                val jobs = sources.map { source ->
+                    async {
                         try {
                             processSource(
-                                source, tmdbId, isMovie, season, episode,
-                                pageUrl, callback, subtitleCallback, addedSubtitles
+                                session, source, tmdbId, isMovie, season, episode,
+                                callback, subtitleCallback, addedSubtitles
                             )
                         } catch (e: Exception) {
                             Log.e(TAG, "Error processing source $source", e)
@@ -63,15 +88,19 @@ object ShowsStExtractor {
                         }
                     }
                 }
+                val results = jobs.awaitAll()
+                results.any { it }
             }
-            val results = jobs.awaitAll()
-            results.any { it }
+        } finally {
+            session.close()
         }
     }
 
     /**
      * Fetches the list of available sources from api.shows.st/source-order.
-     * Uses WebView to bypass Cloudflare/TLS fingerprinting.
+     * This endpoint has been observed to work fine with a plain direct
+     * WebView navigation (no page/Origin context needed), unlike the
+     * per-movie/per-tv endpoints.
      */
     private suspend fun fetchAvailableSources(isMovie: Boolean): List<String>? {
         val url = "https://api.shows.st/source-order"
@@ -114,7 +143,6 @@ object ShowsStExtractor {
             }
 
             if (arr == null) {
-                // Log the full raw payload so the real key/shape can be identified.
                 Log.e(TAG, "No matching array for isMovie=$isMovie among keys $candidateKeys. Raw response: $jsonText")
             }
 
@@ -126,12 +154,12 @@ object ShowsStExtractor {
     }
 
     private suspend fun processSource(
+        session: WebViewPageSession,
         source: String,
         tmdbId: String,
         isMovie: Boolean,
         season: Int?,
         episode: Int?,
-        pageUrl: String,
         callback: (ExtractorLink) -> Unit,
         subtitleCallback: (SubtitleFile) -> Unit,
         addedSubtitles: MutableSet<String>
@@ -144,17 +172,12 @@ object ShowsStExtractor {
             "https://api.shows.st/tv?id=$tmdbId&season=$season&episode=$episode&mode=json&sources=$source"
         }
 
-        val headers = mapOf(
-            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer" to pageUrl,
-            "Accept" to "application/json, text/plain, */*",
-            "X-Requested-With" to "XMLHttpRequest"
-        )
-
-        // Fetch JSON using WebView (bypasses TLS fingerprint)
-        val jsonText = withTimeoutOrNull(30000) { fetchUrlWithWebView(apiUrl, headers) }
+        // Fetch from inside the already-loaded content page's JS context, so
+        // the request carries the correct Origin/cookies (mirrors the site's
+        // own fetch(url, { mode: 'cors', credentials: 'omit' }) call).
+        val jsonText = withTimeoutOrNull(30000) { session.fetchJson(apiUrl) }
         if (jsonText.isNullOrBlank()) {
-            Log.w(TAG, "WebView returned empty or timed out for $source")
+            Log.w(TAG, "Page-context fetch returned empty or timed out for $source")
             return false
         }
 
@@ -162,7 +185,7 @@ object ShowsStExtractor {
         val json = try {
             JSONObject(jsonText)
         } catch (e: Exception) {
-            Log.e(TAG, "JSON parse error for $source: $e")
+            Log.e(TAG, "JSON parse error for $source: $e. Raw: ${jsonText.take(300)}")
             return false
         }
 
@@ -184,7 +207,9 @@ object ShowsStExtractor {
 
     /**
      * Loads a URL in a hidden WebView and returns the page's text content.
-     * Uses CloudStreamApp.context (global application context) to create the WebView.
+     * Used only for the source-order endpoint, which works fine without a
+     * page/Origin context. Uses CloudStreamApp.context (global application
+     * context) to create the WebView.
      */
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun fetchUrlWithWebView(
@@ -216,9 +241,7 @@ object ShowsStExtractor {
                                     // evaluateJavascript's callback returns a JSON-encoded string
                                     // literal (e.g. "{\"tv\":[\"warden\"]}"), NOT the raw text.
                                     // Decoding it with JSONTokener correctly un-escapes \", \n, \\,
-                                    // unicode escapes, etc. A manual trim()/removeSurrounding("\"")
-                                    // only strips the outer quotes and leaves inner backslash-quote
-                                    // sequences intact, which breaks downstream JSONObject parsing.
+                                    // unicode escapes, etc.
                                     val decoded = try {
                                         JSONTokener(result ?: "null").nextValue() as? String
                                     } catch (e: Exception) {
@@ -302,6 +325,142 @@ object ShowsStExtractor {
                 if (addedSubtitles.add(lang)) {
                     subtitleCallback.invoke(SubtitleFile(lang, subUrl))
                 }
+            }
+        }
+    }
+
+    /**
+     * Manages a single hidden WebView that loads the real content page
+     * (following any redirect, e.g. 111movies.net -> player.vidlove.cc/embed/...)
+     * and lets you fire multiple fetch() calls *from inside that page's JS
+     * context* afterwards, so requests carry the correct Origin/cookies.
+     *
+     * Why not just read evaluateJavascript's return value? Because
+     * evaluateJavascript does NOT await Promises -- it returns immediately
+     * with the synchronous result of the script, which for an async fetch()
+     * call is useless. Instead we inject a JavascriptInterface bridge that
+     * the page's JS explicitly calls once each fetch's promise resolves, and
+     * match results back to Kotlin-side coroutines via a per-call request ID.
+     */
+    private class WebViewPageSession(private val context: android.content.Context) {
+
+        private var webView: WebView? = null
+        private val pendingRequests = ConcurrentHashMap<String, CancellableContinuation<String?>>()
+        private val ready = CompletableDeferred<Boolean>()
+        private val mainHandler = Handler(Looper.getMainLooper())
+
+        /**
+         * JS-exposed bridge. The page's injected fetch script calls
+         * AndroidBridge.onFetchResult(requestId, resultText) once its
+         * promise resolves (or rejects, in which case resultText carries
+         * an error marker so callers can log it).
+         */
+        private inner class Bridge {
+            @JavascriptInterface
+            fun onFetchResult(requestId: String, result: String) {
+                pendingRequests.remove(requestId)?.let { cont ->
+                    if (cont.isActive) cont.resume(result)
+                }
+            }
+        }
+
+        /**
+         * Loads [pageUrl] and waits for navigation to settle (debounced, so
+         * a client-side redirect to a different origin -- e.g.
+         * player.vidlove.cc -- is given time to complete before we consider
+         * the session "ready"). Returns true once ready, false on failure.
+         */
+        @SuppressLint("SetJavaScriptEnabled")
+        suspend fun open(pageUrl: String): Boolean = withContext(Dispatchers.Main) {
+            try {
+                var settleRunnable: Runnable? = null
+
+                webView = WebView(context).apply {
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    settings.blockNetworkImage = true
+                    settings.blockNetworkLoads = false
+                    addJavascriptInterface(Bridge(), "AndroidBridge")
+                    webViewClient = object : WebViewClient() {
+                        override fun onPageFinished(view: WebView?, url: String?) {
+                            super.onPageFinished(view, url)
+                            Log.d(TAG, "Page settled candidate: $url")
+                            settleRunnable?.let { mainHandler.removeCallbacks(it) }
+                            val runnable = Runnable {
+                                if (!ready.isCompleted) {
+                                    Log.d(TAG, "Content page session ready at: ${webView?.url}")
+                                    ready.complete(true)
+                                }
+                            }
+                            settleRunnable = runnable
+                            // Debounce: if another navigation (e.g. a client-side
+                            // redirect to a different origin) starts within this
+                            // window, onPageFinished fires again and reschedules.
+                            mainHandler.postDelayed(runnable, 700)
+                        }
+                    }
+                }
+                webView?.loadUrl(pageUrl)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to open content page: $e")
+                if (!ready.isCompleted) ready.complete(false)
+            }
+            ready.await()
+        }
+
+        /**
+         * Fires a fetch(apiUrl) from inside the loaded page's JS context and
+         * returns the response body text, or null on timeout/error.
+         */
+        suspend fun fetchJson(apiUrl: String, timeoutMs: Long = 25000): String? {
+            if (!withTimeoutOrNull(timeoutMs) { ready.await() }.let { it == true }) {
+                Log.e(TAG, "Session never became ready; cannot fetch $apiUrl")
+                return null
+            }
+            val wv = webView ?: return null
+            val requestId = UUID.randomUUID().toString()
+
+            return withTimeoutOrNull(timeoutMs) {
+                withContext(Dispatchers.Main) {
+                    suspendCancellableCoroutine { cont ->
+                        pendingRequests[requestId] = cont
+
+                        // JSONObject.quote() safely JSON/JS-escapes the string
+                        // and wraps it in quotes, producing a valid JS literal.
+                        val escapedUrl = JSONObject.quote(apiUrl)
+                        val escapedId = JSONObject.quote(requestId)
+
+                        val script = """
+                            (function() {
+                                fetch($escapedUrl, {
+                                    headers: { 'Accept': 'application/json' },
+                                    mode: 'cors',
+                                    credentials: 'omit'
+                                })
+                                .then(function(r) { return r.text(); })
+                                .then(function(t) { AndroidBridge.onFetchResult($escapedId, t); })
+                                .catch(function(e) { AndroidBridge.onFetchResult($escapedId, '__FETCH_ERROR__' + e); });
+                            })();
+                        """.trimIndent()
+
+                        wv.evaluateJavascript(script, null)
+
+                        cont.invokeOnCancellation {
+                            pendingRequests.remove(requestId)
+                        }
+                    }
+                }
+            }?.also { result ->
+                if (result.startsWith("__FETCH_ERROR__")) {
+                    Log.e(TAG, "In-page fetch error for $apiUrl: $result")
+                }
+            }?.takeUnless { it.startsWith("__FETCH_ERROR__") }
+        }
+
+        fun close() {
+            mainHandler.post {
+                webView?.destroy()
+                webView = null
             }
         }
     }
