@@ -198,9 +198,9 @@ class StreamHubProvider : MainAPI() {
                 OnetouchtvExtractor.getStream(cleanTitle, year, season, episode, mappedSubCallback, callback)
             })
 
-            // 111movies extractor (movies and TV)
+            // 111movies extractor (both movies and TV, all sources)
             extractorJobs.add(async {
-                ShowsStExtractor.getStream(
+                ShowsStExtractor.getStreams(
                     tmdbId = tmdbId,
                     isMovie = isMovie,
                     season = season,
