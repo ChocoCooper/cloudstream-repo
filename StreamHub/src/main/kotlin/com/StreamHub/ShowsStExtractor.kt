@@ -127,6 +127,7 @@ object ShowsStExtractor {
 
     /**
      * Loads a URL in a hidden WebView and returns the page's text content.
+     * This bypasses TLS fingerprinting because it uses the system browser engine.
      * Uses the provided [Context] to create the WebView.
      */
     @SuppressLint("SetJavaScriptEnabled")
@@ -139,7 +140,6 @@ object ShowsStExtractor {
             suspendCancellableCoroutine { continuation ->
                 var webView: WebView? = null
                 try {
-                    // Now we have a valid Context
                     webView = WebView(context).apply {
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
