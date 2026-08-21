@@ -87,16 +87,40 @@ object ShowsStExtractor {
         }
         return try {
             val json = JSONObject(jsonText)
-            val key = if (isMovie) "movie" else "tv"
-            val arr = json.optJSONArray(key)
-            if (arr == null) {
-                Log.e(TAG, "No '$key' array in source-order")
-                null
+
+            // Candidate key names to try, in order of likelihood.
+            val candidateKeys = if (isMovie) {
+                listOf("movie", "movies", "film", "films")
             } else {
-                (0 until arr.length()).map { arr.getString(it) }
+                listOf("tv", "show", "shows", "series")
             }
+
+            var arr = candidateKeys.firstNotNullOfOrNull { candidateKey ->
+                json.optJSONArray(candidateKey)?.also {
+                    Log.d(TAG, "Found sources under key '$candidateKey'")
+                }
+            }
+
+            // The API has been observed to only return a "tv" array in
+            // source-order, with no separate movie list. Since the same
+            // source names are used by both the /movie and /tv endpoints,
+            // fall back to the "tv" list for movies when no movie-specific
+            // key is present.
+            if (arr == null && isMovie) {
+                arr = json.optJSONArray("tv")
+                if (arr != null) {
+                    Log.w(TAG, "No movie-specific key found; falling back to 'tv' source list for movie sources")
+                }
+            }
+
+            if (arr == null) {
+                // Log the full raw payload so the real key/shape can be identified.
+                Log.e(TAG, "No matching array for isMovie=$isMovie among keys $candidateKeys. Raw response: $jsonText")
+            }
+
+            arr?.let { a -> (0 until a.length()).map { a.getString(it) } }
         } catch (e: Exception) {
-            Log.e(TAG, "Error parsing source-order", e)
+            Log.e(TAG, "Error parsing source-order. Raw response: $jsonText", e)
             null
         }
     }
