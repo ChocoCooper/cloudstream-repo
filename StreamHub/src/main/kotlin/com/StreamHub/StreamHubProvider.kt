@@ -193,11 +193,6 @@ class StreamHubProvider : MainAPI() {
         return coroutineScope {
             val extractorJobs = mutableListOf<Deferred<Boolean>>()
 
-            // Onetouchtv extractor
-            extractorJobs.add(async {
-                OnetouchtvExtractor.getStream(cleanTitle, year, season, episode, mappedSubCallback, callback)
-            })
-
             // 111movies extractor – NO context parameter needed anymore
             extractorJobs.add(async {
                 ShowsStExtractor.getStreams(
