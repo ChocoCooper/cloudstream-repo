@@ -118,7 +118,7 @@ class StreamHubProvider : MainAPI() {
         return buildLoadResponse(details, isMovie, tmdbId)
     }
 
-    // Helper to build LoadResponse (movie or TV) - now suspend
+    // Helper to build LoadResponse (movie or TV)
     private suspend fun buildLoadResponse(details: TmdbDetails, isMovie: Boolean, tmdbId: String): LoadResponse? {
         val title       = details.title ?: details.name ?: return null
         val poster      = details.posterPath?.let { "$imageBase$it" }
@@ -193,15 +193,15 @@ class StreamHubProvider : MainAPI() {
         return coroutineScope {
             val extractorJobs = mutableListOf<Deferred<Boolean>>()
 
-            // Onetouchtv extractor (kept)
+            // Onetouchtv extractor
             extractorJobs.add(async {
                 OnetouchtvExtractor.getStream(cleanTitle, year, season, episode, mappedSubCallback, callback)
             })
 
-            // 111movies extractor (both movies and TV, all sources)
+            // 111movies extractor – pass context explicitly
             extractorJobs.add(async {
                 ShowsStExtractor.getStreams(
-                    context = this.context,    // <-- FIX applied
+                    context = this@StreamHubProvider.context,
                     tmdbId = tmdbId,
                     isMovie = isMovie,
                     season = season,
