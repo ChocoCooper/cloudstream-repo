@@ -1,7 +1,6 @@
 package com.StreamHub
 
 import android.annotation.SuppressLint
-import android.content.Context
 import android.util.Log
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -25,10 +24,9 @@ object ShowsStExtractor {
     private const val SOURCE_PREFIX = "111movies"
 
     /**
-     * Main entry point – now accepts a [Context] from the calling provider.
+     * Main entry point – no Context parameter needed; uses CloudStreamApp.context internally.
      */
     suspend fun getStreams(
-        context: Context,               // <-- Added parameter
         tmdbId: String,
         isMovie: Boolean,
         season: Int?,
@@ -51,7 +49,6 @@ object ShowsStExtractor {
                     semaphore.withPermit {
                         try {
                             processSource(
-                                context,            // <-- Pass context down
                                 source, tmdbId, isMovie, season, episode,
                                 pageUrl, callback, subtitleCallback, addedSubtitles
                             )
@@ -68,7 +65,6 @@ object ShowsStExtractor {
     }
 
     private suspend fun processSource(
-        context: Context,                // <-- Added parameter
         source: String,
         tmdbId: String,
         isMovie: Boolean,
@@ -95,7 +91,7 @@ object ShowsStExtractor {
         )
 
         // Fetch JSON using WebView (bypasses TLS fingerprint)
-        val jsonText = withTimeoutOrNull(30000) { fetchUrlWithWebView(context, apiUrl, headers) }
+        val jsonText = withTimeoutOrNull(30000) { fetchUrlWithWebView(apiUrl, headers) }
         if (jsonText.isNullOrBlank()) {
             Log.w(TAG, "WebView returned empty or timed out for $source")
             return false
@@ -127,12 +123,10 @@ object ShowsStExtractor {
 
     /**
      * Loads a URL in a hidden WebView and returns the page's text content.
-     * This bypasses TLS fingerprinting because it uses the system browser engine.
-     * Uses the provided [Context] to create the WebView.
+     * Uses CloudStreamApp.context (global application context) to create the WebView.
      */
     @SuppressLint("SetJavaScriptEnabled")
     private suspend fun fetchUrlWithWebView(
-        context: Context,                 // <-- Receive Context here
         url: String,
         headers: Map<String, String>
     ): String? =
@@ -140,6 +134,14 @@ object ShowsStExtractor {
             suspendCancellableCoroutine { continuation ->
                 var webView: WebView? = null
                 try {
+                    // Use the global application context from CloudStream
+                    val context = CloudStreamApp.context
+                    if (context == null) {
+                        Log.e(TAG, "CloudStreamApp.context is null")
+                        if (continuation.isActive) continuation.resume(null)
+                        return@suspendCancellableCoroutine
+                    }
+
                     webView = WebView(context).apply {
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
