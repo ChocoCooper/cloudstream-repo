@@ -3,7 +3,6 @@ package com.StreamHub
 import android.annotation.SuppressLint
 import android.os.Handler
 import android.os.Looper
-import android.util.Base64
 import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
@@ -176,39 +175,76 @@ object VidloveExtractor {
         val sourceObj = json.optJSONObject("source") ?: return false
         val manifest = sourceObj.optString("manifest")
 
-        // Force the use of the master manifest which contains ALL resolution tracks.
-        // We wrap the raw string in a Base64 data URI so ExoPlayer natively parses it as a multi-track M3U8.
-        val streamUrl = when {
-            manifest.startsWith("http") -> manifest.trim()
-            manifest.contains("#EXTM3U") -> {
-                val encodedManifest = Base64.encodeToString(manifest.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
-                "data:application/x-mpegURL;base64,$encodedManifest"
-            }
-            else -> null
-        }
-
-        if (streamUrl.isNullOrBlank()) {
-            Log.w(TAG, "Empty or invalid manifest for $source")
+        if (manifest.isBlank()) {
+            Log.w(TAG, "Empty manifest for $source")
             return false
         }
 
-        Log.d(TAG, "Emitting single master stream for $SOURCE_NAME")
-
-        // Single entry named "Vidlove" - ExoPlayer will read the master playlist and display the quality gear icon.
-        callback(
-            newExtractorLink(
-                source = SOURCE_NAME,
-                name = SOURCE_NAME,
-                url = streamUrl,
-                type = ExtractorLinkType.M3U8
-            ) {
-                this.referer = referer
-                this.quality = Qualities.Unknown.value
-            }
-        )
+        // 1. If it's a direct URL to a master playlist, pass it natively to ExoPlayer.
+        // This will successfully display the internal multi-track quality selector.
+        if (manifest.startsWith("http")) {
+            Log.d(TAG, "Emitting direct URL manifest for $SOURCE_NAME")
+            callback(
+                newExtractorLink(
+                    source = SOURCE_NAME,
+                    name = SOURCE_NAME,
+                    url = manifest.trim(),
+                    type = ExtractorLinkType.M3U8
+                ) {
+                    this.referer = referer
+                    this.quality = Qualities.Unknown.value
+                }
+            )
+        } 
+        // 2. If it's a raw string, we cannot use Data URIs due to Cloudstream's Cronet limitations.
+        // We must parse the string and emit the HTTP links directly.
+        else if (manifest.contains("#EXTM3U")) {
+            Log.d(TAG, "Parsing raw M3U8 string for $SOURCE_NAME")
+            parseRawManifest(manifest, referer, callback)
+        } else {
+            Log.w(TAG, "Unrecognized manifest format for $source")
+            return false
+        }
 
         addVidloveSubtitles(json, subtitleCallback, addedSubtitles)
         return true
+    }
+
+    private fun parseRawManifest(
+        manifest: String, 
+        referer: String, 
+        callback: (ExtractorLink) -> Unit
+    ) {
+        var currentQuality = Qualities.Unknown.value
+        
+        manifest.lines().forEach { line ->
+            val trimmed = line.trim()
+            when {
+                trimmed.startsWith("#EXT-X-STREAM-INF") -> {
+                    // Extract resolution to label the Cloudstream UI properly
+                    currentQuality = when {
+                        trimmed.contains("1080") -> Qualities.P1080.value
+                        trimmed.contains("720") -> Qualities.P720.value
+                        trimmed.contains("480") -> Qualities.P480.value
+                        trimmed.contains("360") -> Qualities.P360.value
+                        else -> Qualities.Unknown.value
+                    }
+                }
+                trimmed.startsWith("http") -> {
+                    callback(
+                        newExtractorLink(
+                            source = SOURCE_NAME,
+                            name = SOURCE_NAME,
+                            url = trimmed,
+                            type = ExtractorLinkType.M3U8
+                        ) {
+                            this.referer = referer
+                            this.quality = currentQuality
+                        }
+                    )
+                }
+            }
+        }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
