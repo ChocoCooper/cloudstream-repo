@@ -180,8 +180,15 @@ object VidloveExtractor {
             return false
         }
 
-        // 1. If it's a direct URL to a master playlist, pass it natively to ExoPlayer.
-        // This will successfully display the internal multi-track quality selector.
+        // Strict headers to bypass 403 Forbidden in ExoPlayer
+        val streamHeaders = mapOf(
+            "Origin" to "https://player.vidlove.cc",
+            "Referer" to referer,
+            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept" to "*/*"
+        )
+
+        // 1. Direct URL to a master playlist
         if (manifest.startsWith("http")) {
             Log.d(TAG, "Emitting direct URL manifest for $SOURCE_NAME")
             callback(
@@ -191,16 +198,15 @@ object VidloveExtractor {
                     url = manifest.trim(),
                     type = ExtractorLinkType.M3U8
                 ) {
-                    this.referer = referer
+                    this.headers = streamHeaders
                     this.quality = Qualities.Unknown.value
                 }
             )
         } 
-        // 2. If it's a raw string, we cannot use Data URIs due to Cloudstream's Cronet limitations.
-        // We must parse the string and emit the HTTP links directly.
+        // 2. Parse raw string (bypasses Cronet base64 limitation)
         else if (manifest.contains("#EXTM3U")) {
             Log.d(TAG, "Parsing raw M3U8 string for $SOURCE_NAME")
-            parseRawManifest(manifest, referer, callback)
+            parseRawManifest(manifest, streamHeaders, callback)
         } else {
             Log.w(TAG, "Unrecognized manifest format for $source")
             return false
@@ -212,7 +218,7 @@ object VidloveExtractor {
 
     private suspend fun parseRawManifest(
         manifest: String, 
-        referer: String, 
+        streamHeaders: Map<String, String>, 
         callback: (ExtractorLink) -> Unit
     ) {
         var currentQuality = Qualities.Unknown.value
@@ -238,7 +244,7 @@ object VidloveExtractor {
                             url = trimmed,
                             type = ExtractorLinkType.M3U8
                         ) {
-                            this.referer = referer
+                            this.headers = streamHeaders
                             this.quality = currentQuality
                         }
                     )
