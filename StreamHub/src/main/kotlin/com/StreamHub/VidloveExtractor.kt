@@ -205,7 +205,7 @@ object VidloveExtractor {
                 type = ExtractorLinkType.M3U8
             ) {
                 this.referer = referer
-                this.quality = Qualities.Auto.value
+                this.quality = Qualities.Unknown.value
             }
         )
 
