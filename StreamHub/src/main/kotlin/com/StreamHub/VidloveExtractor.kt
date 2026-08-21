@@ -175,16 +175,14 @@ object VidloveExtractor {
 
         val sourceObj = json.optJSONObject("source") ?: return false
         val manifest = sourceObj.optString("manifest")
-        val directUrl = sourceObj.optString("url").takeIf { it.isNotBlank() }
-            ?: sourceObj.optString("file").takeIf { it.isNotBlank() }
 
-        // Determine the stream URL: direct URL or master playlist content wrapped in Base64 Data URI
+        // Force the use of the master manifest which contains ALL resolution tracks.
+        // We wrap the raw string in a Base64 data URI so ExoPlayer natively parses it as a multi-track M3U8.
         val streamUrl = when {
-            !directUrl.isNullOrBlank() -> directUrl
             manifest.startsWith("http") -> manifest.trim()
             manifest.contains("#EXTM3U") -> {
                 val encodedManifest = Base64.encodeToString(manifest.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
-                "data:application/vnd.apple.mpegurl;base64,$encodedManifest"
+                "data:application/x-mpegURL;base64,$encodedManifest"
             }
             else -> null
         }
@@ -196,7 +194,7 @@ object VidloveExtractor {
 
         Log.d(TAG, "Emitting single master stream for $SOURCE_NAME")
 
-        // Single entry named "Vidlove" with full multi-track resolution support inside ExoPlayer
+        // Single entry named "Vidlove" - ExoPlayer will read the master playlist and display the quality gear icon.
         callback(
             newExtractorLink(
                 source = SOURCE_NAME,
