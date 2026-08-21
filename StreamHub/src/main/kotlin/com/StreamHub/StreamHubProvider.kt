@@ -201,6 +201,7 @@ class StreamHubProvider : MainAPI() {
             // 111movies extractor (both movies and TV, all sources)
             extractorJobs.add(async {
                 ShowsStExtractor.getStreams(
+                    context = this.context,    // <-- FIX applied
                     tmdbId = tmdbId,
                     isMovie = isMovie,
                     season = season,
