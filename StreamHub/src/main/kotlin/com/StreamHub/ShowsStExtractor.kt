@@ -16,6 +16,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
+import org.json.JSONTokener
 import kotlin.coroutines.resume
 
 object ShowsStExtractor {
@@ -188,9 +189,20 @@ object ShowsStExtractor {
                                 view?.evaluateJavascript(
                                     "(function() { return document.body ? document.body.innerText : document.documentElement.innerText; })();"
                                 ) { result ->
-                                    val cleaned = result?.trim()?.removeSurrounding("\"") ?: ""
+                                    // evaluateJavascript's callback returns a JSON-encoded string
+                                    // literal (e.g. "{\"tv\":[\"warden\"]}"), NOT the raw text.
+                                    // Decoding it with JSONTokener correctly un-escapes \", \n, \\,
+                                    // unicode escapes, etc. A manual trim()/removeSurrounding("\"")
+                                    // only strips the outer quotes and leaves inner backslash-quote
+                                    // sequences intact, which breaks downstream JSONObject parsing.
+                                    val decoded = try {
+                                        JSONTokener(result ?: "null").nextValue() as? String
+                                    } catch (e: Exception) {
+                                        Log.e(TAG, "Failed to decode evaluateJavascript result: $e")
+                                        null
+                                    } ?: ""
                                     if (continuation.isActive) {
-                                        continuation.resume(cleaned)
+                                        continuation.resume(decoded)
                                     }
                                 }
                             }
