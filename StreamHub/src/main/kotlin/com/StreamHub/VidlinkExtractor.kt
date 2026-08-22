@@ -5,6 +5,7 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -32,6 +33,7 @@ object VidlinkExtractor {
     private const val TAG = "VidLink"
     private const val DISPLAY_NAME = "Vidlink"
     private const val MAIN_URL = "https://vidlink.pro"
+    private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
     suspend fun getStreams(
         tmdbId: String,
@@ -58,29 +60,25 @@ object VidlinkExtractor {
         val session = VidlinkSession(context)
 
         return try {
-            // Give Cloudflare up to 25 seconds to solve itself invisibly
-            val apiUrl = withTimeoutOrNull(25000) {
+            val apiUrl = withTimeoutOrNull(20000) {
                 session.interceptApiUrl(pageUrl)
             }
             
-            // Extract the native, trusted User-Agent that passed Cloudflare
-            val nativeUserAgent = session.userAgent
             session.destroy()
 
             if (apiUrl.isNullOrBlank()) {
-                Log.w(TAG, "Failed to intercept API URL. Cloudflare might be blocking the headless WebView.")
+                Log.w(TAG, "Failed to intercept API URL. WebView might have timed out.")
                 return false
             }
 
-            Log.d(TAG, "Successfully intercepted encrypted API URL: $apiUrl")
+            Log.d(TAG, "Successfully intercepted API URL: $apiUrl")
 
-            // Fetch the JSON payload using the exact Native User-Agent to pass the 428 Precondition
             val jsonText = app.get(
                 url = apiUrl, 
                 headers = mapOf(
                     "Referer" to "$MAIN_URL/",
                     "Origin" to MAIN_URL,
-                    "User-Agent" to nativeUserAgent
+                    "User-Agent" to USER_AGENT
                 )
             ).text
             
@@ -91,7 +89,6 @@ object VidlinkExtractor {
             var linksFound = false
             if (qualitiesObj != null && qualitiesObj.length() > 0) {
                 val m3u8Builder = StringBuilder("#EXTM3U\n")
-                
                 val sortedKeys = qualitiesObj.keys().asSequence().toList().sortedByDescending { it.toIntOrNull() ?: 0 }
                 
                 for (qualityKey in sortedKeys) {
@@ -106,7 +103,6 @@ object VidlinkExtractor {
                             "360" -> 800000
                             else -> 1500000
                         }
-                        
                         val height = qualityKey.toIntOrNull() ?: 720
                         val width = (height * 16) / 9
                         
@@ -129,17 +125,14 @@ object VidlinkExtractor {
                             type = ExtractorLinkType.M3U8,
                             headers = mapOf(
                                 "Origin" to MAIN_URL,
-                                "User-Agent" to nativeUserAgent // Native UA bypasses 428 and 429 blocks
+                                "User-Agent" to USER_AGENT
                             )
                         )
                     )
                 }
             }
 
-            val captions = streamObj?.optJSONArray("captions") 
-                ?: json.optJSONArray("subtitles")
-                ?: streamObj?.optJSONArray("subtitles")
-
+            val captions = streamObj?.optJSONArray("captions") ?: json.optJSONArray("subtitles") ?: streamObj?.optJSONArray("subtitles")
             if (captions != null) {
                 val addedSubs = mutableSetOf<String>()
                 for (i in 0 until captions.length()) {
@@ -148,12 +141,7 @@ object VidlinkExtractor {
                     val label = sub.optString("label").ifBlank { sub.optString("language", "English") }
 
                     if (subUrl.isNotBlank() && addedSubs.add(subUrl)) {
-                        subtitleCallback(
-                            SubtitleFile(
-                                lang = label,
-                                url = subUrl
-                            )
-                        )
+                        subtitleCallback(SubtitleFile(lang = label, url = subUrl))
                     }
                 }
             }
@@ -171,9 +159,13 @@ object VidlinkExtractor {
         private var webView: WebView? = null
         private val apiUrlDeferred = CompletableDeferred<String?>()
         private val mainHandler = Handler(Looper.getMainLooper())
-        
-        var userAgent: String = ""
-            private set
+
+        private inner class JsBridge {
+            @JavascriptInterface
+            fun onIntercept(url: String) {
+                if (!apiUrlDeferred.isCompleted) apiUrlDeferred.complete(url)
+            }
+        }
 
         @SuppressLint("SetJavaScriptEnabled")
         suspend fun interceptApiUrl(pageUrl: String): String? = withContext(Dispatchers.Main) {
@@ -181,26 +173,56 @@ object VidlinkExtractor {
                 webView = WebView(context).apply {
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
+                    settings.blockNetworkImage = true
+                    settings.userAgentString = USER_AGENT
                     
-                    // CRITICAL: We MUST allow images and network loads so Cloudflare's invisible 
-                    // captcha assets load properly and solve themselves.
-                    settings.blockNetworkImage = false 
-                    settings.blockNetworkLoads = false
-                    
-                    // Grab the trusted, device-specific native User-Agent
-                    this@VidlinkSession.userAgent = settings.userAgentString
+                    // CRITICAL FIX: Allow player to autoplay without human interaction
+                    settings.mediaPlaybackRequiresUserGesture = false 
+
+                    addJavascriptInterface(JsBridge(), "AndroidVidlinkBridge")
 
                     webViewClient = object : WebViewClient() {
+                        
+                        // Layer 1: Native OS Interceptor
                         override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                             val url = request?.url?.toString() ?: return super.shouldInterceptRequest(view, request)
-                            
-                            // Intercept the API call right after Cloudflare clears
-                            if ((url.contains("/api/b/movie") || url.contains("/api/b/tv")) && request.method == "GET") {
-                                if (!apiUrlDeferred.isCompleted) {
-                                    apiUrlDeferred.complete(url)
-                                }
+                            if (url.contains("/api/b/movie") || url.contains("/api/b/tv")) {
+                                if (!apiUrlDeferred.isCompleted) apiUrlDeferred.complete(url)
                             }
                             return super.shouldInterceptRequest(view, request)
+                        }
+
+                        // Layer 2: JavaScript Fetch Hook
+                        override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                            view?.evaluateJavascript(
+                                """
+                                (function() {
+                                    if (window.__vidlink_hooked__) return;
+                                    window.__vidlink_hooked__ = true;
+                                    const origFetch = window.fetch;
+                                    window.fetch = async function(...args) {
+                                        const reqUrl = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
+                                        if (reqUrl.includes('/api/b/movie') || reqUrl.includes('/api/b/tv')) {
+                                            AndroidVidlinkBridge.onIntercept(reqUrl);
+                                        }
+                                        return await origFetch.apply(this, args);
+                                    };
+                                })();
+                                """.trimIndent(), null
+                            )
+                            super.onPageStarted(view, url, favicon)
+                        }
+
+                        // Layer 3: Auto-clicker
+                        override fun onPageFinished(view: WebView?, url: String?) {
+                            view?.evaluateJavascript(
+                                """
+                                setTimeout(() => {
+                                    let btn = document.querySelector('.vjs-big-play-button, .play-button, video');
+                                    if (btn) btn.click();
+                                }, 1000);
+                                """.trimIndent(), null
+                            )
                         }
                     }
                 }
@@ -228,9 +250,7 @@ object VidlinkExtractor {
 
     private object LocalManifestServer {
         private const val TTL_MS = 30 * 60 * 1000L
-
         private data class Entry(val bytes: ByteArray, val createdAt: Long)
-
         private val lock = Any()
         private var serverSocket: ServerSocket? = null
         private var port: Int = -1
@@ -240,22 +260,16 @@ object VidlinkExtractor {
             synchronized(lock) {
                 val existing = serverSocket
                 if (existing != null && !existing.isClosed) return port
-
                 val ss = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
                 serverSocket = ss
                 port = ss.localPort
-
                 thread(isDaemon = true, name = "VidlinkManifestServer") {
                     while (!ss.isClosed) {
                         try {
                             val client = ss.accept()
-                            thread(isDaemon = true, name = "VidlinkManifestClient") {
-                                handleClient(client)
-                            }
+                            thread(isDaemon = true, name = "VidlinkManifestClient") { handleClient(client) }
                         } catch (e: Exception) {
-                            if (!ss.isClosed) {
-                                Log.e(TAG, "LocalManifestServer accept error: $e")
-                            }
+                            if (!ss.isClosed) Log.e(TAG, "LocalManifestServer accept error: $e")
                         }
                     }
                 }
@@ -273,7 +287,6 @@ object VidlinkExtractor {
                         val line = input.readLine() ?: break
                         if (line.isEmpty()) break
                     }
-
                     val path = requestLine.split(" ").getOrNull(1) ?: "/"
                     val id = path.trimStart('/').substringBefore("?").substringBefore(".")
                     val entry = manifests[id]
@@ -281,19 +294,11 @@ object VidlinkExtractor {
 
                     if (entry == null) {
                         val body = "not found".toByteArray()
-                        val header = "HTTP/1.1 404 Not Found\r\n" +
-                            "Content-Type: text/plain\r\n" +
-                            "Content-Length: ${body.size}\r\n" +
-                            "Connection: close\r\n\r\n"
+                        val header = "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: ${body.size}\r\nConnection: close\r\n\r\n"
                         output.write(header.toByteArray(Charsets.US_ASCII))
                         output.write(body)
                     } else {
-                        val header = "HTTP/1.1 200 OK\r\n" +
-                            "Content-Type: application/vnd.apple.mpegurl\r\n" +
-                            "Content-Length: ${entry.bytes.size}\r\n" +
-                            "Access-Control-Allow-Origin: *\r\n" +
-                            "Cache-Control: no-cache\r\n" +
-                            "Connection: close\r\n\r\n"
+                        val header = "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: ${entry.bytes.size}\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n"
                         output.write(header.toByteArray(Charsets.US_ASCII))
                         output.write(entry.bytes)
                     }
