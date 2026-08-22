@@ -119,9 +119,9 @@ object VidlinkExtractor {
                     callback(
                         ExtractorLink(
                             source = DISPLAY_NAME,
-                            name = DISPLAY_NAME, // Just "Vidlink"
+                            name = DISPLAY_NAME,
                             url = localM3u8Url,
-                            referer = "$MAIN_URL/",
+                            referer = "",
                             quality = Qualities.Unknown.value,
                             type = ExtractorLinkType.M3U8
                         )
