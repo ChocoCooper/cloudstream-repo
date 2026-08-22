@@ -5,11 +5,13 @@ import android.content.Context
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
-import android.webkit.JavascriptInterface
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import com.lagradost.cloudstream3.CloudStreamApp
 import com.lagradost.cloudstream3.SubtitleFile
+import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
@@ -56,18 +58,26 @@ object VidlinkExtractor {
         val session = VidlinkSession(context)
 
         return try {
-            val jsonText = withTimeoutOrNull(25000) {
-                session.interceptPayload(pageUrl)
+            // 1. Brute-force intercept the API URL natively via WebView
+            val apiUrl = withTimeoutOrNull(20000) {
+                session.interceptApiUrl(pageUrl)
             }
+            
+            // Destroy WebView immediately to free up RAM, we don't need it anymore
+            session.destroy()
 
-            if (jsonText.isNullOrBlank()) {
-                Log.w(TAG, "Failed to intercept API response or request timed out.")
+            if (apiUrl.isNullOrBlank()) {
+                Log.w(TAG, "Failed to intercept API URL natively or request timed out.")
                 return false
             }
 
+            Log.d(TAG, "Successfully intercepted encrypted API URL: $apiUrl")
+
+            // 2. Fetch the JSON natively using Cloudstream's okhttp client (much faster)
+            val jsonText = app.get(apiUrl, headers = mapOf("Referer" to "$MAIN_URL/")).text
             val json = JSONObject(jsonText)
             
-            // 1. Generate Master Playlist from Qualities
+            // 3. Generate Master Playlist from Qualities
             val streamObj = json.optJSONObject("stream")
             val qualitiesObj = streamObj?.optJSONObject("qualities")
 
@@ -119,7 +129,7 @@ object VidlinkExtractor {
                 }
             }
 
-            // 2. Extract subtitles if present
+            // 4. Extract subtitles if present
             val captions = streamObj?.optJSONArray("captions") 
                 ?: json.optJSONArray("subtitles")
                 ?: streamObj?.optJSONArray("subtitles")
@@ -151,22 +161,17 @@ object VidlinkExtractor {
         }
     }
 
+    /**
+     * Brute-force WebView session that uses OS-level network interception to steal 
+     * the encrypted API URL without relying on flaky JavaScript injections.
+     */
     private class VidlinkSession(private val context: Context) {
         private var webView: WebView? = null
-        private val payloadDeferred = CompletableDeferred<String?>()
+        private val apiUrlDeferred = CompletableDeferred<String?>()
         private val mainHandler = Handler(Looper.getMainLooper())
 
-        private inner class JsBridge {
-            @JavascriptInterface
-            fun onIntercept(jsonString: String) {
-                if (!payloadDeferred.isCompleted) {
-                    payloadDeferred.complete(jsonString)
-                }
-            }
-        }
-
         @SuppressLint("SetJavaScriptEnabled")
-        suspend fun interceptPayload(url: String): String? = withContext(Dispatchers.Main) {
+        suspend fun interceptApiUrl(pageUrl: String): String? = withContext(Dispatchers.Main) {
             try {
                 webView = WebView(context).apply {
                     settings.javaScriptEnabled = true
@@ -174,55 +179,27 @@ object VidlinkExtractor {
                     settings.blockNetworkImage = true 
                     settings.blockNetworkLoads = false
 
-                    addJavascriptInterface(JsBridge(), "AndroidVidlinkBridge")
-
                     webViewClient = object : WebViewClient() {
-                        override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                            view?.evaluateJavascript(
-                                """
-                                (function() {
-                                    if (window.__vidlink_intercepted__) return;
-                                    window.__vidlink_intercepted__ = true;
-
-                                    const origFetch = window.fetch;
-                                    window.fetch = async function(...args) {
-                                        const reqUrl = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
-                                        const response = await origFetch.apply(this, args);
-                                        
-                                        if (reqUrl.includes('/api/b/movie') || reqUrl.includes('/api/b/tv')) {
-                                            try {
-                                                const cloned = response.clone();
-                                                cloned.text().then(text => {
-                                                    AndroidVidlinkBridge.onIntercept(text);
-                                                });
-                                            } catch(e) {}
-                                        }
-                                        return response;
-                                    };
-
-                                    const origOpen = XMLHttpRequest.prototype.open;
-                                    XMLHttpRequest.prototype.open = function(method, reqUrl) {
-                                        this.addEventListener('load', function() {
-                                            if (typeof reqUrl === 'string' && (reqUrl.includes('/api/b/movie') || reqUrl.includes('/api/b/tv'))) {
-                                                AndroidVidlinkBridge.onIntercept(this.responseText);
-                                            }
-                                        });
-                                        origOpen.apply(this, arguments);
-                                    };
-                                })();
-                                """.trimIndent(),
-                                null
-                            )
-                            super.onPageStarted(view, url, favicon)
+                        override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
+                            val url = request?.url?.toString() ?: return super.shouldInterceptRequest(view, request)
+                            
+                            // Instantly catch the API URL containing the encrypted token
+                            if (url.contains("/api/b/movie") || url.contains("/api/b/tv")) {
+                                if (!apiUrlDeferred.isCompleted) {
+                                    apiUrlDeferred.complete(url)
+                                }
+                            }
+                            return super.shouldInterceptRequest(view, request)
                         }
                     }
                 }
-                webView?.loadUrl(url)
+                webView?.loadUrl(pageUrl)
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to initialize WebView: ${e.message}", e)
-                if (!payloadDeferred.isCompleted) payloadDeferred.complete(null)
+                if (!apiUrlDeferred.isCompleted) apiUrlDeferred.complete(null)
             }
-            payloadDeferred.await()
+            
+            apiUrlDeferred.await()
         }
 
         fun destroy() {
