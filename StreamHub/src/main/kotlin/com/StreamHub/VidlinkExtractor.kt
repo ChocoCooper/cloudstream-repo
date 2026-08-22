@@ -32,10 +32,6 @@ object VidlinkExtractor {
     private const val TAG = "VidLink"
     private const val DISPLAY_NAME = "Vidlink"
     private const val MAIN_URL = "https://vidlink.pro"
-    
-    // STRICT BINDING: This User-Agent MUST be identical for both the WebView and ExoPlayer
-    // so the CDN's signature token matches the playback request.
-    private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
     suspend fun getStreams(
         tmdbId: String,
@@ -55,33 +51,36 @@ object VidlinkExtractor {
 
         val context = CloudStreamApp.context
         if (context == null) {
-            Log.e(TAG, "CloudStreamApp.context is null, cannot launch WebView")
+            Log.e(TAG, "CloudStreamApp.context is null")
             return false
         }
 
         val session = VidlinkSession(context)
 
         return try {
-            val apiUrl = withTimeoutOrNull(20000) {
+            // Give Cloudflare up to 25 seconds to solve itself invisibly
+            val apiUrl = withTimeoutOrNull(25000) {
                 session.interceptApiUrl(pageUrl)
             }
             
+            // Extract the native, trusted User-Agent that passed Cloudflare
+            val nativeUserAgent = session.userAgent
             session.destroy()
 
             if (apiUrl.isNullOrBlank()) {
-                Log.w(TAG, "Failed to intercept API URL natively or request timed out.")
+                Log.w(TAG, "Failed to intercept API URL. Cloudflare might be blocking the headless WebView.")
                 return false
             }
 
             Log.d(TAG, "Successfully intercepted encrypted API URL: $apiUrl")
 
-            // Fetch the JSON payload using our locked User-Agent
+            // Fetch the JSON payload using the exact Native User-Agent to pass the 428 Precondition
             val jsonText = app.get(
                 url = apiUrl, 
                 headers = mapOf(
                     "Referer" to "$MAIN_URL/",
                     "Origin" to MAIN_URL,
-                    "User-Agent" to USER_AGENT
+                    "User-Agent" to nativeUserAgent
                 )
             ).text
             
@@ -130,7 +129,7 @@ object VidlinkExtractor {
                             type = ExtractorLinkType.M3U8,
                             headers = mapOf(
                                 "Origin" to MAIN_URL,
-                                "User-Agent" to USER_AGENT // Bypasses the 428 Precondition and 429 Hotlinking blocks
+                                "User-Agent" to nativeUserAgent // Native UA bypasses 428 and 429 blocks
                             )
                         )
                     )
@@ -172,6 +171,9 @@ object VidlinkExtractor {
         private var webView: WebView? = null
         private val apiUrlDeferred = CompletableDeferred<String?>()
         private val mainHandler = Handler(Looper.getMainLooper())
+        
+        var userAgent: String = ""
+            private set
 
         @SuppressLint("SetJavaScriptEnabled")
         suspend fun interceptApiUrl(pageUrl: String): String? = withContext(Dispatchers.Main) {
@@ -179,17 +181,21 @@ object VidlinkExtractor {
                 webView = WebView(context).apply {
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
-                    settings.blockNetworkImage = true 
+                    
+                    // CRITICAL: We MUST allow images and network loads so Cloudflare's invisible 
+                    // captcha assets load properly and solve themselves.
+                    settings.blockNetworkImage = false 
                     settings.blockNetworkLoads = false
                     
-                    // Force the WebView to generate the token using our constant User-Agent
-                    settings.userAgentString = USER_AGENT
+                    // Grab the trusted, device-specific native User-Agent
+                    this@VidlinkSession.userAgent = settings.userAgentString
 
                     webViewClient = object : WebViewClient() {
                         override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                             val url = request?.url?.toString() ?: return super.shouldInterceptRequest(view, request)
                             
-                            if (url.contains("/api/b/movie") || url.contains("/api/b/tv")) {
+                            // Intercept the API call right after Cloudflare clears
+                            if ((url.contains("/api/b/movie") || url.contains("/api/b/tv")) && request.method == "GET") {
                                 if (!apiUrlDeferred.isCompleted) {
                                     apiUrlDeferred.complete(url)
                                 }
