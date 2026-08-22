@@ -24,7 +24,7 @@ import kotlin.coroutines.resume
 
 object VidloveExtractor {
 
-    private const val TAG = "VidloveExtractor"
+    private const val TAG = "Vidlove"
     private const val DISPLAY_NAME = "Vidlove"
 
     /** Extracts "scheme://host[:port]" from a full URL, with a trailing slash. */
@@ -312,10 +312,13 @@ object VidloveExtractor {
      * "data:" scheme regardless of the underlying HTTP client (e.g. Cronet),
      * so this works without needing a local server or extra dependencies.
      *
+     * newExtractorLink is a suspend function, so this must be suspend too --
+     * calling it from a plain function is a compile error.
+     *
      * Returns true if the manifest contained at least one variant stream
      * (i.e. a link was actually emitted), false otherwise.
      */
-    private fun emitSingleLink(
+    private suspend fun emitSingleLink(
         manifest: String,
         referer: String,
         callback: (ExtractorLink) -> Unit
