@@ -32,6 +32,10 @@ object VidlinkExtractor {
     private const val TAG = "VidLink"
     private const val DISPLAY_NAME = "Vidlink"
     private const val MAIN_URL = "https://vidlink.pro"
+    
+    // STRICT BINDING: This User-Agent MUST be identical for both the WebView and ExoPlayer
+    // so the CDN's signature token matches the playback request.
+    private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
     suspend fun getStreams(
         tmdbId: String,
@@ -58,12 +62,10 @@ object VidlinkExtractor {
         val session = VidlinkSession(context)
 
         return try {
-            // 1. Brute-force intercept the API URL natively via WebView
             val apiUrl = withTimeoutOrNull(20000) {
                 session.interceptApiUrl(pageUrl)
             }
             
-            // Destroy WebView immediately to free up RAM, we don't need it anymore
             session.destroy()
 
             if (apiUrl.isNullOrBlank()) {
@@ -73,11 +75,17 @@ object VidlinkExtractor {
 
             Log.d(TAG, "Successfully intercepted encrypted API URL: $apiUrl")
 
-            // 2. Fetch the JSON natively using Cloudstream's okhttp client (much faster)
-            val jsonText = app.get(apiUrl, headers = mapOf("Referer" to "$MAIN_URL/")).text
-            val json = JSONObject(jsonText)
+            // Fetch the JSON payload using our locked User-Agent
+            val jsonText = app.get(
+                url = apiUrl, 
+                headers = mapOf(
+                    "Referer" to "$MAIN_URL/",
+                    "Origin" to MAIN_URL,
+                    "User-Agent" to USER_AGENT
+                )
+            ).text
             
-            // 3. Generate Master Playlist from Qualities
+            val json = JSONObject(jsonText)
             val streamObj = json.optJSONObject("stream")
             val qualitiesObj = streamObj?.optJSONObject("qualities")
 
@@ -85,7 +93,6 @@ object VidlinkExtractor {
             if (qualitiesObj != null && qualitiesObj.length() > 0) {
                 val m3u8Builder = StringBuilder("#EXTM3U\n")
                 
-                // Sort keys descending so highest quality is default/first
                 val sortedKeys = qualitiesObj.keys().asSequence().toList().sortedByDescending { it.toIntOrNull() ?: 0 }
                 
                 for (qualityKey in sortedKeys) {
@@ -93,7 +100,6 @@ object VidlinkExtractor {
                     val videoUrl = qData.optString("url")
                     
                     if (videoUrl.isNotBlank()) {
-                        // Standard HLS bandwidth estimations
                         val bandwidth = when (qualityKey) {
                             "1080" -> 5000000
                             "720" -> 2500000
@@ -102,7 +108,6 @@ object VidlinkExtractor {
                             else -> 1500000
                         }
                         
-                        // Rough 16:9 resolution calculation
                         val height = qualityKey.toIntOrNull() ?: 720
                         val width = (height * 16) / 9
                         
@@ -113,23 +118,25 @@ object VidlinkExtractor {
                 }
                 
                 if (linksFound) {
-                    // Serve the dynamically generated m3u8 locally
                     val localM3u8Url = LocalManifestServer.serve(m3u8Builder.toString().toByteArray(Charsets.UTF_8))
                     
                     callback(
                         ExtractorLink(
                             source = DISPLAY_NAME,
-                            name = DISPLAY_NAME,
+                            name = DISPLAY_NAME, 
                             url = localM3u8Url,
-                            referer = "",
+                            referer = "$MAIN_URL/",
                             quality = Qualities.Unknown.value,
-                            type = ExtractorLinkType.M3U8
+                            type = ExtractorLinkType.M3U8,
+                            headers = mapOf(
+                                "Origin" to MAIN_URL,
+                                "User-Agent" to USER_AGENT // Bypasses the 428 Precondition and 429 Hotlinking blocks
+                            )
                         )
                     )
                 }
             }
 
-            // 4. Extract subtitles if present
             val captions = streamObj?.optJSONArray("captions") 
                 ?: json.optJSONArray("subtitles")
                 ?: streamObj?.optJSONArray("subtitles")
@@ -161,10 +168,6 @@ object VidlinkExtractor {
         }
     }
 
-    /**
-     * Brute-force WebView session that uses OS-level network interception to steal 
-     * the encrypted API URL without relying on flaky JavaScript injections.
-     */
     private class VidlinkSession(private val context: Context) {
         private var webView: WebView? = null
         private val apiUrlDeferred = CompletableDeferred<String?>()
@@ -178,12 +181,14 @@ object VidlinkExtractor {
                     settings.domStorageEnabled = true
                     settings.blockNetworkImage = true 
                     settings.blockNetworkLoads = false
+                    
+                    // Force the WebView to generate the token using our constant User-Agent
+                    settings.userAgentString = USER_AGENT
 
                     webViewClient = object : WebViewClient() {
                         override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                             val url = request?.url?.toString() ?: return super.shouldInterceptRequest(view, request)
                             
-                            // Instantly catch the API URL containing the encrypted token
                             if (url.contains("/api/b/movie") || url.contains("/api/b/tv")) {
                                 if (!apiUrlDeferred.isCompleted) {
                                     apiUrlDeferred.complete(url)
@@ -215,9 +220,6 @@ object VidlinkExtractor {
         }
     }
 
-    /**
-     * Local loopback HTTP server to serve the dynamic M3U8 manifest.
-     */
     private object LocalManifestServer {
         private const val TTL_MS = 30 * 60 * 1000L
 
