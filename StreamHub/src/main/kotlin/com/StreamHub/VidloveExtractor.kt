@@ -1,11 +1,9 @@
 package com.StreamHub
 
 import android.util.Log
-import com.lagradost.cloudstream3.SubtitleFile
+import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.app
-import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.ExtractorLinkType
-import com.lagradost.cloudstream3.utils.Qualities
 import org.json.JSONObject
 import java.net.InetAddress
 import java.net.ServerSocket
@@ -14,149 +12,143 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.concurrent.thread
 
-object VidlinkExtractor {
+object VidloveExtractor {
 
-    private const val TAG = "VidLink"
-    private const val DISPLAY_NAME = "Vidlink"
-    private const val MAIN_URL = "https://vidlink.pro"
-    private const val ENC_API = "https://enc-dec.app/api/enc-vidlink?text="
-    
-    // Strict headers synced exactly with your Python script to bypass the CDN 428/429 blocks
-    private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
+    private const val TAG = "Vidlove"
+    private const val DISPLAY_NAME = "Vidlove"
+    private const val TARGET_SOURCE = "vidapi"
+    private const val ORIGIN_URL = "https://player.vidlove.cc"
 
     suspend fun getStreams(
         tmdbId: String,
         isMovie: Boolean,
-        season: Int? = null,
-        episode: Int? = null,
+        season: Int?,
+        episode: Int?,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        Log.d(TAG, "getStreams invoked: tmdbId=$tmdbId, isMovie=$isMovie, season=$season, episode=$episode")
+        Log.d(TAG, "getStreams called: tmdbId=$tmdbId, isMovie=$isMovie, season=$season, episode=$episode")
+
+        // Build the direct API endpoint with hardcoded vidapi source
+        val apiUrl = if (isMovie) {
+            "https://api.shows.st/movie?id=$tmdbId&mode=json&sources=$TARGET_SOURCE"
+        } else {
+            "https://api.shows.st/tv?id=$tmdbId&season=$season&episode=$episode&mode=json&sources=$TARGET_SOURCE"
+        }
+
+        val refererUrl = if (isMovie) {
+            "$ORIGIN_URL/embed/movie/$tmdbId"
+        } else {
+            "$ORIGIN_URL/embed/tv/$tmdbId/$season/$episode"
+        }
+
+        val headers = mapOf(
+            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept" to "application/json, text/plain, */*",
+            "Origin" to ORIGIN_URL,
+            "Referer" to refererUrl,
+            "Sec-Fetch-Dest" to "empty",
+            "Sec-Fetch-Mode" to "cors",
+            "Sec-Fetch-Site" to "cross-site"
+        )
 
         return try {
-            // 1. Fetch the encrypted token from the native decrypter
-            val encResponse = app.get("$ENC_API$tmdbId").text
-            val encJson = JSONObject(encResponse)
-            
-            // Validate success status mirroring the Python script
-            if (encJson.optInt("status") != 200) {
-                Log.e(TAG, "Encryption API failed. Error: ${encJson.optString("error", "Unknown")}")
-                return false
-            }
-            
-            val encryptedToken = encJson.optString("result", "")
-            if (encryptedToken.isBlank()) {
-                Log.w(TAG, "Decrypted token is empty.")
+            val response = app.get(apiUrl, headers = headers, timeout = 15).text
+            if (response.isBlank()) {
+                Log.w(TAG, "API returned an empty response")
                 return false
             }
 
-            Log.d(TAG, "Successfully generated token: ${encryptedToken.take(15)}...")
+            val json = JSONObject(response)
+            val manifest = findManifest(json)
 
-            // 2. Format the Vidlink API URL correctly based on media type
-            val apiUrl = if (isMovie) {
-                "$MAIN_URL/api/b/movie/$encryptedToken?multiLang=0"
-            } else {
-                "$MAIN_URL/api/b/tv/$encryptedToken/${season ?: 1}/${episode ?: 1}?multiLang=0"
-            }
-            
-            // 3. Request the stream JSON natively (Instantly bypasses Cloudflare & WebViews)
-            val jsonText = app.get(
-                url = apiUrl, 
-                headers = mapOf(
-                    "Referer" to "$MAIN_URL/",
-                    "Origin" to MAIN_URL,
-                    "User-Agent" to USER_AGENT
-                )
-            ).text
-            
-            val json = JSONObject(jsonText)
-            val streamObj = json.optJSONObject("stream")
-            val qualitiesObj = streamObj?.optJSONObject("qualities")
-
-            var linksFound = false
-            if (qualitiesObj != null && qualitiesObj.length() > 0) {
-                val m3u8Builder = StringBuilder("#EXTM3U\n")
-                
-                // Sort descending (1080p down to 360p) so ExoPlayer defaults to highest quality
-                val sortedKeys = qualitiesObj.keys().asSequence().toList().sortedByDescending { it.toIntOrNull() ?: 0 }
-                
-                for (qualityKey in sortedKeys) {
-                    val qData = qualitiesObj.optJSONObject(qualityKey) ?: continue
-                    val videoUrl = qData.optString("url")
-                    
-                    if (videoUrl.isNotBlank()) {
-                        val bandwidth = when (qualityKey) {
-                            "1080" -> 5000000
-                            "720" -> 2500000
-                            "480" -> 1200000
-                            "360" -> 800000
-                            else -> 1500000
-                        }
-                        
-                        val height = qualityKey.toIntOrNull() ?: 720
-                        val width = (height * 16) / 9
-                        
-                        m3u8Builder.append("#EXT-X-STREAM-INF:BANDWIDTH=$bandwidth,RESOLUTION=${width}x${height}\n")
-                        m3u8Builder.append(videoUrl).append("\n")
-                        linksFound = true
-                    }
-                }
-                
-                if (linksFound) {
-                    // Serve the dynamically generated M3U8 string to ExoPlayer locally
-                    val localM3u8Url = LocalManifestServer.serve(m3u8Builder.toString().toByteArray(Charsets.UTF_8))
-                    
-                    callback(
-                        ExtractorLink(
-                            source = DISPLAY_NAME,
-                            name = DISPLAY_NAME, // Ensures exactly one track selector button is shown
-                            url = localM3u8Url,
-                            referer = "$MAIN_URL/",
-                            quality = Qualities.Unknown.value,
-                            type = ExtractorLinkType.M3U8,
-                            headers = mapOf(
-                                "Origin" to MAIN_URL,
-                                "User-Agent" to USER_AGENT,
-                                "Accept" to "*/*"
-                            )
-                        )
-                    )
-                }
+            if (manifest.isNullOrBlank()) {
+                Log.w(TAG, "No manifest found in response: ${response.take(300)}")
+                return false
             }
 
-            // 4. Extract Subtitles
-            val captions = streamObj?.optJSONArray("captions") 
-                ?: json.optJSONArray("subtitles")
-                ?: streamObj?.optJSONArray("subtitles")
-
-            if (captions != null) {
-                val addedSubs = mutableSetOf<String>()
-                for (i in 0 until captions.length()) {
-                    val sub = captions.optJSONObject(i) ?: continue
-                    val subUrl = sub.optString("url").ifBlank { sub.optString("file") }
-                    val label = sub.optString("label").ifBlank { sub.optString("language", "English") }
-
-                    if (subUrl.isNotBlank() && addedSubs.add(subUrl)) {
-                        subtitleCallback(
-                            SubtitleFile(
-                                lang = label,
-                                url = subUrl
-                            )
-                        )
-                    }
-                }
+            val added = emitSingleLink(manifest, refererUrl, callback)
+            if (added) {
+                addShowsStSubtitles(json, subtitleCallback)
             }
-
-            linksFound
+            added
         } catch (e: Exception) {
-            Log.e(TAG, "Error in Vidlink native extraction: ${e.message}", e)
+            Log.e(TAG, "Error fetching from api.shows.st: ${e.message}", e)
             false
         }
     }
 
     /**
-     * Local loopback HTTP server to serve the dynamic M3U8 manifest.
+     * Locates the HLS manifest text within the JSON response.
+     */
+    private fun findManifest(json: JSONObject): String? {
+        json.optJSONObject("source")?.optString("manifest")?.takeIf { it.isNotBlank() }?.let { return it }
+
+        json.optJSONArray("sources")?.let { arr ->
+            for (i in 0 until arr.length()) {
+                val m = arr.optJSONObject(i)?.optString("manifest")
+                if (!m.isNullOrBlank()) return m
+            }
+        }
+
+        json.optJSONObject("data")?.optJSONObject("source")?.optString("manifest")
+            ?.takeIf { it.isNotBlank() }?.let { return it }
+
+        json.optString("manifest").takeIf { it.isNotBlank() }?.let { return it }
+        json.optJSONObject("stream")?.optString("manifest")?.takeIf { it.isNotBlank() }?.let { return it }
+
+        return null
+    }
+
+    private suspend fun emitSingleLink(
+        manifest: String,
+        referer: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        val hasVariant = manifest.lines().any { it.trim().startsWith("http") }
+        if (!hasVariant) {
+            Log.w(TAG, "Manifest has no variant stream URLs, skipping")
+            return false
+        }
+
+        val localUrl = LocalManifestServer.serve(manifest.toByteArray(Charsets.UTF_8))
+        Log.d(TAG, "Emitting combined-quality link ($DISPLAY_NAME) via $localUrl")
+
+        callback(
+            newExtractorLink(
+                source = DISPLAY_NAME,
+                name = DISPLAY_NAME,
+                url = localUrl,
+                type = ExtractorLinkType.M3U8
+            ) {
+                this.referer = referer
+            }
+        )
+        return true
+    }
+
+    private fun addShowsStSubtitles(
+        json: JSONObject,
+        subtitleCallback: (SubtitleFile) -> Unit
+    ) {
+        val subtitlesArray = json.optJSONArray("subtitles") ?: return
+        val addedSubtitles = mutableSetOf<String>()
+
+        for (i in 0 until subtitlesArray.length()) {
+            val subObj = subtitlesArray.optJSONObject(i) ?: continue
+            val subUrl = subObj.optString("file")
+            val label = subObj.optString("label")
+            if (subUrl.isNotBlank() && label.contains("English", ignoreCase = true)) {
+                val lang = "English"
+                if (addedSubtitles.add(lang)) {
+                    subtitleCallback.invoke(SubtitleFile(lang, subUrl))
+                }
+            }
+        }
+    }
+
+    /**
+     * Local loopback HTTP server to serve the manifest in-memory to ExoPlayer.
      */
     private object LocalManifestServer {
         private const val TTL_MS = 30 * 60 * 1000L
@@ -176,12 +168,13 @@ object VidlinkExtractor {
                 val ss = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
                 serverSocket = ss
                 port = ss.localPort
+                Log.d(TAG, "LocalManifestServer listening on 127.0.0.1:$port")
 
-                thread(isDaemon = true, name = "VidlinkManifestServer") {
+                thread(isDaemon = true, name = "VidloveManifestServer") {
                     while (!ss.isClosed) {
                         try {
                             val client = ss.accept()
-                            thread(isDaemon = true, name = "VidlinkManifestClient") {
+                            thread(isDaemon = true, name = "VidloveManifestClient") {
                                 handleClient(client)
                             }
                         } catch (e: Exception) {
