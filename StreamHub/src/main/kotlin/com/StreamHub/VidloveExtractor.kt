@@ -331,7 +331,9 @@ object VidloveExtractor {
     ): Boolean {
         // Sanity check: make sure this actually looks like an HLS playlist
         // with at least one stream reference before we bother emitting it.
+        val variantCount = manifest.lines().count { it.trim().startsWith("#EXT-X-STREAM-INF") }
         val hasVariant = manifest.lines().any { it.trim().startsWith("http") }
+        Log.d(TAG, "Manifest contains $variantCount #EXT-X-STREAM-INF variant(s)")
         if (!hasVariant) {
             Log.w(TAG, "Manifest has no variant stream URLs, skipping")
             return false
