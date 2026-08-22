@@ -3,7 +3,6 @@ package com.StreamHub
 import android.annotation.SuppressLint
 import android.os.Handler
 import android.os.Looper
-import android.util.Base64
 import android.util.Log
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
@@ -18,8 +17,12 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import org.json.JSONTokener
+import java.net.InetAddress
+import java.net.ServerSocket
+import java.net.Socket
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.concurrent.thread
 import kotlin.coroutines.resume
 
 object VidloveExtractor {
@@ -301,16 +304,19 @@ object VidloveExtractor {
     /**
      * Emits exactly ONE ExtractorLink for the entire master manifest (all
      * resolutions), instead of manually parsing #EXT-X-STREAM-INF lines and
-     * emitting a separate link per quality. The raw manifest text is embedded
-     * directly as a "data:" URI so ExoPlayer's own HLS parser handles ABR/
-     * quality-track switching internally -- exactly like a normal single-URL
-     * HLS source -- and the player shows just one "Vidlove" entry with
-     * multiple resolution tracks inside it, rather than "Vidlove 480p",
-     * "Vidlove 720p", etc. as separate sources.
+     * emitting a separate link per quality. The raw manifest text is served
+     * from a tiny local loopback HTTP server so ExoPlayer's own HLS parser
+     * handles ABR/quality-track switching internally -- exactly like a
+     * normal single-URL HLS source -- and the player shows just one
+     * "Vidlove" entry with multiple resolution tracks inside it, rather than
+     * "Vidlove 480p", "Vidlove 720p", etc. as separate sources.
      *
-     * Media3's DefaultDataSource has built-in special-case handling for the
-     * "data:" scheme regardless of the underlying HTTP client (e.g. Cronet),
-     * so this works without needing a local server or extra dependencies.
+     * NOTE: a "data:" URI was tried first (simpler, no server needed), but
+     * this app's Cronet-based DataSource pipeline rejects it outright with
+     * net::ERR_UNKNOWN_URL_SCHEME -- Cronet does not special-case the data
+     * scheme the way media3's DefaultDataSource normally would. Serving the
+     * manifest over plain http://127.0.0.1 sidesteps that entirely, since
+     * Cronet handles http(s) URLs the same regardless of host.
      *
      * newExtractorLink is a suspend function, so this must be suspend too --
      * calling it from a plain function is a compile error.
@@ -331,15 +337,14 @@ object VidloveExtractor {
             return false
         }
 
-        val encoded = Base64.encodeToString(manifest.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
-        val dataUri = "data:application/vnd.apple.mpegurl;base64,$encoded"
+        val localUrl = LocalManifestServer.serve(manifest.toByteArray(Charsets.UTF_8))
+        Log.d(TAG, "Emitting single combined-quality link ($DISPLAY_NAME) via $localUrl")
 
-        Log.d(TAG, "Emitting single combined-quality link ($DISPLAY_NAME)")
         callback(
             newExtractorLink(
                 source = DISPLAY_NAME,
                 name = DISPLAY_NAME,
-                url = dataUri,
+                url = localUrl,
                 type = ExtractorLinkType.M3U8
             ) {
                 this.referer = referer
@@ -515,6 +520,115 @@ object VidloveExtractor {
                 webView?.destroy()
                 webView = null
             }
+        }
+    }
+
+    /**
+     * A tiny, always-on loopback HTTP server used purely to hand ExoPlayer's
+     * Cronet-based DataSource a normal http:// URL for manifest text we
+     * already have in memory (it can't be given the text directly, and
+     * data: URIs get rejected with net::ERR_UNKNOWN_URL_SCHEME by this app's
+     * pipeline). Runs for the lifetime of the process; this is intentional
+     * since ExoPlayer may fetch/retry the manifest URL well after
+     * getStreams() has returned and its WebView session has been closed.
+     *
+     * Content is addressed by a random per-call UUID path, so concurrent
+     * playback sessions (or quick source switches) never collide. Entries
+     * are pruned after a generous TTL to avoid unbounded memory growth over
+     * a long-lived app process.
+     */
+    private object LocalManifestServer {
+        private const val TTL_MS = 30 * 60 * 1000L // 30 minutes
+
+        private data class Entry(val bytes: ByteArray, val createdAt: Long)
+
+        private val lock = Any()
+        private var serverSocket: ServerSocket? = null
+        private var port: Int = -1
+        private val manifests = ConcurrentHashMap<String, Entry>()
+
+        private fun ensureStarted(): Int {
+            synchronized(lock) {
+                val existing = serverSocket
+                if (existing != null && !existing.isClosed) return port
+
+                val ss = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
+                serverSocket = ss
+                port = ss.localPort
+                Log.d(TAG, "LocalManifestServer listening on 127.0.0.1:$port")
+
+                thread(isDaemon = true, name = "VidloveManifestServer") {
+                    while (!ss.isClosed) {
+                        try {
+                            val client = ss.accept()
+                            thread(isDaemon = true, name = "VidloveManifestClient") {
+                                handleClient(client)
+                            }
+                        } catch (e: Exception) {
+                            if (!ss.isClosed) {
+                                Log.e(TAG, "LocalManifestServer accept error: $e")
+                            }
+                        }
+                    }
+                }
+                return port
+            }
+        }
+
+        private fun handleClient(socket: Socket) {
+            socket.use { s ->
+                try {
+                    s.soTimeout = 10000
+                    val input = s.getInputStream().bufferedReader(Charsets.US_ASCII)
+                    val requestLine = input.readLine() ?: return
+                    // Drain headers until the blank line; we don't need them.
+                    while (true) {
+                        val line = input.readLine() ?: break
+                        if (line.isEmpty()) break
+                    }
+
+                    val path = requestLine.split(" ").getOrNull(1) ?: "/"
+                    val id = path.trimStart('/').substringBefore("?").substringBefore(".")
+                    val entry = manifests[id]
+                    val output = s.getOutputStream()
+
+                    if (entry == null) {
+                        val body = "not found".toByteArray()
+                        val header = "HTTP/1.1 404 Not Found\r\n" +
+                            "Content-Type: text/plain\r\n" +
+                            "Content-Length: ${body.size}\r\n" +
+                            "Connection: close\r\n\r\n"
+                        output.write(header.toByteArray(Charsets.US_ASCII))
+                        output.write(body)
+                    } else {
+                        val header = "HTTP/1.1 200 OK\r\n" +
+                            "Content-Type: application/vnd.apple.mpegurl\r\n" +
+                            "Content-Length: ${entry.bytes.size}\r\n" +
+                            "Access-Control-Allow-Origin: *\r\n" +
+                            "Cache-Control: no-cache\r\n" +
+                            "Connection: close\r\n\r\n"
+                        output.write(header.toByteArray(Charsets.US_ASCII))
+                        output.write(entry.bytes)
+                    }
+                    output.flush()
+                } catch (e: Exception) {
+                    Log.e(TAG, "LocalManifestServer client error: $e")
+                }
+            }
+        }
+
+        private fun pruneExpired() {
+            val cutoff = System.currentTimeMillis() - TTL_MS
+            manifests.entries.removeAll { it.value.createdAt < cutoff }
+        }
+
+        /** Stores [bytes] and returns a fresh http://127.0.0.1:PORT/<id>.m3u8 URL serving it. */
+        fun serve(bytes: ByteArray): String {
+            val p = ensureStarted()
+            pruneExpired()
+            val id = UUID.randomUUID().toString()
+            manifests[id] = Entry(bytes, System.currentTimeMillis())
+            return "http://127.0.0.1:$p/$id.m3u8"
         }
     }
 }
