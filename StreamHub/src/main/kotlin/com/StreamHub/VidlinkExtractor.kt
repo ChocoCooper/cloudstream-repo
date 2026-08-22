@@ -33,7 +33,6 @@ object VidlinkExtractor {
     private const val TAG = "VidLink"
     private const val DISPLAY_NAME = "Vidlink"
     private const val MAIN_URL = "https://vidlink.pro"
-    private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
     suspend fun getStreams(
         tmdbId: String,
@@ -60,25 +59,27 @@ object VidlinkExtractor {
         val session = VidlinkSession(context)
 
         return try {
-            val apiUrl = withTimeoutOrNull(20000) {
+            // Increased timeout to 25 seconds to survive Cloudflare delays
+            val apiUrl = withTimeoutOrNull(25000) {
                 session.interceptApiUrl(pageUrl)
             }
             
+            val nativeUserAgent = session.userAgent
             session.destroy()
 
             if (apiUrl.isNullOrBlank()) {
-                Log.w(TAG, "Failed to intercept API URL. WebView might have timed out.")
+                Log.w(TAG, "Failed to intercept API URL. The background WebView timed out.")
                 return false
             }
 
-            Log.d(TAG, "Successfully intercepted API URL: $apiUrl")
+            Log.d(TAG, "Successfully intercepted encrypted API URL: $apiUrl")
 
             val jsonText = app.get(
                 url = apiUrl, 
                 headers = mapOf(
                     "Referer" to "$MAIN_URL/",
                     "Origin" to MAIN_URL,
-                    "User-Agent" to USER_AGENT
+                    "User-Agent" to nativeUserAgent
                 )
             ).text
             
@@ -125,7 +126,7 @@ object VidlinkExtractor {
                             type = ExtractorLinkType.M3U8,
                             headers = mapOf(
                                 "Origin" to MAIN_URL,
-                                "User-Agent" to USER_AGENT
+                                "User-Agent" to nativeUserAgent
                             )
                         )
                     )
@@ -159,68 +160,62 @@ object VidlinkExtractor {
         private var webView: WebView? = null
         private val apiUrlDeferred = CompletableDeferred<String?>()
         private val mainHandler = Handler(Looper.getMainLooper())
-
-        private inner class JsBridge {
-            @JavascriptInterface
-            fun onIntercept(url: String) {
-                if (!apiUrlDeferred.isCompleted) apiUrlDeferred.complete(url)
-            }
-        }
+        
+        var userAgent: String = ""
+            private set
 
         @SuppressLint("SetJavaScriptEnabled")
         suspend fun interceptApiUrl(pageUrl: String): String? = withContext(Dispatchers.Main) {
             try {
                 webView = WebView(context).apply {
+                    // CRITICAL FIX 1: Force a 1080p layout in memory. 
+                    // Cloudflare blocks WebViews that have a 0x0 viewport size.
+                    layout(0, 0, 1920, 1080)
+                    
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
-                    settings.blockNetworkImage = true
-                    settings.userAgentString = USER_AGENT
-                    
-                    // CRITICAL FIX: Allow player to autoplay without human interaction
+                    settings.databaseEnabled = true
+                    settings.blockNetworkImage = false 
+                    settings.blockNetworkLoads = false
                     settings.mediaPlaybackRequiresUserGesture = false 
-
-                    addJavascriptInterface(JsBridge(), "AndroidVidlinkBridge")
+                    
+                    this@VidlinkSession.userAgent = settings.userAgentString
 
                     webViewClient = object : WebViewClient() {
-                        
-                        // Layer 1: Native OS Interceptor
                         override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
                             val url = request?.url?.toString() ?: return super.shouldInterceptRequest(view, request)
-                            if (url.contains("/api/b/movie") || url.contains("/api/b/tv")) {
+                            if ((url.contains("/api/b/movie") || url.contains("/api/b/tv")) && request.method == "GET") {
                                 if (!apiUrlDeferred.isCompleted) apiUrlDeferred.complete(url)
                             }
                             return super.shouldInterceptRequest(view, request)
                         }
 
-                        // Layer 2: JavaScript Fetch Hook
-                        override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
-                            view?.evaluateJavascript(
-                                """
-                                (function() {
-                                    if (window.__vidlink_hooked__) return;
-                                    window.__vidlink_hooked__ = true;
-                                    const origFetch = window.fetch;
-                                    window.fetch = async function(...args) {
-                                        const reqUrl = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
-                                        if (reqUrl.includes('/api/b/movie') || reqUrl.includes('/api/b/tv')) {
-                                            AndroidVidlinkBridge.onIntercept(reqUrl);
-                                        }
-                                        return await origFetch.apply(this, args);
-                                    };
-                                })();
-                                """.trimIndent(), null
-                            )
-                            super.onPageStarted(view, url, favicon)
-                        }
-
-                        // Layer 3: Auto-clicker
                         override fun onPageFinished(view: WebView?, url: String?) {
+                            // CRITICAL FIX 2: Relentless Auto-Clicker
+                            // Instead of trying once, this hammers the document every 500ms 
+                            // ensuring that the moment Cloudflare vanishes, the video is clicked.
                             view?.evaluateJavascript(
                                 """
-                                setTimeout(() => {
-                                    let btn = document.querySelector('.vjs-big-play-button, .play-button, video');
-                                    if (btn) btn.click();
-                                }, 1000);
+                                let clickInterval = setInterval(() => {
+                                    if (window.__vidlink_api_called) {
+                                        clearInterval(clickInterval);
+                                        return;
+                                    }
+                                    let btn = document.querySelector('.vjs-big-play-button, .play-button, video, iframe, body');
+                                    if (btn) {
+                                        try { btn.click(); } catch(e) {}
+                                    }
+                                }, 500);
+                                
+                                // Monitor fetch so we know when to stop clicking
+                                const origFetch = window.fetch;
+                                window.fetch = async function(...args) {
+                                    const reqUrl = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
+                                    if (reqUrl.includes('/api/b/')) {
+                                        window.__vidlink_api_called = true;
+                                    }
+                                    return await origFetch.apply(this, args);
+                                };
                                 """.trimIndent(), null
                             )
                         }
