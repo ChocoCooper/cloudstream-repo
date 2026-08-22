@@ -21,7 +21,7 @@ object VidlinkExtractor {
     private const val MAIN_URL = "https://vidlink.pro"
     private const val ENC_API = "https://enc-dec.app/api/enc-vidlink?text="
     
-    // Strict headers synced exactly with your Python script to bypass the CDN 428/429 blocks
+    // Strict User-Agent binding to satisfy the CDN Precondition rule
     private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
 
     suspend fun getStreams(
@@ -35,11 +35,15 @@ object VidlinkExtractor {
         Log.d(TAG, "getStreams invoked: tmdbId=$tmdbId, isMovie=$isMovie, season=$season, episode=$episode")
 
         return try {
-            // 1. Fetch the encrypted token from the native decrypter
-            val encResponse = app.get("$ENC_API$tmdbId").text
+            // 1. Fetch the decrypted AES token natively (Added Headers & Timeout)
+            val encResponse = app.get(
+                url = "$ENC_API$tmdbId",
+                headers = mapOf("User-Agent" to USER_AGENT),
+                timeout = 15
+            ).text
+            
             val encJson = JSONObject(encResponse)
             
-            // Validate success status mirroring the Python script
             if (encJson.optInt("status") != 200) {
                 Log.e(TAG, "Encryption API failed. Error: ${encJson.optString("error", "Unknown")}")
                 return false
@@ -53,21 +57,22 @@ object VidlinkExtractor {
 
             Log.d(TAG, "Successfully generated token: ${encryptedToken.take(15)}...")
 
-            // 2. Format the Vidlink API URL correctly based on media type
+            // 2. Build the API URL for either Movie or TV Show
             val apiUrl = if (isMovie) {
                 "$MAIN_URL/api/b/movie/$encryptedToken?multiLang=0"
             } else {
                 "$MAIN_URL/api/b/tv/$encryptedToken/${season ?: 1}/${episode ?: 1}?multiLang=0"
             }
             
-            // 3. Request the stream JSON natively (Instantly bypasses Cloudflare & WebViews)
+            // 3. Hit the Vidlink API directly using the trusted User-Agent (Added Timeout)
             val jsonText = app.get(
                 url = apiUrl, 
                 headers = mapOf(
                     "Referer" to "$MAIN_URL/",
                     "Origin" to MAIN_URL,
                     "User-Agent" to USER_AGENT
-                )
+                ),
+                timeout = 15
             ).text
             
             val json = JSONObject(jsonText)
@@ -78,7 +83,7 @@ object VidlinkExtractor {
             if (qualitiesObj != null && qualitiesObj.length() > 0) {
                 val m3u8Builder = StringBuilder("#EXTM3U\n")
                 
-                // Sort descending (1080p down to 360p) so ExoPlayer defaults to highest quality
+                // Sort keys descending so highest quality is default/first
                 val sortedKeys = qualitiesObj.keys().asSequence().toList().sortedByDescending { it.toIntOrNull() ?: 0 }
                 
                 for (qualityKey in sortedKeys) {
@@ -86,6 +91,7 @@ object VidlinkExtractor {
                     val videoUrl = qData.optString("url")
                     
                     if (videoUrl.isNotBlank()) {
+                        // Standard HLS bandwidth estimations
                         val bandwidth = when (qualityKey) {
                             "1080" -> 5000000
                             "720" -> 2500000
@@ -94,6 +100,7 @@ object VidlinkExtractor {
                             else -> 1500000
                         }
                         
+                        // Rough 16:9 resolution calculation
                         val height = qualityKey.toIntOrNull() ?: 720
                         val width = (height * 16) / 9
                         
@@ -110,7 +117,7 @@ object VidlinkExtractor {
                     callback(
                         ExtractorLink(
                             source = DISPLAY_NAME,
-                            name = DISPLAY_NAME, // Ensures exactly one track selector button is shown
+                            name = DISPLAY_NAME, // Single Source Name
                             url = localM3u8Url,
                             referer = "$MAIN_URL/",
                             quality = Qualities.Unknown.value,
@@ -150,6 +157,9 @@ object VidlinkExtractor {
 
             linksFound
         } catch (e: Exception) {
+            // Rethrow cancellation so Cloudstream handles timeouts correctly
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            
             Log.e(TAG, "Error in Vidlink native extraction: ${e.message}", e)
             false
         }
@@ -236,14 +246,9 @@ object VidlinkExtractor {
             }
         }
 
-        private fun pruneExpired() {
-            val cutoff = System.currentTimeMillis() - TTL_MS
-            manifests.entries.removeAll { it.value.createdAt < cutoff }
-        }
-
         fun serve(bytes: ByteArray): String {
             val p = ensureStarted()
-            pruneExpired()
+            manifests.entries.removeAll { it.value.createdAt < System.currentTimeMillis() - TTL_MS }
             val id = UUID.randomUUID().toString()
             manifests[id] = Entry(bytes, System.currentTimeMillis())
             return "http://127.0.0.1:$p/$id.m3u8"
