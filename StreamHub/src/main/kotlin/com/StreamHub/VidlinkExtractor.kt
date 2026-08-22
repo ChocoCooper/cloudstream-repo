@@ -20,8 +20,9 @@ object VidlinkExtractor {
     private const val DISPLAY_NAME = "Vidlink"
     private const val MAIN_URL = "https://vidlink.pro"
     private const val ENC_API = "https://enc-dec.app/api/enc-vidlink?text="
+    private const val PROXY_DOMAIN = "https://noon.mooncase.online/mp"
     
-    // Strict User-Agent binding to satisfy the CDN Precondition rule
+    // Strict User-Agent binding
     private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
 
     suspend fun getStreams(
@@ -32,10 +33,10 @@ object VidlinkExtractor {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        Log.d(TAG, "getStreams invoked: tmdbId=$tmdbId, isMovie=$isMovie, season=$season, episode=$episode")
+        Log.d(TAG, "getStreams invoked: tmdbId=$tmdbId")
 
         return try {
-            // 1. Fetch the decrypted AES token natively (Added Headers & Timeout)
+            // 1. Fetch encrypted token natively
             val encResponse = app.get(
                 url = "$ENC_API$tmdbId",
                 headers = mapOf("User-Agent" to USER_AGENT),
@@ -43,28 +44,18 @@ object VidlinkExtractor {
             ).text
             
             val encJson = JSONObject(encResponse)
-            
-            if (encJson.optInt("status") != 200) {
-                Log.e(TAG, "Encryption API failed. Error: ${encJson.optString("error", "Unknown")}")
-                return false
-            }
+            if (encJson.optInt("status") != 200) return false
             
             val encryptedToken = encJson.optString("result", "")
-            if (encryptedToken.isBlank()) {
-                Log.w(TAG, "Decrypted token is empty.")
-                return false
-            }
+            if (encryptedToken.isBlank()) return false
 
-            Log.d(TAG, "Successfully generated token: ${encryptedToken.take(15)}...")
-
-            // 2. Build the API URL for either Movie or TV Show
+            // 2. Fetch Streams from Vidlink API
             val apiUrl = if (isMovie) {
                 "$MAIN_URL/api/b/movie/$encryptedToken?multiLang=0"
             } else {
                 "$MAIN_URL/api/b/tv/$encryptedToken/${season ?: 1}/${episode ?: 1}?multiLang=0"
             }
             
-            // 3. Hit the Vidlink API directly using the trusted User-Agent (Added Timeout)
             val jsonText = app.get(
                 url = apiUrl, 
                 headers = mapOf(
@@ -82,25 +73,23 @@ object VidlinkExtractor {
             var linksFound = false
             if (qualitiesObj != null && qualitiesObj.length() > 0) {
                 val m3u8Builder = StringBuilder("#EXTM3U\n")
-                
-                // Sort keys descending so highest quality is default/first
                 val sortedKeys = qualitiesObj.keys().asSequence().toList().sortedByDescending { it.toIntOrNull() ?: 0 }
                 
                 for (qualityKey in sortedKeys) {
                     val qData = qualitiesObj.optJSONObject(qualityKey) ?: continue
-                    val videoUrl = qData.optString("url")
+                    var videoUrl = qData.optString("url")
                     
                     if (videoUrl.isNotBlank()) {
-                        // Standard HLS bandwidth estimations
-                        val bandwidth = when (qualityKey) {
-                            "1080" -> 5000000
-                            "720" -> 2500000
-                            "480" -> 1200000
-                            "360" -> 800000
-                            else -> 1500000
+                        
+                        // MAGIC FIX 1: The Host Swap
+                        // Reroute heavily firewalled CDN links through the open proxy
+                        if (videoUrl.contains("bcdn.hakunaymatata.com")) {
+                            videoUrl = videoUrl.replace(Regex("^https?://[^/]+"), PROXY_DOMAIN)
                         }
                         
-                        // Rough 16:9 resolution calculation
+                        val bandwidth = when (qualityKey) {
+                            "1080" -> 5000000; "720" -> 2500000; "480" -> 1200000; "360" -> 800000; else -> 1500000
+                        }
                         val height = qualityKey.toIntOrNull() ?: 720
                         val width = (height * 16) / 9
                         
@@ -111,32 +100,29 @@ object VidlinkExtractor {
                 }
                 
                 if (linksFound) {
-                    // Serve the dynamically generated M3U8 string to ExoPlayer locally
                     val localM3u8Url = LocalManifestServer.serve(m3u8Builder.toString().toByteArray(Charsets.UTF_8))
                     
                     callback(
                         ExtractorLink(
                             source = DISPLAY_NAME,
-                            name = DISPLAY_NAME, // Single Source Name
+                            name = DISPLAY_NAME, 
                             url = localM3u8Url,
                             referer = "$MAIN_URL/",
                             quality = Qualities.Unknown.value,
                             type = ExtractorLinkType.M3U8,
                             headers = mapOf(
-                                "Origin" to MAIN_URL,
+                                // MAGIC FIX 2: Strip the "Origin" bot-trap. 
+                                // Send ONLY the User-Agent and Referer to mimic a real HTML5 <video> tag.
                                 "User-Agent" to USER_AGENT,
-                                "Accept" to "*/*"
+                                "Referer" to "$MAIN_URL/"
                             )
                         )
                     )
                 }
             }
 
-            // 4. Extract Subtitles
-            val captions = streamObj?.optJSONArray("captions") 
-                ?: json.optJSONArray("subtitles")
-                ?: streamObj?.optJSONArray("subtitles")
-
+            // Extract Subtitles
+            val captions = streamObj?.optJSONArray("captions") ?: json.optJSONArray("subtitles") ?: streamObj?.optJSONArray("subtitles")
             if (captions != null) {
                 val addedSubs = mutableSetOf<String>()
                 for (i in 0 until captions.length()) {
@@ -145,34 +131,25 @@ object VidlinkExtractor {
                     val label = sub.optString("label").ifBlank { sub.optString("language", "English") }
 
                     if (subUrl.isNotBlank() && addedSubs.add(subUrl)) {
-                        subtitleCallback(
-                            SubtitleFile(
-                                lang = label,
-                                url = subUrl
-                            )
-                        )
+                        subtitleCallback(SubtitleFile(lang = label, url = subUrl))
                     }
                 }
             }
 
             linksFound
         } catch (e: Exception) {
-            // Rethrow cancellation so Cloudstream handles timeouts correctly
             if (e is kotlinx.coroutines.CancellationException) throw e
-            
             Log.e(TAG, "Error in Vidlink native extraction: ${e.message}", e)
             false
         }
     }
 
-    /**
-     * Local loopback HTTP server to serve the dynamic M3U8 manifest.
-     */
+    // ========================================================================
+    // LOCAL M3U8 SERVER (Unchanged)
+    // ========================================================================
     private object LocalManifestServer {
         private const val TTL_MS = 30 * 60 * 1000L
-
         private data class Entry(val bytes: ByteArray, val createdAt: Long)
-
         private val lock = Any()
         private var serverSocket: ServerSocket? = null
         private var port: Int = -1
@@ -182,23 +159,15 @@ object VidlinkExtractor {
             synchronized(lock) {
                 val existing = serverSocket
                 if (existing != null && !existing.isClosed) return port
-
                 val ss = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
                 serverSocket = ss
                 port = ss.localPort
-
                 thread(isDaemon = true, name = "VidlinkManifestServer") {
                     while (!ss.isClosed) {
                         try {
                             val client = ss.accept()
-                            thread(isDaemon = true, name = "VidlinkManifestClient") {
-                                handleClient(client)
-                            }
-                        } catch (e: Exception) {
-                            if (!ss.isClosed) {
-                                Log.e(TAG, "LocalManifestServer accept error: $e")
-                            }
-                        }
+                            thread(isDaemon = true) { handleClient(client) }
+                        } catch (e: Exception) {}
                     }
                 }
                 return port
@@ -211,38 +180,22 @@ object VidlinkExtractor {
                     s.soTimeout = 10000
                     val input = s.getInputStream().bufferedReader(Charsets.US_ASCII)
                     val requestLine = input.readLine() ?: return
-                    while (true) {
-                        val line = input.readLine() ?: break
-                        if (line.isEmpty()) break
-                    }
-
+                    while (true) { if (input.readLine().isNullOrEmpty()) break }
+                    
                     val path = requestLine.split(" ").getOrNull(1) ?: "/"
                     val id = path.trimStart('/').substringBefore("?").substringBefore(".")
                     val entry = manifests[id]
                     val output = s.getOutputStream()
 
                     if (entry == null) {
-                        val body = "not found".toByteArray()
-                        val header = "HTTP/1.1 404 Not Found\r\n" +
-                            "Content-Type: text/plain\r\n" +
-                            "Content-Length: ${body.size}\r\n" +
-                            "Connection: close\r\n\r\n"
-                        output.write(header.toByteArray(Charsets.US_ASCII))
-                        output.write(body)
+                        output.write("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n".toByteArray(Charsets.US_ASCII))
                     } else {
-                        val header = "HTTP/1.1 200 OK\r\n" +
-                            "Content-Type: application/vnd.apple.mpegurl\r\n" +
-                            "Content-Length: ${entry.bytes.size}\r\n" +
-                            "Access-Control-Allow-Origin: *\r\n" +
-                            "Cache-Control: no-cache\r\n" +
-                            "Connection: close\r\n\r\n"
+                        val header = "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: ${entry.bytes.size}\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n"
                         output.write(header.toByteArray(Charsets.US_ASCII))
                         output.write(entry.bytes)
                     }
                     output.flush()
-                } catch (e: Exception) {
-                    Log.e(TAG, "LocalManifestServer client error: $e")
-                }
+                } catch (e: Exception) {}
             }
         }
 
