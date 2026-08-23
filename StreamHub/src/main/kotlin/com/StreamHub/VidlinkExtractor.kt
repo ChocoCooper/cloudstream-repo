@@ -15,7 +15,9 @@ object VidlinkExtractor {
     private const val MAIN_URL = "https://vidlink.pro"
     private const val ENC_API = "https://enc-dec.app/api/enc-vidlink?text="
     
-    // Hardcoded User-Agent matches exactly what bypassing Python scripts use
+    // The Proxy Node that bypasses the bcdn.hakunaymatata CDN Firewall
+    private const val PROXY_DOMAIN = "https://noon.mooncase.online/mp"
+    
     private const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
     suspend fun getStreams(
@@ -29,23 +31,19 @@ object VidlinkExtractor {
         Log.d(TAG, "getStreams invoked: tmdbId=$tmdbId")
 
         return try {
-            // 1. Fetch Token (Native Decryption)
-            // If enc-dec.app is sleeping, this might take ~10 seconds on the first click.
+            // 1. Fetch Token
             val encResponse = app.get(
                 url = "$ENC_API$tmdbId", 
                 headers = mapOf("User-Agent" to USER_AGENT, "Accept" to "application/json")
             ).text
             
             val encJson = JSONObject(encResponse)
-            if (encJson.optInt("status") != 200) {
-                Log.e(TAG, "Decryption API failed: ${encJson.optString("error")}")
-                return false
-            }
+            if (encJson.optInt("status") != 200) return false
             
             val token = encJson.optString("result", "")
             if (token.isBlank()) return false
 
-            // 2. Fetch Streams from Vidlink
+            // 2. Fetch Streams
             val apiUrl = if (isMovie) {
                 "$MAIN_URL/api/b/movie/$token?multiLang=0"
             } else {
@@ -67,15 +65,22 @@ object VidlinkExtractor {
             val qualitiesObj = streamObj.optJSONObject("qualities") ?: return false
 
             var linksFound = false
-            
-            // Sort from highest quality to lowest
             val sortedKeys = qualitiesObj.keys().asSequence().toList().sortedByDescending { it.toIntOrNull() ?: 0 }
             
             for (key in sortedKeys) {
                 val qData = qualitiesObj.optJSONObject(key) ?: continue
-                val videoUrl = qData.optString("url")
+                var videoUrl = qData.optString("url")
                 
                 if (videoUrl.isNotBlank()) {
+                    
+                    // ========================================================
+                    // THE MISSING HOST SWAP FIX
+                    // Reroute heavily firewalled CDN links through the proxy
+                    // ========================================================
+                    if (videoUrl.contains("bcdn.hakunaymatata.com")) {
+                        videoUrl = videoUrl.replace(Regex("^https?://[^/]+"), PROXY_DOMAIN)
+                    }
+
                     val qualityInt = when (key) {
                         "1080" -> Qualities.P1080.value
                         "720" -> Qualities.P720.value
@@ -87,13 +92,11 @@ object VidlinkExtractor {
                     callback(
                         ExtractorLink(
                             source = DISPLAY_NAME,
-                            name = "$DISPLAY_NAME ${key}p", // e.g., "Vidlink 1080p"
+                            name = "$DISPLAY_NAME ${key}p", 
                             url = videoUrl,
                             referer = "$MAIN_URL/",
                             quality = qualityInt,
-                            // CRITICAL FIX: Using VIDEO type instead of M3U8.
-                            // This stops ExoPlayer from spamming the CDN and triggering a 429 IP Ban.
-                            type = ExtractorLinkType.VIDEO, 
+                            type = ExtractorLinkType.VIDEO, // Direct MP4 playback 
                             headers = mapOf(
                                 "User-Agent" to USER_AGENT,
                                 "Referer" to "$MAIN_URL/"
@@ -104,7 +107,7 @@ object VidlinkExtractor {
                 }
             }
 
-            // 3. Extract Subtitles natively
+            // 3. Extract Subtitles
             val captions = streamObj.optJSONArray("captions") ?: json.optJSONArray("subtitles") ?: streamObj.optJSONArray("subtitles")
             if (captions != null) {
                 for (i in 0 until captions.length()) {
@@ -121,7 +124,6 @@ object VidlinkExtractor {
             linksFound
             
         } catch (e: Exception) {
-            // If Cloudstream kills the job because of a "Cold Start" timeout, rethrow so it handles it cleanly
             if (e is kotlinx.coroutines.CancellationException) throw e
             Log.e(TAG, "Native extraction failed: ${e.message}", e)
             false
