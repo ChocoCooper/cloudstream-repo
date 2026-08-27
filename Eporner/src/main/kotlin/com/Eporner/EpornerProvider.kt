@@ -125,7 +125,6 @@ class Eporner : MainAPI() {
                 e.printStackTrace()
             }
 
-            // Map Eporner qualities to HLS tags so ExoPlayer can render track resolutions natively
             val (bw, res) = when {
                 labelShort.contains("1080") -> "5000000" to "1920x1080"
                 labelShort.contains("720") -> "2500000" to "1280x720"
@@ -137,9 +136,9 @@ class Eporner : MainAPI() {
             m3u8Content += "#EXT-X-STREAM-INF:BANDWIDTH=$bw,RESOLUTION=$res,NAME=\"$labelShort\"\n$finalUrl\n"
         }
 
-        // Compile raw MP4s into a dynamic local HLS manifest via Data URI
         val encodedM3u8 = Base64.encodeToString(m3u8Content.toByteArray(), Base64.NO_WRAP)
-        val dataUri = "data:application/x-mpegURL;base64,$encodedM3u8"
+        // Appending #.m3u8 forces CloudStream to automatically infer this as an M3U8 playlist
+        val dataUri = "data:application/x-mpegURL;base64,$encodedM3u8#.m3u8"
 
         val finalHeaders = mapOf(
             "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -147,17 +146,18 @@ class Eporner : MainAPI() {
             "Host" to commonHost
         )
 
-        // Return a single master playlist link named "Eporner" passing arguments directly
+        // Using the builder block correctly for mutable properties
         callback.invoke(
             newExtractorLink(
                 source = name,
                 name = "Eporner",
                 url = dataUri,
-                referer = data,
-                quality = Qualities.Unknown.value,
-                isM3u8 = true,
-                headers = finalHeaders
-            )
+                type = INFER_TYPE
+            ) {
+                this.referer = data
+                this.quality = Qualities.Unknown.value
+                this.headers = finalHeaders
+            }
         )
         return true
     }
