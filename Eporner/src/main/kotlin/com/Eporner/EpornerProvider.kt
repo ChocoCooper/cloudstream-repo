@@ -71,19 +71,19 @@ class Eporner : MainAPI() {
         }
     }
 
-    // Manual DoH Resolver utilizing OkHttp to bypass ISP DNS blocks
+    // Manual DoH Resolver utilizing Google DNS to bypass ISP blocks
     private suspend fun resolveDoH(host: String): String? {
         return try {
-            val response = app.get(
-                "https://cloudflare-dns.com/dns-query?name=$host&type=A", 
-                headers = mapOf("accept" to "application/dns-json")
-            ).text
+            val response = app.get("https://dns.google/resolve?name=$host").text
             val json = JSONObject(response)
             val answers = json.optJSONArray("Answer") ?: return null
             for (i in 0 until answers.length()) {
                 val answer = answers.getJSONObject(i)
-                if (answer.getInt("type") == 1) { // Type 1 is A Record (IPv4)
-                    return answer.getString("data")
+                val type = answer.getInt("type")
+                if (type == 1 || type == 28) { // 1 = IPv4, 28 = IPv6
+                    val ip = answer.getString("data")
+                    // Enclose IPv6 addresses in brackets for valid URL generation
+                    return if (ip.contains(":")) "[$ip]" else ip
                 }
             }
             null
@@ -116,17 +116,17 @@ class Eporner : MainAPI() {
                 "Referer" to data
             )
 
-            // Attempt DNS Bypass via IP Substitution
+            // Attempt dynamic DNS Bypass via IP Substitution
             try {
                 val uri = java.net.URI(src)
-                val host = uri.host
-                val ip = resolveDoH(host)
+                val originalHost = uri.host
+                val ip = resolveDoH(originalHost)
                 
                 if (ip != null) {
                     // Downgrade to HTTP and use raw IP to bypass Cronet SSL/SNI certificate mismatch
-                    finalUrl = src.replace("https://", "http://").replace(host, ip)
+                    finalUrl = src.replace("https://", "http://").replace(originalHost, ip)
                     // Inject original host header so Eporner's CDN routes correctly
-                    finalHeaders["Host"] = host
+                    finalHeaders["Host"] = originalHost
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
@@ -155,6 +155,7 @@ class Eporner : MainAPI() {
             val part2 = BigInteger(hash.substring(8, 16), 16).toString(36)
             val part3 = BigInteger(hash.substring(16, 24), 16).toString(36)
             val part4 = BigInteger(hash.substring(24, 32), 16).toString(36)
+
             part1 + part2 + part3 + part4
         } else {
             throw IllegalArgumentException("Hash length is invalid")
