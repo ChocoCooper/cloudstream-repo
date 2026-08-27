@@ -16,7 +16,8 @@ class Eporner : MainAPI() {
     override val hasDownloadSupport   = true
     override val hasChromecastSupport = true
     override val supportedTypes       = setOf(TvType.NSFW)
-    
+    override val vpnStatus            = VPNStatus.MightBeNeeded
+
     override val mainPage = mainPageOf(
             "" to "Recent Videos",
             "best-videos" to "Best Videos",
