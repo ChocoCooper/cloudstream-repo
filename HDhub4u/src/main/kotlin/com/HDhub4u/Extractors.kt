@@ -377,10 +377,57 @@ class HubCloud : ExtractorApi() {
             if (size.isNotEmpty()) append("[$size]")
         }
 
-        document.select("a.btn").amap { element ->
+        // ------------------------------------------------------------------
+        // FIX: HubCloud's mirror page doesn't always put the real download
+        // target in the button's href attribute. Confirmed markup example:
+        //     <script>var url="{dynamic url}";</script>
+        // A button (commonly Pixeldrain) is wired up via onclick to read
+        // that JS variable and navigate to it, leaving href blank, "#", or
+        // "javascript:void(0)". Since we only ever parse static HTML (no JS
+        // execution), the old code's `if (link.isBlank()) return@amap` threw
+        // that button away before it was even inspected — so Pixeldrain (or
+        // whichever button used this pattern) silently never produced a
+        // link. This scans every <script> tag once per page for
+        // `var name = "value";` declarations so any button can fall back to
+        // one of them when its href isn't directly usable.
+        // ------------------------------------------------------------------
+        val scriptVars: Map<String, String> = buildMap {
+            val varRegex = Regex("""var\s+(\w+)\s*=\s*["']([^"']+)["']""")
+            document.select("script").forEach { script ->
+                varRegex.findAll(script.data()).forEach { m ->
+                    put(m.groupValues[1], m.groupValues[2])
+                }
+            }
+        }
+
+        /** Resolves a button's real target: its href if usable, else a JS `var` fallback. */
+        fun resolveLink(element: org.jsoup.nodes.Element): String {
+            val href = element.attr("href")
+            val isUsable = href.isNotBlank() && href != "#" && !href.startsWith("javascript", ignoreCase = true)
+            if (isUsable) return href
+
+            // No usable href — look for the target in an onclick handler first
+            // (e.g. onclick="location.href=url" or onclick="download('url_var')"),
+            // then fall back to common variable names seen on these pages.
+            val onclick = element.attr("onclick")
+            val referencedVar = Regex("""\b(\w*url\w*|\w*link\w*)\b""", RegexOption.IGNORE_CASE)
+                .find(onclick)?.groupValues?.get(1)
+
+            return referencedVar?.let { scriptVars[it] }
+                ?: scriptVars["url"]
+                ?: scriptVars["link"]
+                ?: scriptVars["dlink"]
+                ?: scriptVars["downloadUrl"]
+                ?: ""
+        }
+
+        document.select("a.btn, button.btn").amap { element ->
             try {
-                val link = element.attr("href")
-                if (link.isBlank()) return@amap
+                val link = resolveLink(element)
+                if (link.isBlank()) {
+                    Log.w(tag, "Skipping button with no resolvable href or script var: ${element.ownText()}")
+                    return@amap
+                }
                 val label = element.ownText().lowercase()
 
                 when {
@@ -418,15 +465,21 @@ class HubCloud : ExtractorApi() {
                     }
 
                     "pixeldra" in label || "pixelserver" in label || "pixel server" in label || "pixeldrain" in label -> {
+                        // FIX: `link` here may now be a raw pixeldrain page URL (from
+                        // href) OR a URL pulled straight from a JS variable — either a
+                        // page URL like ".../u/ABC123" or already a direct API URL like
+                        // ".../api/file/ABC123?download". Handle all three shapes.
                         val base = getBaseUrl(link)
-                        // FIX: extract the actual file id with a regex instead of
-                        // substringAfterLast("/"), which breaks when the link carries
-                        // a query string (e.g. ".../u/ABC123?something=1").
                         val fileId = Regex("""/u/([A-Za-z0-9]+)""").find(link)?.groupValues?.get(1)
+                            ?: Regex("""/api/file/([A-Za-z0-9]+)""").find(link)?.groupValues?.get(1)
                             ?: link.substringAfterLast("/").substringBefore("?")
 
-                        val finalUrl = if ("download" in link) link
-                        else "$base/api/file/$fileId?download"
+                        val finalUrl = when {
+                            "download" in link -> link
+                            "/api/file/" in link -> link
+                            fileId.isNotBlank() && base.isNotBlank() -> "$base/api/file/$fileId?download"
+                            else -> link
+                        }
 
                         callback(
                             newExtractorLink(
