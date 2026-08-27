@@ -30,6 +30,7 @@ import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
 import org.json.JSONObject
+import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.jsoup.select.Elements
 import java.text.Normalizer
@@ -169,6 +170,37 @@ class HDhub4uProvider : MainAPI() {
             .mapNotNull { it.attr("href") }
             .filter { allowedDomains.containsMatchIn(it) }
             .distinct()
+    }
+
+    /**
+     * FIX: the previous approach opted *in* to links via
+     *     "h3 a:matches(480|720|1080|2160|4K), h4 a:matches(480|720|1080|2160|4K)"
+     * which only caught links whose own visible text literally spelled out a
+     * resolution digit. Real pages mix formats — e.g. "480p⚡[820MB]" happens
+     * to match, but a plain "Download Now", an emoji-only label, or any
+     * mirror whose quality is implied by page context rather than link text
+     * would be silently skipped. Meanwhile it did nothing to explicitly
+     * reject sample/trailer links — it just accidentally missed "[SAMPLE]"
+     * because that text has no digits in it.
+     *
+     * New approach, based on the confirmed markup:
+     *     .../main/div/div/div/h4[1]/a  -> [SAMPLE] link  (must be excluded)
+     *     .../main/div/div/div/h3[1]/a  -> 480p⚡[820MB]   (real download link)
+     *
+     * Every h3/h4 anchor inside the post body is a candidate download link
+     * *except* the ones we can positively identify as sample/trailer/
+     * screenshot links. This opts OUT specific non-download content instead
+     * of opting IN to a narrow text pattern, so it won't silently drop real
+     * links whose label doesn't happen to contain a quality number.
+     */
+    private fun extractMovieLinks(doc: Document): List<String> {
+        val excludedText = Regex("sample|trailer|screenshot", RegexOption.IGNORE_CASE)
+
+        val headingLinks = doc.select("main h3 a[href], main h4 a[href], .page-body h3 a[href], .page-body h4 a[href]")
+            .filterNot { excludedText.containsMatchIn(it.text()) }
+            .mapNotNull { it.attr("href").takeIf { href -> href.isNotBlank() && href.startsWith("http", ignoreCase = true) } }
+
+        return (headingLinks + extractLinksATags(doc.select(".page-body > div a"))).distinct()
     }
 
     override suspend fun load(url: String): LoadResponse {
@@ -350,11 +382,7 @@ class HDhub4uProvider : MainAPI() {
         }
 
         if (tvtype == TvType.Movie) {
-            val movieList = mutableListOf<String>()
-            movieList.addAll(
-                doc.select("h3 a:matches(480|720|1080|2160|4K), h4 a:matches(480|720|1080|2160|4K)")
-                    .map { it.attr("href") } + extractLinksATags(doc.select(".page-body > div a"))
-            )
+            val movieList = extractMovieLinks(doc)
 
             return newMovieLoadResponse(title, url, TvType.Movie, movieList) {
                 this.backgroundPosterUrl = background
