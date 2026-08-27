@@ -7,6 +7,6 @@ import android.content.Context
 @CloudstreamPlugin
 class EpornerPlugin: Plugin() {
     override fun load(context: Context) {
-        registerMainAPI(EpornerProvider())
+        registerMainAPI(Eporner())
     }
 }
