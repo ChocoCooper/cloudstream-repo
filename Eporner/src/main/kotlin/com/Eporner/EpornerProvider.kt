@@ -99,11 +99,11 @@ class Eporner : MainAPI() {
                     source = name,
                     name = name,
                     url = src,
-                    type = INFER_TYPE,
-                    headers = streamHeaders // Inject headers to bypass Cloudflare block
+                    type = INFER_TYPE
                 ) {
                     this.referer = data
                     this.quality = getIndexQuality(labelShort)
+                    this.headers = streamHeaders // Moved inside the builder block
                 }
             )
         }
