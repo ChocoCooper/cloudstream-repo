@@ -204,17 +204,6 @@ class StreamHubProvider : MainAPI() {
                 )
             })
 
-            extractorJobs.add(async {
-                VidlinkExtractor.getStreams(
-                    tmdbId = tmdbId,
-                    isMovie = isMovie,
-                    season = season,
-                    episode = episode,
-                    subtitleCallback = subtitleCallback,
-                    callback = callback
-                )
-            })
-
             // OpenSubtitles (parallel)
             val subJobs = listOf(
                 async {
