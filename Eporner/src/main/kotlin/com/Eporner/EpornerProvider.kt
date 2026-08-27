@@ -147,19 +147,17 @@ class Eporner : MainAPI() {
             "Host" to commonHost
         )
 
-        // Return a single master playlist link named "Eporner" using the correct Builder function
+        // Return a single master playlist link named "Eporner" passing arguments directly
         callback.invoke(
             newExtractorLink(
                 source = name,
                 name = "Eporner",
                 url = dataUri,
-                type = INFER_TYPE
-            ) {
-                this.referer = data
-                this.quality = Qualities.Unknown.value
-                this.isM3u8 = true
-                this.headers = finalHeaders
-            }
+                referer = data,
+                quality = Qualities.Unknown.value,
+                isM3u8 = true,
+                headers = finalHeaders
+            )
         )
         return true
     }
@@ -174,10 +172,5 @@ class Eporner : MainAPI() {
         } else {
             throw IllegalArgumentException("Hash length is invalid")
         }
-    }
-    
-    private fun getIndexQuality(str: String?): Int {
-        return Regex("(\\d{3,4})[pP]").find(str ?: "") ?. groupValues ?. getOrNull(1) ?. toIntOrNull()
-            ?: Qualities.Unknown.value
     }
 }
