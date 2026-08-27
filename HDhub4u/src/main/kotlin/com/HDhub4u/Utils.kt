@@ -2,7 +2,6 @@ package com.hdhub4u
 
 import android.annotation.SuppressLint
 import com.fasterxml.jackson.annotation.JsonProperty
-import com.google.gson.annotations.SerializedName
 import com.lagradost.api.Log
 import com.lagradost.cloudstream3.ActorData
 import com.lagradost.cloudstream3.Score
@@ -12,8 +11,8 @@ import com.lagradost.cloudstream3.base64Decode
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.loadExtractor
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
@@ -116,11 +115,8 @@ fun pen(value: String): String {
 }
 
 /**
- * FIX: previously launched a *new, untracked* CoroutineScope(Dispatchers.IO)
- * for every single link emitted by loadExtractor, with zero error handling.
- * A failure inside that scope would crash silently or leak. This version
- * runs inline (loadExtractor's callback context is already a coroutine) and
- * wraps in try/catch so one bad link can't take out the whole chain.
+ * Wraps a resolved link from loadExtractor(), tagging its name with `source`
+ * and applying an optional forced quality override.
  */
 suspend fun loadSourceNameExtractor(
     source: String,
@@ -132,20 +128,37 @@ suspend fun loadSourceNameExtractor(
 ) {
     if (url.isBlank()) return
     try {
-        loadExtractor(url, referer, subtitleCallback) { link ->
-            callback.invoke(
-                newExtractorLink(
-                    "${link.source} $source",
-                    "${link.source} $source",
-                    link.url,
-                ) {
-                    this.quality = quality ?: link.quality
-                    this.type = link.type
-                    this.referer = link.referer
-                    this.headers = link.headers
-                    this.extractorData = link.extractorData
+        // NOTE: loadExtractor's per-link callback below is a plain, non-suspend
+        // lambda `(ExtractorLink) -> Unit`, but newExtractorLink(...) is itself a
+        // suspend function — calling it directly inside that lambda doesn't
+        // compile ("Suspension functions can only be called within coroutine
+        // body"). coroutineScope { launch { ... } } opens a real coroutine tied
+        // to this suspend function's lifecycle (unlike a detached
+        // `CoroutineScope(Dispatchers.IO).launch`, this one is awaited before
+        // loadSourceNameExtractor returns, so results aren't lost/racy and
+        // nothing leaks).
+        coroutineScope {
+            loadExtractor(url, referer, subtitleCallback) { link ->
+                launch(Dispatchers.IO) {
+                    try {
+                        callback.invoke(
+                            newExtractorLink(
+                                "${link.source} $source",
+                                "${link.source} $source",
+                                link.url,
+                            ) {
+                                this.quality = quality ?: link.quality
+                                this.type = link.type
+                                this.referer = link.referer
+                                this.headers = link.headers
+                                this.extractorData = link.extractorData
+                            }
+                        )
+                    } catch (e: Exception) {
+                        Log.e("HDhub4u-LoadExtractor", "Failed to build link for ${link.url}: ${e.message}")
+                    }
                 }
-            )
+            }
         }
     } catch (e: Exception) {
         Log.e("HDhub4u-LoadExtractor", "Failed for $url via $source: ${e.message}")
@@ -153,7 +166,7 @@ suspend fun loadSourceNameExtractor(
 }
 
 data class IMDB(
-    @SerializedName("imdb_id")
+    @param:JsonProperty("imdb_id")
     val imdbId: String? = null
 )
 
