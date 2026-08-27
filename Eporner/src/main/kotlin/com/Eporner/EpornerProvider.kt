@@ -14,21 +14,18 @@ class Eporner : MainAPI() {
     override val hasDownloadSupport   = true
     override val hasChromecastSupport = true
     override val supportedTypes       = setOf(TvType.NSFW)
-    override val vpnStatus            = VPNStatus.MightBeNeeded
 
     override val mainPage = mainPageOf(
-            "" to "Recent Videos",
             "best-videos" to "Best Videos",
             "top-rated" to "Top Rated",
             "most-viewed" to "Most Viewed",
-            "recommendations" to "Recommendation Videos",
         )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val document = app.get("$mainUrl/${request.data}/$page/").document
         val home = document.select("#div-search-results div.mb").mapNotNull { it.toSearchResult() }
         return newHomePageResponse(
-            list    = HomePageList(
+            list = HomePageList(
                 name = request.name,
                 list = home,
                 isHorizontalImages = true
