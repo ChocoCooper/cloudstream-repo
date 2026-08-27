@@ -147,17 +147,19 @@ class Eporner : MainAPI() {
             "Host" to commonHost
         )
 
-        // Return a single master playlist link named "Eporner"
+        // Return a single master playlist link named "Eporner" using the correct Builder function
         callback.invoke(
-            ExtractorLink(
+            newExtractorLink(
                 source = name,
                 name = "Eporner",
                 url = dataUri,
-                referer = data,
-                quality = Qualities.Unknown.value,
-                isM3u8 = true,
-                headers = finalHeaders
-            )
+                type = INFER_TYPE
+            ) {
+                this.referer = data
+                this.quality = Qualities.Unknown.value
+                this.isM3u8 = true
+                this.headers = finalHeaders
+            }
         )
         return true
     }
