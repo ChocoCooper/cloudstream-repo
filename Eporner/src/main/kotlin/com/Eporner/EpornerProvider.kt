@@ -1,6 +1,5 @@
 package com.Eporner
 
-import android.util.Base64
 import org.jsoup.nodes.Element
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
@@ -103,9 +102,6 @@ class Eporner : MainAPI() {
         val mp4Sources = jsonObject.getJSONObject("sources").getJSONObject("mp4")
         val qualities = mp4Sources.keys()
         
-        var m3u8Content = "#EXTM3U\n"
-        var commonHost = ""
-        
         while (qualities.hasNext()) {
             val quality = qualities.next() as String
             val sourceObject = mp4Sources.getJSONObject(quality)
@@ -113,52 +109,38 @@ class Eporner : MainAPI() {
             val labelShort = sourceObject.getString("labelShort") ?: quality
             
             var finalUrl = src
+            val finalHeaders = mutableMapOf(
+                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Referer" to data
+            )
+
             try {
                 val uri = URI(src)
-                commonHost = uri.host
+                val commonHost = uri.host
                 val ip = resolveDoH(commonHost)
                 
                 if (ip != null) {
                     finalUrl = src.replace("https://", "http://").replace(commonHost, ip)
+                    finalHeaders["Host"] = commonHost
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
             }
 
-            val (bw, res) = when {
-                labelShort.contains("1080") -> "5000000" to "1920x1080"
-                labelShort.contains("720") -> "2500000" to "1280x720"
-                labelShort.contains("480") -> "1000000" to "854x480"
-                labelShort.contains("360") -> "750000" to "640x360"
-                else -> "500000" to "426x240"
-            }
-            
-            m3u8Content += "#EXT-X-STREAM-INF:BANDWIDTH=$bw,RESOLUTION=$res,NAME=\"$labelShort\"\n$finalUrl\n"
+            // Emit each resolution as a standard ExtractorLink using the fixed source name
+            callback.invoke(
+                newExtractorLink(
+                    source = "Eporner", // Using the clean name instead of injecting resolution strings
+                    name = "Eporner",
+                    url = finalUrl,
+                    type = INFER_TYPE
+                ) {
+                    this.referer = data
+                    this.quality = getIndexQuality(labelShort)
+                    this.headers = finalHeaders
+                }
+            )
         }
-
-        val encodedM3u8 = Base64.encodeToString(m3u8Content.toByteArray(), Base64.NO_WRAP)
-        // Appending #.m3u8 forces CloudStream to automatically infer this as an M3U8 playlist
-        val dataUri = "data:application/x-mpegURL;base64,$encodedM3u8#.m3u8"
-
-        val finalHeaders = mapOf(
-            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer" to data,
-            "Host" to commonHost
-        )
-
-        // Using the builder block correctly for mutable properties
-        callback.invoke(
-            newExtractorLink(
-                source = name,
-                name = "Eporner",
-                url = dataUri,
-                type = INFER_TYPE
-            ) {
-                this.referer = data
-                this.quality = Qualities.Unknown.value
-                this.headers = finalHeaders
-            }
-        )
         return true
     }
 
@@ -172,5 +154,10 @@ class Eporner : MainAPI() {
         } else {
             throw IllegalArgumentException("Hash length is invalid")
         }
+    }
+    
+    private fun getIndexQuality(str: String?): Int {
+        return Regex("(\\d{3,4})[pP]").find(str ?: "") ?. groupValues ?. getOrNull(1) ?. toIntOrNull()
+            ?: Qualities.Unknown.value
     }
 }
