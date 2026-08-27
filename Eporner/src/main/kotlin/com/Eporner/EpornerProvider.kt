@@ -1,10 +1,12 @@
 package com.Eporner
 
+import android.util.Base64
 import org.jsoup.nodes.Element
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.json.JSONObject
 import java.math.BigInteger
+import java.net.URI
 
 class Eporner : MainAPI() {
     override var mainUrl              = "https://www.eporner.com"
@@ -14,8 +16,7 @@ class Eporner : MainAPI() {
     override val hasDownloadSupport   = true
     override val hasChromecastSupport = true
     override val supportedTypes       = setOf(TvType.NSFW)
-    override val vpnStatus            = VPNStatus.MightBeNeeded
-
+    
     override val mainPage = mainPageOf(
             "" to "Recent Videos",
             "best-videos" to "Best Videos",
@@ -71,7 +72,6 @@ class Eporner : MainAPI() {
         }
     }
 
-    // Manual DoH Resolver utilizing Google DNS to bypass ISP blocks
     private suspend fun resolveDoH(host: String): String? {
         return try {
             val response = app.get("https://dns.google/resolve?name=$host").text
@@ -80,9 +80,8 @@ class Eporner : MainAPI() {
             for (i in 0 until answers.length()) {
                 val answer = answers.getJSONObject(i)
                 val type = answer.getInt("type")
-                if (type == 1 || type == 28) { // 1 = IPv4, 28 = IPv6
+                if (type == 1 || type == 28) {
                     val ip = answer.getString("data")
-                    // Enclose IPv6 addresses in brackets for valid URL generation
                     return if (ip.contains(":")) "[$ip]" else ip
                 }
             }
@@ -93,69 +92,81 @@ class Eporner : MainAPI() {
     }
 
     override suspend fun loadLinks(data: String, isCasting: Boolean, subtitleCallback: (SubtitleFile) -> Unit, callback: (ExtractorLink) -> Unit): Boolean {
-        val doc= app.get(data).toString()
-        val vid=Regex("EP.video.player.vid = '([^']+)'").find(doc)?.groupValues?.get(1).toString()
-        val hash=Regex("EP.video.player.hash = '([^']+)'").find(doc)?.groupValues?.get(1).toString()
-        val url="https://www.eporner.com/xhr/video/$vid?hash=${base36(hash)}"
+        val doc = app.get(data).toString()
+        val vid = Regex("EP.video.player.vid = '([^']+)'").find(doc)?.groupValues?.get(1).toString()
+        val hash = Regex("EP.video.player.hash = '([^']+)'").find(doc)?.groupValues?.get(1).toString()
+        val url = "https://www.eporner.com/xhr/video/$vid?hash=${base36(hash)}"
         
-        val json= app.get(url).toString()
+        val json = app.get(url).text
         val jsonObject = JSONObject(json)
-        val sources = jsonObject.getJSONObject("sources")
-        val mp4Sources = sources.getJSONObject("mp4")
+        val mp4Sources = jsonObject.getJSONObject("sources").getJSONObject("mp4")
         val qualities = mp4Sources.keys()
+        
+        var m3u8Content = "#EXTM3U\n"
+        var commonHost = ""
         
         while (qualities.hasNext()) {
             val quality = qualities.next() as String
             val sourceObject = mp4Sources.getJSONObject(quality)
             val src = sourceObject.getString("src")
-            val labelShort = sourceObject.getString("labelShort") ?: ""
+            val labelShort = sourceObject.getString("labelShort") ?: quality
             
             var finalUrl = src
-            val finalHeaders = mutableMapOf(
-                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Referer" to data
-            )
-
-            // Attempt dynamic DNS Bypass via IP Substitution
             try {
-                val uri = java.net.URI(src)
-                val originalHost = uri.host
-                val ip = resolveDoH(originalHost)
+                val uri = URI(src)
+                commonHost = uri.host
+                val ip = resolveDoH(commonHost)
                 
                 if (ip != null) {
-                    // Downgrade to HTTP and use raw IP to bypass Cronet SSL/SNI certificate mismatch
-                    finalUrl = src.replace("https://", "http://").replace(originalHost, ip)
-                    // Inject original host header so Eporner's CDN routes correctly
-                    finalHeaders["Host"] = originalHost
+                    finalUrl = src.replace("https://", "http://").replace(commonHost, ip)
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
             }
 
-            callback.invoke(
-                newExtractorLink(
-                    source = name,
-                    name = name,
-                    url = finalUrl,
-                    type = INFER_TYPE
-                ) {
-                    this.referer = data
-                    this.quality = getIndexQuality(labelShort)
-                    this.headers = finalHeaders
-                }
-            )
+            // Map Eporner qualities to HLS tags so ExoPlayer can render track resolutions natively
+            val (bw, res) = when {
+                labelShort.contains("1080") -> "5000000" to "1920x1080"
+                labelShort.contains("720") -> "2500000" to "1280x720"
+                labelShort.contains("480") -> "1000000" to "854x480"
+                labelShort.contains("360") -> "750000" to "640x360"
+                else -> "500000" to "426x240"
+            }
+            
+            m3u8Content += "#EXT-X-STREAM-INF:BANDWIDTH=$bw,RESOLUTION=$res,NAME=\"$labelShort\"\n$finalUrl\n"
         }
+
+        // Compile raw MP4s into a dynamic local HLS manifest via Data URI
+        val encodedM3u8 = Base64.encodeToString(m3u8Content.toByteArray(), Base64.NO_WRAP)
+        val dataUri = "data:application/x-mpegURL;base64,$encodedM3u8"
+
+        val finalHeaders = mapOf(
+            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer" to data,
+            "Host" to commonHost
+        )
+
+        // Return a single master playlist link named "Eporner"
+        callback.invoke(
+            ExtractorLink(
+                source = name,
+                name = "Eporner",
+                url = dataUri,
+                referer = data,
+                quality = Qualities.Unknown.value,
+                isM3u8 = true,
+                headers = finalHeaders
+            )
+        )
         return true
     }
 
-// Thanks to https://github.com/alfa-addon/addon/blob/2a3c9d5e4d35f8420e680d2ee8dd31291bbc727e/plugin.video.alfa/servers/eporner.py#L26 for Code
     fun base36(hash: String): String {
         return if (hash.length >= 32) {
             val part1 = BigInteger(hash.substring(0, 8), 16).toString(36)
             val part2 = BigInteger(hash.substring(8, 16), 16).toString(36)
             val part3 = BigInteger(hash.substring(16, 24), 16).toString(36)
             val part4 = BigInteger(hash.substring(24, 32), 16).toString(36)
-
             part1 + part2 + part3 + part4
         } else {
             throw IllegalArgumentException("Hash length is invalid")
