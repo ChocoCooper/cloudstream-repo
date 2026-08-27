@@ -64,11 +64,31 @@ class Eporner : MainAPI() {
         val title = document.selectFirst("meta[property=og:title]")?.attr("content")?.trim().toString()
         val poster = fixUrlNull(document.selectFirst("[property='og:image']")?.attr("content"))
         val description = document.selectFirst("meta[property=og:description]")?.attr("content")?.trim()
-    
 
         return newMovieLoadResponse(title, url, TvType.NSFW, url) {
             this.posterUrl = poster
             this.plot = description
+        }
+    }
+
+    // Manual DoH Resolver utilizing OkHttp to bypass ISP DNS blocks
+    private suspend fun resolveDoH(host: String): String? {
+        return try {
+            val response = app.get(
+                "https://cloudflare-dns.com/dns-query?name=$host&type=A", 
+                headers = mapOf("accept" to "application/dns-json")
+            ).text
+            val json = JSONObject(response)
+            val answers = json.optJSONArray("Answer") ?: return null
+            for (i in 0 until answers.length()) {
+                val answer = answers.getJSONObject(i)
+                if (answer.getInt("type") == 1) { // Type 1 is A Record (IPv4)
+                    return answer.getString("data")
+                }
+            }
+            null
+        } catch (e: Exception) {
+            null
         }
     }
 
@@ -77,52 +97,70 @@ class Eporner : MainAPI() {
         val vid=Regex("EP.video.player.vid = '([^']+)'").find(doc)?.groupValues?.get(1).toString()
         val hash=Regex("EP.video.player.hash = '([^']+)'").find(doc)?.groupValues?.get(1).toString()
         val url="https://www.eporner.com/xhr/video/$vid?hash=${base36(hash)}"
-        //Log.d("Phisher",url)
+        
         val json= app.get(url).toString()
         val jsonObject = JSONObject(json)
         val sources = jsonObject.getJSONObject("sources")
         val mp4Sources = sources.getJSONObject("mp4")
         val qualities = mp4Sources.keys()
         
-        // Anti-bot header for CronetDataSource
-        val streamHeaders = mapOf(
-            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
-        
         while (qualities.hasNext()) {
             val quality = qualities.next() as String
             val sourceObject = mp4Sources.getJSONObject(quality)
             val src = sourceObject.getString("src")
             val labelShort = sourceObject.getString("labelShort") ?: ""
+            
+            var finalUrl = src
+            val finalHeaders = mutableMapOf(
+                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Referer" to data
+            )
+
+            // Attempt DNS Bypass via IP Substitution
+            try {
+                val uri = java.net.URI(src)
+                val host = uri.host
+                val ip = resolveDoH(host)
+                
+                if (ip != null) {
+                    // Downgrade to HTTP and use raw IP to bypass Cronet SSL/SNI certificate mismatch
+                    finalUrl = src.replace("https://", "http://").replace(host, ip)
+                    // Inject original host header so Eporner's CDN routes correctly
+                    finalHeaders["Host"] = host
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+
             callback.invoke(
                 newExtractorLink(
                     source = name,
                     name = name,
-                    url = src,
+                    url = finalUrl,
                     type = INFER_TYPE
                 ) {
                     this.referer = data
                     this.quality = getIndexQuality(labelShort)
-                    this.headers = streamHeaders // Moved inside the builder block
+                    this.headers = finalHeaders
                 }
             )
         }
         return true
     }
+
 // Thanks to https://github.com/alfa-addon/addon/blob/2a3c9d5e4d35f8420e680d2ee8dd31291bbc727e/plugin.video.alfa/servers/eporner.py#L26 for Code
     fun base36(hash: String): String {
         return if (hash.length >= 32) {
-            // Split the hash into 4 parts, convert each part to base36, and concatenate the results
             val part1 = BigInteger(hash.substring(0, 8), 16).toString(36)
             val part2 = BigInteger(hash.substring(8, 16), 16).toString(36)
             val part3 = BigInteger(hash.substring(16, 24), 16).toString(36)
             val part4 = BigInteger(hash.substring(24, 32), 16).toString(36)
-
             part1 + part2 + part3 + part4
         } else {
             throw IllegalArgumentException("Hash length is invalid")
         }
     }
+    
     private fun getIndexQuality(str: String?): Int {
         return Regex("(\\d{3,4})[pP]").find(str ?: "") ?. groupValues ?. getOrNull(1) ?. toIntOrNull()
             ?: Qualities.Unknown.value
