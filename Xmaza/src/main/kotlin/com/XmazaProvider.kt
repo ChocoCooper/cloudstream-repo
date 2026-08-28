@@ -2,7 +2,9 @@ package com.Xmaza
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -43,7 +45,9 @@ class XmazaProvider : MainAPI() {
         val home = document.select("a.group.block").mapNotNull {
             it.toSearchResult(request.data)
         }
-        return newHomePageResponse(request.name, home)
+        return HomePageResponse(
+            listOf(HomePageList(request.name, home, isHorizontalImages = true))
+        )
     }
 
     private fun Element.toSearchResult(baseUrl: String): SearchResponse? {
@@ -61,7 +65,9 @@ class XmazaProvider : MainAPI() {
 
         if (title.isBlank() || url.isBlank()) return null
 
-        return newTvSeriesSearchResponse(
+        // Qualified with "this." to force resolution to the MainAPI extension
+        // overload instead of the ambiguous top-level one.
+        return this@XmazaProvider.newTvSeriesSearchResponse(
             name = title,
             url = url,
             type = TvType.TvSeries
@@ -167,7 +173,7 @@ class XmazaProvider : MainAPI() {
         // Sort episodes naturally (Episode 1, Episode 2, ... Episode 10)
         val sortedEpisodes = episodesList.sortedWith(AlphanumComparator())
 
-        return newTvSeriesLoadResponse(
+        return this@XmazaProvider.newTvSeriesLoadResponse(
             name = title,
             url = url,
             type = TvType.TvSeries,
@@ -211,11 +217,11 @@ class XmazaProvider : MainAPI() {
                                 newExtractorLink(
                                     source = sourceName,
                                     name = sourceName,
-                                    url = videoUrl
+                                    url = videoUrl,
+                                    type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                 ) {
                                     this.referer = mirrorUrl // Included for future-proofing against hotlink protection
                                     this.quality = if (isM3u8) Qualities.Unknown.value else Qualities.P1080.value
-                                    this.isM3u8 = isM3u8
                                 }
                             )
                         }
