@@ -34,7 +34,6 @@ class SkyBapProvider : MainAPI() {
     override val supportedTypes = setOf(
         TvType.Movie,
         TvType.TvSeries,
-        TvType.NSFW
     )
 
     // ---------------------------------------------------------------------
@@ -162,9 +161,9 @@ class SkyBapProvider : MainAPI() {
     // ---------------------------------------------------------------------
 
     override val mainPage = mainPageOf(
-        "category/Tamil-Movies.html" to "Tamil Movies",
         "category/Bollywood-Movies.html" to "Bollywood Movies",
         "category/All-Web-Series.html" to "Web Series",
+        "category/Korean-and-China-Movies.html" to "Hot Asian Movies",
         "category/Hot-Short-Film.html" to "Hot Short Films"
     )
 
