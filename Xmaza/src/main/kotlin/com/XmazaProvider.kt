@@ -122,7 +122,8 @@ class XmazaProvider : MainAPI() {
             // Check if it's a series link AND it's not just the generic root directory "/series/"
             if ((pathParts.contains("series") || pathParts.contains("web-series")) && pathParts.size > 1) {
                 seriesUrl = if (href.startsWith("/")) {
-                    val base = url.substringBefore("/", url.indexOf("//") + 2)
+                    val protocolEnd = url.indexOf("//") + 2
+                    val base = url.substring(0, protocolEnd) + url.substring(protocolEnd).substringBefore("/")
                     base + href
                 } else href
                 break
@@ -144,7 +145,8 @@ class XmazaProvider : MainAPI() {
             val epTitle = element.selectFirst("h4, h2.vtitle")?.text()?.trim() ?: element.attr("title")
             val epHref = element.attr("href")
             val epUrl = if (epHref.startsWith("/")) {
-                val base = seriesUrl.substringBefore("/", seriesUrl.indexOf("//") + 2)
+                val protocolEnd = seriesUrl.indexOf("//") + 2
+                val base = seriesUrl.substring(0, protocolEnd) + seriesUrl.substring(protocolEnd).substringBefore("/")
                 base + epHref
             } else epHref
 
