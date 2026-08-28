@@ -1,4 +1,4 @@
-package com.lagradost.cloudstream3.extractors
+package com.Xmaza
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
@@ -13,7 +13,7 @@ import java.util.regex.Pattern
 
 class XmazaProvider : MainAPI() {
     override var mainUrl = "https://xmaza2.net"
-    override var name = "Xmaza Network"
+    override var name = "Xmaza"
     override val hasMainPage = true
     override var lang = "hi"
     override val hasDownloadSupport = true
