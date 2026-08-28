@@ -2,7 +2,6 @@ package com.Xmaza
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.INFER_QUALITY
 import com.lagradost.cloudstream3.utils.Qualities
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -17,7 +16,6 @@ class XmazaProvider : MainAPI() {
     override val hasMainPage = true
     override var lang = "hi"
     override val hasDownloadSupport = true
-    override val isHorizontalImages = true
     override val supportedTypes = setOf(TvType.TvSeries)
 
     private val mirrors = listOf(
@@ -53,9 +51,9 @@ class XmazaProvider : MainAPI() {
         val href = this.attr("href")
         val url = if (href.startsWith("/")) baseUrl + href else href
 
-        var poster = this.selectFirst("img")?.attr("src") 
+        var poster = this.selectFirst("img")?.attr("src")
             ?: this.attr("style").substringAfter("url('").substringAfter("url(\"").substringBefore("')").substringBefore("\")")
-        
+
         // Fix Next.js image routing
         if (poster.startsWith("/_next")) {
             poster = "$mainUrl$poster"
@@ -63,7 +61,11 @@ class XmazaProvider : MainAPI() {
 
         if (title.isBlank() || url.isBlank()) return null
 
-        return newTvSeriesSearchResponse(title, url, TvType.TvSeries) {
+        return newTvSeriesSearchResponse(
+            name = title,
+            url = url,
+            type = TvType.TvSeries
+        ) {
             this.posterUrl = poster
         }
     }
@@ -71,7 +73,7 @@ class XmazaProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         val results = mutableMapOf<String, SearchResponse>()
         val seenTitles = mutableSetOf<String>()
-        
+
         // Concurrently search all 5 sites
         coroutineScope {
             mirrors.map { site ->
@@ -79,13 +81,13 @@ class XmazaProvider : MainAPI() {
                     try {
                         val searchUrl = if (site.contains("xmaza2")) "$site/search/$query" else "$site/?s=$query"
                         val document = app.get(searchUrl).document
-                        
+
                         document.select("a.video, a.group.block, article a.link").forEach { element ->
                             val parsed = element.toSearchResult(site)
                             if (parsed != null) {
                                 val normTitle = normalizeTitle(parsed.name)
                                 val slug = parsed.url.trimEnd('/').substringAfterLast("/")
-                                
+
                                 // Deduplicate across mirrors by normalized title
                                 if (normTitle.isNotBlank() && !seenTitles.contains(normTitle)) {
                                     seenTitles.add(normTitle)
@@ -105,12 +107,12 @@ class XmazaProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse? {
         // 1. Fetch clicked episode page to find the main Series link
         val epDoc = app.get(url).document
-        
+
         var seriesUrl: String? = null
         for (a in epDoc.select("a")) {
             val href = a.attr("href")
             val pathParts = href.substringAfter("://").substringAfter("/").split("/").filter { it.isNotBlank() }
-            
+
             // Check if it's a series link AND it's not just the generic root directory "/series/"
             if ((pathParts.contains("series") || pathParts.contains("web-series")) && pathParts.size > 1) {
                 seriesUrl = if (href.startsWith("/")) {
@@ -131,7 +133,7 @@ class XmazaProvider : MainAPI() {
         // 3. Extract episodes
         val episodesList = mutableListOf<Episode>()
         val seenEpTitles = mutableSetOf<String>()
-        
+
         seriesDoc.select("a.video, a.group.block, article a.link").forEach { element ->
             val epTitle = element.selectFirst("h4, h2.vtitle")?.text()?.trim() ?: element.attr("title")
             val epHref = element.attr("href")
@@ -140,7 +142,7 @@ class XmazaProvider : MainAPI() {
                 base + epHref
             } else epHref
 
-            var epPoster = element.selectFirst("img")?.attr("src") 
+            var epPoster = element.selectFirst("img")?.attr("src")
                 ?: element.attr("style").substringAfter("url('").substringAfter("url(\"").substringBefore("')").substringBefore("\")")
             if (epPoster.startsWith("/_next")) {
                 epPoster = "$mainUrl$epPoster"
@@ -149,15 +151,14 @@ class XmazaProvider : MainAPI() {
             if (epTitle.isNotBlank() && epUrl.isNotBlank()) {
                 val normEpTitle = normalizeTitle(epTitle)
                 val epSlug = epUrl.trimEnd('/').substringAfterLast("/")
-                
+
                 if (!seenEpTitles.contains(normEpTitle)) {
                     seenEpTitles.add(normEpTitle)
                     episodesList.add(
-                        Episode(
-                            data = epSlug, // Pass ONLY the slug to loadLinks
-                            name = epTitle,
-                            posterUrl = epPoster
-                        )
+                        newEpisode(epSlug) { // data = slug, passed to loadLinks
+                            this.name = epTitle
+                            this.posterUrl = epPoster
+                        }
                     )
                 }
             }
@@ -166,7 +167,12 @@ class XmazaProvider : MainAPI() {
         // Sort episodes naturally (Episode 1, Episode 2, ... Episode 10)
         val sortedEpisodes = episodesList.sortedWith(AlphanumComparator())
 
-        return newTvSeriesLoadResponse(title, url, TvType.TvSeries, sortedEpisodes) {
+        return newTvSeriesLoadResponse(
+            name = title,
+            url = url,
+            type = TvType.TvSeries,
+            episodes = sortedEpisodes
+        ) {
             this.posterUrl = poster
         }
     }
@@ -174,10 +180,10 @@ class XmazaProvider : MainAPI() {
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
-        callback: (ExtractorLink) -> Unit,
-        subtitleCallback: (SubtitleFile) -> Unit
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val slug = data 
+        val slug = data
 
         // Generate Mirror Links using the extracted base slug
         val mirrorUrls = mapOf(
@@ -196,20 +202,21 @@ class XmazaProvider : MainAPI() {
                         val html = app.get(mirrorUrl).text
                         // Regex to extract direct mp4/m3u8 URLs natively embedded in the HTML
                         val pattern = "(?i)(?:src|file|source)\\s*[:=]\\s*[\"'](https?://[^\"']+\\.(?:mp4|m3u8)[^\"']*)[\"']".toRegex()
-                        
+
                         pattern.findAll(html).forEach { matchResult ->
                             val videoUrl = matchResult.groupValues[1]
                             val isM3u8 = videoUrl.contains(".m3u8")
-                            
+
                             callback.invoke(
-                                ExtractorLink(
+                                newExtractorLink(
                                     source = sourceName,
                                     name = sourceName,
-                                    url = videoUrl,
-                                    referer = mirrorUrl, // Included for future-proofing against hotlink protection
-                                    quality = if (isM3u8) INFER_QUALITY else Qualities.P1080.value,
-                                    isM3u8 = isM3u8
-                                )
+                                    url = videoUrl
+                                ) {
+                                    this.referer = mirrorUrl // Included for future-proofing against hotlink protection
+                                    this.quality = if (isM3u8) Qualities.Unknown.value else Qualities.P1080.value
+                                    this.isM3u8 = isM3u8
+                                }
                             )
                         }
                     } catch (e: Exception) {
