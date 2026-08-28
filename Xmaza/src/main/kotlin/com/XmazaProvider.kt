@@ -45,8 +45,8 @@ class XmazaProvider : MainAPI() {
         val home = document.select("a.group.block").mapNotNull {
             it.toSearchResult(request.data)
         }
-        return HomePageResponse(
-            listOf(HomePageList(request.name, home, isHorizontalImages = true))
+        return newHomePageResponse(
+            HomePageList(request.name, home, isHorizontalImages = true)
         )
     }
 
@@ -65,15 +65,9 @@ class XmazaProvider : MainAPI() {
 
         if (title.isBlank() || url.isBlank()) return null
 
-        // Direct constructor avoids the ambiguity between the MainAPI-extension
-        // and top-level newTvSeriesSearchResponse overloads currently in the library.
-        return TvSeriesSearchResponse(
-            title,
-            url,
-            this@XmazaProvider.name,
-            TvType.TvSeries,
-            poster
-        )
+        return newTvSeriesSearchResponse(title, url, TvType.TvSeries) {
+            this.posterUrl = poster
+        }
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -175,14 +169,9 @@ class XmazaProvider : MainAPI() {
         // Sort episodes naturally (Episode 1, Episode 2, ... Episode 10)
         val sortedEpisodes = episodesList.sortedWith(AlphanumComparator())
 
-        return TvSeriesLoadResponse(
-            title,
-            url,
-            this@XmazaProvider.name,
-            TvType.TvSeries,
-            sortedEpisodes,
-            poster
-        )
+        return newTvSeriesLoadResponse(title, url, TvType.TvSeries, sortedEpisodes) {
+            this.posterUrl = poster
+        }
     }
 
     override suspend fun loadLinks(
