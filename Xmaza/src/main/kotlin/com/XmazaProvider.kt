@@ -17,6 +17,7 @@ class XmazaProvider : MainAPI() {
     override val hasMainPage = true
     override var lang = "hi"
     override val hasDownloadSupport = true
+    override val isHorizontalImages = true
     override val supportedTypes = setOf(TvType.TvSeries)
 
     private val mirrors = listOf(
