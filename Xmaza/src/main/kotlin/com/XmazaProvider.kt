@@ -65,15 +65,15 @@ class XmazaProvider : MainAPI() {
 
         if (title.isBlank() || url.isBlank()) return null
 
-        // Qualified with "this." to force resolution to the MainAPI extension
-        // overload instead of the ambiguous top-level one.
-        return this@XmazaProvider.newTvSeriesSearchResponse(
-            name = title,
-            url = url,
-            type = TvType.TvSeries
-        ) {
-            this.posterUrl = poster
-        }
+        // Direct constructor avoids the ambiguity between the MainAPI-extension
+        // and top-level newTvSeriesSearchResponse overloads currently in the library.
+        return TvSeriesSearchResponse(
+            title,
+            url,
+            this@XmazaProvider.name,
+            TvType.TvSeries,
+            poster
+        )
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -173,14 +173,14 @@ class XmazaProvider : MainAPI() {
         // Sort episodes naturally (Episode 1, Episode 2, ... Episode 10)
         val sortedEpisodes = episodesList.sortedWith(AlphanumComparator())
 
-        return this@XmazaProvider.newTvSeriesLoadResponse(
-            name = title,
-            url = url,
-            type = TvType.TvSeries,
-            episodes = sortedEpisodes
-        ) {
-            this.posterUrl = poster
-        }
+        return TvSeriesLoadResponse(
+            title,
+            url,
+            this@XmazaProvider.name,
+            TvType.TvSeries,
+            sortedEpisodes,
+            poster
+        )
     }
 
     override suspend fun loadLinks(
