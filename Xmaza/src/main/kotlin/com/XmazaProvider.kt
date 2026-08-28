@@ -9,6 +9,7 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import org.jsoup.nodes.Element
+import java.net.URLDecoder
 import java.util.Comparator
 import java.util.regex.Pattern
 
@@ -40,6 +41,62 @@ class XmazaProvider : MainAPI() {
         return title.lowercase().replace(Regex("[^a-z0-9]"), "")
     }
 
+    /**
+     * Resolves any image reference (relative path, protocol-relative url,
+     * or a Next.js `/_next/image?url=...` resize-proxy path) down to a
+     * real, directly-loadable image URL.
+     *
+     * Verified against live responses:
+     *  - the mirror's own /_next/image proxy DOES work, but only when it
+     *    has a full host attached to it. Passing a bare "/_next/image?..."
+     *    path (no host) is what produced the Coil "ENOENT" errors, since
+     *    the image loader tried to open it as a local file.
+     *  - decoding straight to the upstream CDN url (e.g. cdn.hotmaal.cc/...)
+     *    is more robust than depending on the mirror's proxy, because it
+     *    keeps working even when the poster HTML came from a *different*
+     *    mirror than `mainUrl`.
+     */
+    private fun fixImageUrl(raw: String?, pageUrl: String): String? {
+        if (raw.isNullOrBlank()) return null
+        val url = raw.trim()
+
+        // Inline base64 placeholders used by lazy-loaders are never real images.
+        if (url.startsWith("data:")) return null
+
+        val protocolEnd = pageUrl.indexOf("//") + 2
+        val domainRoot = pageUrl.substring(0, protocolEnd) + pageUrl.substring(protocolEnd).substringBefore("/")
+
+        if (url.contains("/_next/image")) {
+            val full = if (url.startsWith("http")) url else domainRoot + url
+            val encoded = Regex("[?&]url=([^&]+)").find(full)?.groupValues?.get(1)
+            if (encoded != null) {
+                return try {
+                    URLDecoder.decode(encoded, "UTF-8")
+                } catch (e: Exception) {
+                    full
+                }
+            }
+            return full
+        }
+
+        return when {
+            url.startsWith("//") -> "https:$url"
+            url.startsWith("/") -> domainRoot + url
+            else -> url
+        }
+    }
+
+    /** Pulls the best available image url off an <img> tag, preferring lazy-load attrs. */
+    private fun Element.bestRawImg(): String? {
+        val img = this.selectFirst("img") ?: return this.attr("style")
+            .substringAfter("url('").substringAfter("url(\"")
+            .substringBefore("')").substringBefore("\")")
+            .ifBlank { null }
+        return img.attr("data-src").ifBlank { img.attr("src") }.ifBlank { null }
+            ?: this.attr("style").substringAfter("url('").substringAfter("url(\"")
+                .substringBefore("')").substringBefore("\")").ifBlank { null }
+    }
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val document = app.get(request.data).document
         val home = document.select("a.group.block").mapNotNull {
@@ -55,13 +112,7 @@ class XmazaProvider : MainAPI() {
         val href = this.attr("href")
         val url = if (href.startsWith("/")) baseUrl + href else href
 
-        var poster = this.selectFirst("img")?.attr("src")
-            ?: this.attr("style").substringAfter("url('").substringAfter("url(\"").substringBefore("')").substringBefore("\")")
-
-        // Fix Next.js image routing
-        if (poster.startsWith("/_next")) {
-            poster = "$mainUrl$poster"
-        }
+        val poster = fixImageUrl(this.bestRawImg(), baseUrl)
 
         if (title.isBlank() || url.isBlank()) return null
 
@@ -129,7 +180,13 @@ class XmazaProvider : MainAPI() {
         // 2. Fetch the actual series page
         val seriesDoc = app.get(seriesUrl).document
         val title = seriesDoc.selectFirst("h1, h2")?.text()?.trim() ?: "Unknown Series"
-        val poster = seriesDoc.selectFirst("img")?.attr("src")
+
+        // NOTE: this line was previously missing the /_next fix entirely, which is
+        // what caused the Coil "ENOENT" errors from the logcat.
+        val rawPoster = seriesDoc.selectFirst("img")?.let {
+            it.attr("data-src").ifBlank { it.attr("src") }
+        }
+        val poster = fixImageUrl(rawPoster, seriesUrl)
 
         // 3. Extract episodes
         val episodesList = mutableListOf<Episode>()
@@ -144,11 +201,7 @@ class XmazaProvider : MainAPI() {
                 base + epHref
             } else epHref
 
-            var epPoster = element.selectFirst("img")?.attr("src")
-                ?: element.attr("style").substringAfter("url('").substringAfter("url(\"").substringBefore("')").substringBefore("\")")
-            if (epPoster.startsWith("/_next")) {
-                epPoster = "$mainUrl$epPoster"
-            }
+            val epPoster = fixImageUrl(element.bestRawImg(), seriesUrl)
 
             if (epTitle.isNotBlank() && epUrl.isNotBlank()) {
                 val normEpTitle = normalizeTitle(epTitle)
@@ -211,7 +264,7 @@ class XmazaProvider : MainAPI() {
                                     url = videoUrl,
                                     type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                 ) {
-                                    this.referer = mirrorUrl // Included for future-proofing against hotlink protection
+                                    this.referer = mirrorUrl // confirmed harmless/unneeded but kept for future-proofing
                                     this.quality = if (isM3u8) Qualities.Unknown.value else Qualities.P1080.value
                                 }
                             )
