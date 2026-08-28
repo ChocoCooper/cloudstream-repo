@@ -18,5 +18,5 @@ cloudstream {
 
     tvTypes = listOf("TvSeries")
 
-    iconUrl = "https://t0.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=http://jiomaal.com&size=256"
+    iconUrl = "https://xmaza.gg/favicon.ico"
 }
