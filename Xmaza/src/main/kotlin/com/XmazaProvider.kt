@@ -1,5 +1,6 @@
 package com.Xmaza
 
+import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -23,6 +24,15 @@ class XmazaProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.TvSeries)
 
+    companion object {
+        private const val TAG = "XmazaProvider"
+    }
+
+    init {
+        // Exactly the same User-Agent as the Python tester
+        app.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    }
+
     private val mirrors = listOf(
         "https://ottdude.com",
         "https://maalvdo.net",
@@ -42,32 +52,21 @@ class XmazaProvider : MainAPI() {
     private val episodeRegex = Regex("^(.*?)(?:\\s+(\\d+))?\\s+Episode\\s+(\\d+)\\s*$", RegexOption.IGNORE_CASE)
 
     // ---------- Video extraction patterns ----------
-    // 1. JSON‑LD – improved to capture both contentUrl and embedUrl, with any characters inside the string
-    private val jsonLdVideoRegex = Regex(
-        "\"contentUrl\"\\s*:\\s*\"([^\"]+)\"|" +
-        "\"embedUrl\"\\s*:\\s*\"([^\"]+)\"",
-        RegexOption.IGNORE_CASE
-    )
+    private val jsonLdContentUrlRegex = Regex("\"contentUrl\"\\s*:\\s*\"([^\"]+)\"", RegexOption.IGNORE_CASE)
+    private val jsonLdEmbedUrlRegex = Regex("\"embedUrl\"\\s*:\\s*\"([^\"]+)\"", RegexOption.IGNORE_CASE)
 
-    // 2. Quoted URLs (anywhere)
     private val quotedVideoRegex = Regex(
         "[\"'](/?/?[^\"']+\\.(?:mp4|m3u8)[^\"']*)[\"']",
         RegexOption.IGNORE_CASE
     )
-
-    // 3. JavaScript variable assignments
     private val jsVarRegex = Regex(
         "(?:file|source|url|video)\\s*:\\s*[\"']([^\"']+\\.(?:mp4|m3u8)[^\"']*)[\"']",
         RegexOption.IGNORE_CASE
     )
-
-    // 4. Plain "Video url:" label (zmaal.net fallback)
     private val videoUrlLabelRegex = Regex(
         "Video\\s+url\\s*:\\s*(https?://[^\\s]+)",
         RegexOption.IGNORE_CASE
     )
-
-    // 5. Ultimate fallback – any URL ending with .mp4 or .m3u8, even if it has extra parameters
     private val anyVideoRegex = Regex(
         "https?://[^\\s<>\"']+\\.(?:mp4|m3u8)[^\\s<>\"']*",
         RegexOption.IGNORE_CASE
@@ -309,36 +308,92 @@ class XmazaProvider : MainAPI() {
         }
     }
 
-    // ---------- Video URL extraction ----------
-    private fun extractVideoUrls(html: String, baseUrl: String): Set<String> {
+    // ---------- Video URL extraction with logging ----------
+    private fun extractVideoUrls(html: String, baseUrl: String, sourceName: String): Set<String> {
+        Log.d(TAG, "extractVideoUrls called for $sourceName, HTML length: ${html.length}")
+
         val candidates = mutableSetOf<String>()
         val unescapedHtml = Parser.unescapeEntities(html, false)
 
-        // 1. Jsoup for <source>, <video>, <iframe>
+        // 1. Parse with Jsoup
         val doc = Parser.parse(unescapedHtml, baseUrl)
-        doc.select("source, video").forEach { tag ->
+
+        // 1a. <source>, <video>, <iframe>
+        val mediaTags = doc.select("source, video")
+        Log.d(TAG, "$sourceName: Found ${mediaTags.size} source/video tags")
+        mediaTags.forEach { tag ->
             listOf("src", "data-src").forEach { attr ->
-                tag.attr(attr).takeIf { it.isNotBlank() }?.let { candidates.add(it) }
+                val val_ = tag.attr(attr)
+                if (val_.isNotBlank()) {
+                    candidates.add(val_)
+                    Log.d(TAG, "$sourceName: Added from $tag.name $attr = $val_")
+                }
             }
         }
-        doc.select("iframe").forEach { iframe ->
-            iframe.attr("src").takeIf { it.isNotBlank() }?.let { candidates.add(it) }
-        }
-
-        // 2. JSON‑LD (most reliable)
-        jsonLdVideoRegex.findAll(unescapedHtml).forEach { match ->
-            val url = match.groupValues[1].ifBlank { match.groupValues[2] }
-            // Only add if it looks like a video URL (contains .mp4 or .m3u8)
-            if (url.isNotBlank() && (url.contains(".mp4") || url.contains(".m3u8"))) {
-                candidates.add(url)
+        val iframes = doc.select("iframe")
+        Log.d(TAG, "$sourceName: Found ${iframes.size} iframes")
+        iframes.forEach { iframe ->
+            iframe.attr("src").takeIf { it.isNotBlank() }?.let {
+                candidates.add(it)
+                Log.d(TAG, "$sourceName: Added from iframe src = $it")
             }
         }
 
-        // 3. Regex fallbacks
-        quotedVideoRegex.findAll(unescapedHtml).forEach { match -> candidates.add(match.groupValues[1]) }
-        jsVarRegex.findAll(unescapedHtml).forEach { match -> candidates.add(match.groupValues[1]) }
-        videoUrlLabelRegex.findAll(unescapedHtml).forEach { match -> candidates.add(match.groupValues[1]) }
-        anyVideoRegex.findAll(unescapedHtml).forEach { match -> candidates.add(match.value) }
+        // 1b. Meta tags: og:video and twitter:player
+        val metaTags = doc.select("meta[property='og:video'], meta[name='twitter:player']")
+        Log.d(TAG, "$sourceName: Found ${metaTags.size} og:video/twitter:player meta tags")
+        metaTags.forEach { meta ->
+            meta.attr("content").takeIf { it.isNotBlank() }?.let {
+                candidates.add(it)
+                Log.d(TAG, "$sourceName: Added from meta ${meta.attr("property")} = $it")
+            }
+        }
+
+        // 1c. JSON-LD script tag
+        val jsonScripts = doc.select("script[type='application/ld+json']")
+        Log.d(TAG, "$sourceName: Found ${jsonScripts.size} JSON-LD scripts")
+        jsonScripts.forEach { script ->
+            val scriptContent = script.data() ?: ""
+            Log.d(TAG, "$sourceName: JSON-LD script length: ${scriptContent.length}")
+            jsonLdContentUrlRegex.findAll(scriptContent).forEach { match ->
+                candidates.add(match.groupValues[1])
+                Log.d(TAG, "$sourceName: JSON-LD contentUrl = ${match.groupValues[1]}")
+            }
+            jsonLdEmbedUrlRegex.findAll(scriptContent).forEach { match ->
+                candidates.add(match.groupValues[1])
+                Log.d(TAG, "$sourceName: JSON-LD embedUrl = ${match.groupValues[1]}")
+            }
+            anyVideoRegex.findAll(scriptContent).forEach { match ->
+                candidates.add(match.value)
+                Log.d(TAG, "$sourceName: JSON-LD anyVideo = ${match.value}")
+            }
+        }
+
+        // 2. Fallback regex patterns on the whole unescaped HTML
+        var count = 0
+        quotedVideoRegex.findAll(unescapedHtml).forEach { match ->
+            candidates.add(match.groupValues[1])
+            count++
+        }
+        Log.d(TAG, "$sourceName: quotedVideoRegex found $count")
+        count = 0
+        jsVarRegex.findAll(unescapedHtml).forEach { match ->
+            candidates.add(match.groupValues[1])
+            count++
+        }
+        Log.d(TAG, "$sourceName: jsVarRegex found $count")
+        count = 0
+        videoUrlLabelRegex.findAll(unescapedHtml).forEach { match ->
+            candidates.add(match.groupValues[1])
+            count++
+        }
+        Log.d(TAG, "$sourceName: videoUrlLabelRegex found $count")
+        count = 0
+        anyVideoRegex.findAll(unescapedHtml).forEach { match ->
+            candidates.add(match.value)
+            count++
+        }
+        Log.d(TAG, "$sourceName: anyVideoRegex found $count")
 
         // Resolve and clean URLs
         val resolved = mutableSetOf<String>()
@@ -357,6 +412,9 @@ class XmazaProvider : MainAPI() {
             }
             if (url != null) resolved.add(url)
         }
+        Log.d(TAG, "$sourceName: Resolved ${resolved.size} URLs")
+        resolved.forEach { Log.d(TAG, "$sourceName: final URL = $it") }
+
         return resolved
     }
 
@@ -367,45 +425,72 @@ class XmazaProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val slug = data
+        Log.d(TAG, "loadLinks called with slug: $slug")
+
         val mirrorUrls = mirrors.associateWith { site ->
-            if (site.contains("xmaza2")) "$site/watch/$slug" else "$site/$slug/"
+            when {
+                site.contains("xmaza2") -> "$site/watch/$slug"
+                else -> "$site/$slug/"
+            }
         }
 
         var foundAny = false
+        val allLinks = mutableListOf<ExtractorLink>()
+
         coroutineScope {
             mirrorUrls.map { (site, mirrorUrl) ->
                 async {
                     try {
-                        val html = app.get(mirrorUrl).text
+                        Log.d(TAG, "Fetching: $mirrorUrl")
+                        val response = app.get(mirrorUrl)
+                        val html = response.text
                         val sourceName = domainOf(site).removePrefix("https://").removePrefix("http://")
-                        val videoUrls = extractVideoUrls(html, mirrorUrl)
 
-                        // For debugging – uncomment to log extracted URLs
-                        // if (videoUrls.isNotEmpty()) {
-                        //     println("$sourceName found: ${videoUrls.joinToString()}")
-                        // }
+                        // Log status code if available
+                        try {
+                            val code = response.code
+                            Log.d(TAG, "$sourceName HTTP status: $code")
+                        } catch (e: Exception) {
+                            Log.d(TAG, "$sourceName: could not get status code")
+                        }
+
+                        // Log first 500 chars of HTML for debugging
+                        val preview = html.take(500).replace("\n", " ").replace("\r", "")
+                        Log.d(TAG, "$sourceName HTML preview: $preview")
+
+                        val videoUrls = extractVideoUrls(html, mirrorUrl, sourceName)
+
+                        if (videoUrls.isEmpty()) {
+                            Log.w(TAG, "$sourceName: No video URLs found")
+                        }
 
                         videoUrls.forEach { videoUrl ->
                             val isM3u8 = videoUrl.contains(".m3u8", ignoreCase = true)
-                            callback.invoke(
-                                newExtractorLink(
-                                    source = sourceName,
-                                    name = sourceName,
-                                    url = videoUrl,
-                                    type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                ) {
-                                    this.referer = mirrorUrl
-                                    this.quality = if (isM3u8) Qualities.Unknown.value else Qualities.P1080.value
-                                }
-                            )
+                            val link = newExtractorLink(
+                                source = sourceName,
+                                name = sourceName,
+                                url = videoUrl,
+                                type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                            ) {
+                                this.referer = mirrorUrl
+                                this.quality = if (isM3u8) Qualities.Unknown.value else Qualities.P1080.value
+                            }
+                            allLinks.add(link)
                             foundAny = true
+                            Log.d(TAG, "$sourceName: Added link: $videoUrl")
                         }
                     } catch (e: Exception) {
+                        Log.e(TAG, "Error fetching $mirrorUrl: ${e.message}")
                         e.printStackTrace()
                     }
                 }
             }.awaitAll()
         }
+
+        val uniqueLinks = allLinks.distinctBy { it.url }
+        Log.d(TAG, "Total unique links found: ${uniqueLinks.size}")
+        uniqueLinks.forEach { callback.invoke(it) }
+
         return foundAny
     }
 
