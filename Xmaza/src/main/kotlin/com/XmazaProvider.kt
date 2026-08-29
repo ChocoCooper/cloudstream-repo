@@ -22,9 +22,6 @@ class XmazaProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.TvSeries)
 
-    /** All 5 mirrors are treated as equal fallback sources for both search
-     * results and streams. loadLinks() labels each ExtractorLink by its own
-     * domain name (confirmed against real search-page HTML from every site). */
     private val mirrors = listOf(
         "https://ottdude.com",
         "https://maalvdo.net",
@@ -41,15 +38,12 @@ class XmazaProvider : MainAPI() {
     )
 
     private val styleUrlRegex = Regex("url\\((['\"]?)(.*?)\\1\\)")
-
-    // Any quoted string ending in mp4/m3u8 - deliberately NOT anchored to a
-    // preceding src=/file=/source= keyword, since different mirrors embed the
-    // video url under different JS variable names (url:, embedUrl", etc.).
-    private val streamPattern = Regex("[\"'](https?://[^\"']+\\.(?:mp4|m3u8)[^\"']*)[\"']")
-
-    // "Chawl House Episode 3" -> (base="Chawl House", season=null, ep=3)
-    // "Chawl House 2 Episode 1" -> (base="Chawl House", season=2, ep=1)
     private val episodeRegex = Regex("^(.*?)(?:\\s+(\\d+))?\\s+Episode\\s+(\\d+)\\s*$", RegexOption.IGNORE_CASE)
+
+    // Enhanced patterns: match quoted URLs (absolute, relative, protocol-relative) ending with .mp4/.m3u8
+    private val quotedVideoRegex = Regex("[\"'](/?/?[^\"']+\\.(?:mp4|m3u8)[^\"']*)[\"']", RegexOption.IGNORE_CASE)
+    private val sourceTagRegex = Regex("""<source[^>]+src\s*=\s*["']([^"']+\.(?:mp4|m3u8)[^"']*)["']""", RegexOption.IGNORE_CASE)
+    private val jsVarRegex = Regex("""(?:file|source|url|video)\s*:\s*["']([^"']+\.(?:mp4|m3u8)[^"']*)["']""", RegexOption.IGNORE_CASE)
 
     private fun normalizeTitle(title: String): String =
         title.lowercase().replace(Regex("[^a-z0-9]"), "")
@@ -59,15 +53,6 @@ class XmazaProvider : MainAPI() {
         return url.substring(0, protocolEnd) + url.substring(protocolEnd).substringBefore("/")
     }
 
-    /**
-     * Resolves any image reference to a real, directly-loadable url:
-     *  - Next.js `/_next/image?url=...` proxy paths (xmaza2.net) are decoded
-     *    straight to the upstream CDN url rather than depending on the
-     *    mirror's own resize proxy having a full host attached.
-     *  - protocol-relative ("//") and root-relative ("/") paths are resolved
-     *    against the page's own domain.
-     *  - inline base64 placeholders ("data:") are dropped entirely.
-     */
     private fun fixImageUrl(raw: String?, pageUrl: String): String? {
         if (raw.isNullOrBlank()) return null
         val url = raw.trim()
@@ -97,22 +82,7 @@ class XmazaProvider : MainAPI() {
     private fun resolveHref(hrefRaw: String, site: String): String =
         if (hrefRaw.startsWith("/")) domainOf(site) + hrefRaw else hrefRaw
 
-    /**
-     * Extracts (title, href, rawPosterOrNull) from any listing/grid page -
-     * search results, mainPage categories, or a series' episode list all use
-     * one of these three markup families, confirmed against live HTML:
-     *
-     *  - xmaza2.net   : <a class="group block" href="/watch/..."><img src="/_next/image?..."></a>
-     *  - zmaal.net    : <article><a class="link" href="..." title="..."></a><img src="..."></article>
-     *                   (the poster <img> is a SIBLING of the anchor, not nested inside it)
-     *  - all others   : <a class="video[ lazy-bg]" data-bg="...webp" style="background-size:cover;..."
-     *                     title="..." href="..."><h2 class="vtitle">Title</h2></a>
-     *                   data-bg must be checked BEFORE the style url() - on maalvdo/xmaza.gg the
-     *                   background-image:url(...) in `style` is injected by client-side "lazy-bg"
-     *                   JS after page load, so the raw HTTP response only has data-bg at fetch time.
-     *                   ottdude renders url() directly server-side with no JS needed, which is why
-     *                   the style-regex fallback is still needed as a second path.
-     */
+    // ---- Improved card extraction ----
     private fun extractCards(doc: Document, site: String): List<Triple<String, String, String?>> {
         val results = mutableListOf<Triple<String, String, String?>>()
 
@@ -121,7 +91,8 @@ class XmazaProvider : MainAPI() {
                 doc.select("a.group.block").forEach { a ->
                     val title = a.selectFirst("h4")?.text()?.trim() ?: a.attr("title")
                     val href = a.attr("href")
-                    val raw = a.selectFirst("img")?.attr("src")
+                    val img = a.selectFirst("img")
+                    val raw = img?.attr("data-src")?.ifBlank { img.attr("data-lazy-src") }?.ifBlank { img.attr("src") }
                     if (title.isNotBlank() && href.isNotBlank()) results.add(Triple(title, href, raw))
                 }
             }
@@ -141,10 +112,11 @@ class XmazaProvider : MainAPI() {
                 doc.select("a.video").forEach { a ->
                     val title = a.selectFirst("h2.vtitle")?.text()?.trim() ?: a.attr("title")
                     val href = a.attr("href")
+                    val img = a.selectFirst("img")
+                    val imgRaw = img?.attr("data-src")?.ifBlank { img.attr("src") }
                     val dataBg = a.attr("data-bg")
-                    val raw = dataBg.ifBlank {
-                        styleUrlRegex.find(a.attr("style"))?.groupValues?.get(2)
-                    }
+                    val styleRaw = styleUrlRegex.find(a.attr("style"))?.groupValues?.get(2)
+                    val raw = imgRaw ?: dataBg.ifBlank { styleRaw }
                     if (title.isNotBlank() && href.isNotBlank()) results.add(Triple(title, href, raw))
                 }
             }
@@ -153,24 +125,13 @@ class XmazaProvider : MainAPI() {
         return results
     }
 
-    /**
-     * Series-page hero poster. Ranks every candidate source (og:image,
-     * twitter:image, link[image_src], WordPress featured-image class) by how
-     * much its filename overlaps with the series title's words, and rejects
-     * a non-positive score outright. This is necessary because some mirrors
-     * (confirmed on maalvdo.net) set a single sitewide og:image (their own
-     * logo) as a generic fallback rather than a real per-post image - without
-     * scoring, that logo would otherwise be shown as if it were the poster.
-     */
+    // ---- Series poster with scoring ----
     private fun extractSeriesPoster(doc: Document, pageUrl: String, title: String): String? {
         val candidates = mutableListOf<String>()
 
-        doc.selectFirst("meta[property=\"og:image\"]")?.attr("content")
-            ?.takeIf { it.isNotBlank() }?.let { candidates.add(it) }
-        doc.selectFirst("meta[name=\"twitter:image\"]")?.attr("content")
-            ?.takeIf { it.isNotBlank() }?.let { candidates.add(it) }
-        doc.selectFirst("link[rel=\"image_src\"]")?.attr("href")
-            ?.takeIf { it.isNotBlank() }?.let { candidates.add(it) }
+        doc.selectFirst("meta[property=\"og:image\"]")?.attr("content")?.takeIf { it.isNotBlank() }?.let { candidates.add(it) }
+        doc.selectFirst("meta[name=\"twitter:image\"]")?.attr("content")?.takeIf { it.isNotBlank() }?.let { candidates.add(it) }
+        doc.selectFirst("link[rel=\"image_src\"]")?.attr("href")?.takeIf { it.isNotBlank() }?.let { candidates.add(it) }
         doc.selectFirst(".wp-post-image, .attachment-post-thumbnail, .post-thumbnail img")?.let {
             val raw = it.attr("data-src").ifBlank { it.attr("src") }
             if (raw.isNotBlank()) candidates.add(raw)
@@ -223,13 +184,6 @@ class XmazaProvider : MainAPI() {
         )
     }
 
-    /**
-     * Searches all 5 mirrors concurrently and deduplicates by normalized
-     * title. Whichever mirror's coroutine finishes first "wins" a given
-     * title (a Mutex guards the shared map from concurrent writes); mirror
-     * response order isn't guaranteed, so this is best-effort rather than a
-     * strict site-priority order.
-     */
     override suspend fun search(query: String): List<SearchResponse> {
         val results = mutableMapOf<String, SearchResponse>()
         val mutex = Mutex()
@@ -265,7 +219,6 @@ class XmazaProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        // 1. Fetch clicked episode page to find the parent series/web-series link.
         val epDoc = app.get(url).document
 
         var seriesUrl: String? = null
@@ -275,7 +228,6 @@ class XmazaProvider : MainAPI() {
             val full = if (href.startsWith("http")) href else domainOf(url) + href
             val pathParts = full.substringAfter("://").substringAfter("/").split("/").filter { it.isNotBlank() }
 
-            // "series"/"web-series" root alone (size 1) is the category index, not a specific title.
             if ((pathParts.contains("series") || pathParts.contains("web-series")) && pathParts.size > 1) {
                 seriesUrl = full
                 break
@@ -284,12 +236,10 @@ class XmazaProvider : MainAPI() {
 
         if (seriesUrl == null) return null
 
-        // 2. Fetch the actual series page.
         val seriesDoc = app.get(seriesUrl).document
         val title = seriesDoc.selectFirst("h1, h2")?.text()?.trim() ?: "Unknown Series"
-        val poster = extractSeriesPoster(seriesDoc, seriesUrl, title)
+        val seriesPoster = extractSeriesPoster(seriesDoc, seriesUrl, title)
 
-        // 3. Extract episodes using the same per-site card extractor as search/mainPage.
         val episodesList = mutableListOf<Episode>()
         val seenEpTitles = mutableSetOf<String>()
 
@@ -302,20 +252,56 @@ class XmazaProvider : MainAPI() {
             seenEpTitles.add(normEpTitle)
 
             val epSlug = epUrl.trimEnd('/').substringAfterLast("/")
+            val episodePoster = fixImageUrl(posterRaw, seriesUrl) ?: seriesPoster  // fallback to series poster
             episodesList.add(
-                newEpisode(epSlug) { // data = slug, passed to loadLinks
+                newEpisode(epSlug) {
                     this.name = epTitle
-                    this.posterUrl = fixImageUrl(posterRaw, seriesUrl)
+                    this.posterUrl = episodePoster
                 }
             )
         }
 
-        // Season-aware sort: all of "Episode 1,2,3.." first, then "2 Episode 1,2,3..", etc.
         val sortedEpisodes = episodesList.sortedWith(SeasonAwareComparator())
 
         return newTvSeriesLoadResponse(title, url, TvType.TvSeries, sortedEpisodes) {
-            this.posterUrl = poster
+            this.posterUrl = seriesPoster
         }
+    }
+
+    // ---- Enhanced video URL extraction ----
+    private fun extractVideoUrls(html: String, baseUrl: String): Set<String> {
+        val candidates = mutableSetOf<String>()
+
+        // 1. Quoted URLs (absolute, relative, protocol-relative)
+        quotedVideoRegex.findAll(html).forEach { match ->
+            candidates.add(match.groupValues[1])
+        }
+
+        // 2. <source> tags
+        sourceTagRegex.findAll(html).forEach { match ->
+            candidates.add(match.groupValues[1])
+        }
+
+        // 3. JavaScript variables
+        jsVarRegex.findAll(html).forEach { match ->
+            candidates.add(match.groupValues[1])
+        }
+
+        // Resolve relative and protocol-relative URLs
+        val resolved = mutableSetOf<String>()
+        val baseDomain = domainOf(baseUrl)
+        for (raw in candidates) {
+            val url = when {
+                raw.startsWith("//") -> "https:$raw"
+                raw.startsWith("/") -> baseDomain + raw
+                raw.startsWith("http") -> raw
+                else -> null // ignore non‑URL fragments
+            }
+            if (url != null) {
+                resolved.add(url)
+            }
+        }
+        return resolved
     }
 
     override suspend fun loadLinks(
@@ -330,6 +316,8 @@ class XmazaProvider : MainAPI() {
             if (site.contains("xmaza2")) "$site/watch/$slug" else "$site/$slug/"
         }
 
+        var foundAny = false
+
         coroutineScope {
             mirrorUrls.map { (site, mirrorUrl) ->
                 async {
@@ -337,13 +325,12 @@ class XmazaProvider : MainAPI() {
                         val html = app.get(mirrorUrl).text
                         val sourceName = domainOf(site).removePrefix("https://").removePrefix("http://")
 
-                        streamPattern.findAll(html).forEach { matchResult ->
-                            // Signed CDN urls (AWS S3 &X-Amz-...) are byte-sensitive - the page
-                            // source html-encodes '&' as '&amp;', which MUST be unescaped or the
-                            // request signature will not validate.
-                            val videoUrl = Parser.unescapeEntities(matchResult.groupValues[1], false)
-                            val isM3u8 = videoUrl.contains(".m3u8")
+                        // Unescape HTML entities in the whole HTML to fix &amp; etc.
+                        val unescapedHtml = Parser.unescapeEntities(html, false)
+                        val videoUrls = extractVideoUrls(unescapedHtml, mirrorUrl)
 
+                        videoUrls.forEach { videoUrl ->
+                            val isM3u8 = videoUrl.contains(".m3u8", ignoreCase = true)
                             callback.invoke(
                                 newExtractorLink(
                                     source = sourceName,
@@ -355,6 +342,7 @@ class XmazaProvider : MainAPI() {
                                     this.quality = if (isM3u8) Qualities.Unknown.value else Qualities.P1080.value
                                 }
                             )
+                            foundAny = true
                         }
                     } catch (e: Exception) {
                         e.printStackTrace()
@@ -363,15 +351,9 @@ class XmazaProvider : MainAPI() {
             }.awaitAll()
         }
 
-        return true
+        return foundAny
     }
 
-    /**
-     * Sorts episodes as "Chawl House Episode 1,2,3.." then "Chawl House 2
-     * Episode 1,2,3.." then "Chawl House 3 Episode 1,2,3..", NOT interleaved
-     * by episode number across parts (a plain alphanumeric token sort would
-     * incorrectly place "2 Episode 1" before "Episode 1", since '2' < 'E').
-     */
     private inner class SeasonAwareComparator : Comparator<Episode> {
         override fun compare(s1: Episode, s2: Episode): Int {
             val (base1, season1, ep1) = parseKey(s1.name ?: "")
