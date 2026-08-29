@@ -310,14 +310,9 @@ class XmazaProvider : MainAPI() {
 
             val epSlug = epUrl.trimEnd('/').substringAfterLast("/")
             episodesList.add(
-                // fixUrl = false is REQUIRED: newEpisode() defaults to true, which runs
-                // the data string through fixUrl() and prepends mainUrl to anything not
-                // starting with "http". Since epSlug is intentionally a bare slug (not a
-                // URL), that default was silently turning "chawl-house-episode-1" into
-                // "https://xmaza2.net/chawl-house-episode-1" before loadLinks ever saw it
-                // - confirmed via logcat's DownloadQueueItem data= field. loadLinks() then
-                // built garbage mirror urls from that mangled value, failing on every title.
-                newEpisode(epSlug, fixUrl = false) { // data = bare slug, passed to loadLinks
+                newEpisode(epSlug) { // data = slug (see loadLinks - re-extracts the last
+                    // path segment defensively in case the framework resolves this
+                    // against mainUrl before loadLinks receives it)
                     this.name = epTitle
                     this.posterUrl = fixImageUrl(posterRaw, seriesUrl)
                 }
@@ -339,7 +334,13 @@ class XmazaProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        val slug = data
+        // Defensive: `data` is meant to be a bare slug, but confirmed via logcat that it
+        // can arrive as a full mainUrl-prefixed url instead (DownloadQueueItem showed
+        // "data=https://xmaza2.net/chawl-house-episode-1" for what should have been just
+        // "chawl-house-episode-1") - re-extracting the last path segment here works
+        // correctly either way and was causing every single title's mirror urls to be
+        // built as garbage (e.g. "https://ottdude.com/https://xmaza2.net/.../") before.
+        val slug = data.trimEnd('/').substringAfterLast("/")
 
         val mirrorUrls = mirrors.associateWith { site ->
             if (site.contains("xmaza2")) "$site/watch/$slug" else "$site/$slug/"
