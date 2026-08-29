@@ -13,6 +13,7 @@ import kotlinx.coroutines.sync.withLock
 import org.jsoup.nodes.Document
 import org.jsoup.parser.Parser
 import java.net.URLDecoder
+import java.util.concurrent.ConcurrentHashMap
 
 class XmazaProvider : MainAPI() {
     override var mainUrl = "https://xmaza2.net"
@@ -40,11 +41,42 @@ class XmazaProvider : MainAPI() {
     private val styleUrlRegex = Regex("url\\((['\"]?)(.*?)\\1\\)")
     private val episodeRegex = Regex("^(.*?)(?:\\s+(\\d+))?\\s+Episode\\s+(\\d+)\\s*$", RegexOption.IGNORE_CASE)
 
-    // Enhanced patterns: match quoted URLs (absolute, relative, protocol-relative) ending with .mp4/.m3u8
-    private val quotedVideoRegex = Regex("[\"'](/?/?[^\"']+\\.(?:mp4|m3u8)[^\"']*)[\"']", RegexOption.IGNORE_CASE)
-    private val sourceTagRegex = Regex("""<source[^>]+src\s*=\s*["']([^"']+\.(?:mp4|m3u8)[^"']*)["']""", RegexOption.IGNORE_CASE)
-    private val jsVarRegex = Regex("""(?:file|source|url|video)\s*:\s*["']([^"']+\.(?:mp4|m3u8)[^"']*)["']""", RegexOption.IGNORE_CASE)
+    // ---------- Video extraction patterns ----------
+    // 1. JSON‑LD (most reliable for all mirrors)
+    private val jsonLdVideoRegex = Regex(
+        "\"contentUrl\"\\s*:\\s*\"(https?://[^\"]+\\.(?:mp4|m3u8)[^\"]*)\"|" +
+        "\"embedUrl\"\\s*:\\s*\"(https?://[^\"]+\\.(?:mp4|m3u8)[^\"]*)\"",
+        RegexOption.IGNORE_CASE
+    )
 
+    // 2. Quoted URLs (anywhere)
+    private val quotedVideoRegex = Regex(
+        "[\"'](/?/?[^\"']+\\.(?:mp4|m3u8)[^\"']*)[\"']",
+        RegexOption.IGNORE_CASE
+    )
+
+    // 3. JavaScript variable assignments
+    private val jsVarRegex = Regex(
+        "(?:file|source|url|video)\\s*:\\s*[\"']([^\"']+\\.(?:mp4|m3u8)[^\"']*)[\"']",
+        RegexOption.IGNORE_CASE
+    )
+
+    // 4. Plain "Video url:" label (zmaal.net fallback, though JSON‑LD also exists)
+    private val videoUrlLabelRegex = Regex(
+        "Video\\s+url\\s*:\\s*(https?://[^\\s]+)",
+        RegexOption.IGNORE_CASE
+    )
+
+    // 5. Ultimate fallback – any URL ending with .mp4 or .m3u8
+    private val anyVideoRegex = Regex(
+        "https?://[^\\s<>\"']+\\.(?:mp4|m3u8)[^\\s<>\"']*",
+        RegexOption.IGNORE_CASE
+    )
+
+    // Poster cache
+    private val posterCache = ConcurrentHashMap<String, String>()
+
+    // ---------- Helper functions ----------
     private fun normalizeTitle(title: String): String =
         title.lowercase().replace(Regex("[^a-z0-9]"), "")
 
@@ -82,7 +114,7 @@ class XmazaProvider : MainAPI() {
     private fun resolveHref(hrefRaw: String, site: String): String =
         if (hrefRaw.startsWith("/")) domainOf(site) + hrefRaw else hrefRaw
 
-    // ---- Improved card extraction ----
+    // ---------- Card extraction ----------
     private fun extractCards(doc: Document, site: String): List<Triple<String, String, String?>> {
         val results = mutableListOf<Triple<String, String, String?>>()
 
@@ -125,7 +157,7 @@ class XmazaProvider : MainAPI() {
         return results
     }
 
-    // ---- Series poster with scoring ----
+    // ---------- Series poster extraction (fallback) ----------
     private fun extractSeriesPoster(doc: Document, pageUrl: String, title: String): String? {
         val candidates = mutableListOf<String>()
 
@@ -170,13 +202,16 @@ class XmazaProvider : MainAPI() {
         return fixImageUrl(bestRaw, pageUrl)
     }
 
+    // ---------- Main page / search / load ----------
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val document = app.get(request.data).document
         val home = extractCards(document, request.data).mapNotNull { (title, hrefRaw, posterRaw) ->
             val href = resolveHref(hrefRaw, request.data)
             if (title.isBlank() || href.isBlank()) return@mapNotNull null
+            val poster = fixImageUrl(posterRaw, request.data)
+            if (poster != null) posterCache[href] = poster
             newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
-                this.posterUrl = fixImageUrl(posterRaw, request.data)
+                this.posterUrl = poster
             }
         }
         return newHomePageResponse(
@@ -199,11 +234,13 @@ class XmazaProvider : MainAPI() {
                             val key = normalizeTitle(title)
                             val href = resolveHref(hrefRaw, site)
                             if (key.isBlank() || href.isBlank()) return@forEach
+                            val poster = fixImageUrl(posterRaw, site)
+                            if (poster != null) posterCache[href] = poster
 
                             mutex.withLock {
                                 if (!results.containsKey(key)) {
                                     results[key] = newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
-                                        this.posterUrl = fixImageUrl(posterRaw, site)
+                                        this.posterUrl = poster
                                     }
                                 }
                             }
@@ -238,7 +275,11 @@ class XmazaProvider : MainAPI() {
 
         val seriesDoc = app.get(seriesUrl).document
         val title = seriesDoc.selectFirst("h1, h2")?.text()?.trim() ?: "Unknown Series"
-        val seriesPoster = extractSeriesPoster(seriesDoc, seriesUrl, title)
+
+        var poster = posterCache[url] ?: posterCache[seriesUrl]
+        if (poster == null) {
+            poster = extractSeriesPoster(seriesDoc, seriesUrl, title)
+        }
 
         val episodesList = mutableListOf<Episode>()
         val seenEpTitles = mutableSetOf<String>()
@@ -252,7 +293,7 @@ class XmazaProvider : MainAPI() {
             seenEpTitles.add(normEpTitle)
 
             val epSlug = epUrl.trimEnd('/').substringAfterLast("/")
-            val episodePoster = fixImageUrl(posterRaw, seriesUrl) ?: seriesPoster  // fallback to series poster
+            val episodePoster = fixImageUrl(posterRaw, seriesUrl) ?: poster
             episodesList.add(
                 newEpisode(epSlug) {
                     this.name = epTitle
@@ -264,42 +305,54 @@ class XmazaProvider : MainAPI() {
         val sortedEpisodes = episodesList.sortedWith(SeasonAwareComparator())
 
         return newTvSeriesLoadResponse(title, url, TvType.TvSeries, sortedEpisodes) {
-            this.posterUrl = seriesPoster
+            this.posterUrl = poster
         }
     }
 
-    // ---- Enhanced video URL extraction ----
+    // ---------- Video URL extraction ----------
     private fun extractVideoUrls(html: String, baseUrl: String): Set<String> {
         val candidates = mutableSetOf<String>()
+        val unescapedHtml = Parser.unescapeEntities(html, false)
 
-        // 1. Quoted URLs (absolute, relative, protocol-relative)
-        quotedVideoRegex.findAll(html).forEach { match ->
-            candidates.add(match.groupValues[1])
+        // 1. Parse with Jsoup for <source>, <video>, <iframe>
+        val doc = Parser.parse(unescapedHtml, baseUrl)
+        doc.select("source, video").forEach { tag ->
+            listOf("src", "data-src").forEach { attr ->
+                tag.attr(attr).takeIf { it.isNotBlank() }?.let { candidates.add(it) }
+            }
+        }
+        doc.select("iframe").forEach { iframe ->
+            iframe.attr("src").takeIf { it.isNotBlank() }?.let { candidates.add(it) }
         }
 
-        // 2. <source> tags
-        sourceTagRegex.findAll(html).forEach { match ->
-            candidates.add(match.groupValues[1])
+        // 2. JSON‑LD (highest priority)
+        jsonLdVideoRegex.findAll(unescapedHtml).forEach { match ->
+            val url = match.groupValues[1].ifBlank { match.groupValues[2] }
+            if (url.isNotBlank()) candidates.add(url)
         }
 
-        // 3. JavaScript variables
-        jsVarRegex.findAll(html).forEach { match ->
-            candidates.add(match.groupValues[1])
-        }
+        // 3. Regex fallbacks
+        quotedVideoRegex.findAll(unescapedHtml).forEach { match -> candidates.add(match.groupValues[1]) }
+        jsVarRegex.findAll(unescapedHtml).forEach { match -> candidates.add(match.groupValues[1]) }
+        videoUrlLabelRegex.findAll(unescapedHtml).forEach { match -> candidates.add(match.groupValues[1]) }
+        anyVideoRegex.findAll(unescapedHtml).forEach { match -> candidates.add(match.value) }
 
-        // Resolve relative and protocol-relative URLs
+        // 4. Resolve and clean URLs
         val resolved = mutableSetOf<String>()
         val baseDomain = domainOf(baseUrl)
         for (raw in candidates) {
+            var cleaned = raw.trim()
+                .replace(Regex("\\\\+$"), "")   // remove trailing backslashes
+                .replace(Regex("^\\\\+"), "")   // remove leading backslashes
+                .trim()
+
             val url = when {
-                raw.startsWith("//") -> "https:$raw"
-                raw.startsWith("/") -> baseDomain + raw
-                raw.startsWith("http") -> raw
-                else -> null // ignore non‑URL fragments
+                cleaned.startsWith("//") -> "https:$cleaned"
+                cleaned.startsWith("/") -> baseDomain + cleaned
+                cleaned.startsWith("http") -> cleaned
+                else -> null
             }
-            if (url != null) {
-                resolved.add(url)
-            }
+            if (url != null) resolved.add(url)
         }
         return resolved
     }
@@ -311,23 +364,18 @@ class XmazaProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val slug = data
-
         val mirrorUrls = mirrors.associateWith { site ->
             if (site.contains("xmaza2")) "$site/watch/$slug" else "$site/$slug/"
         }
 
         var foundAny = false
-
         coroutineScope {
             mirrorUrls.map { (site, mirrorUrl) ->
                 async {
                     try {
                         val html = app.get(mirrorUrl).text
                         val sourceName = domainOf(site).removePrefix("https://").removePrefix("http://")
-
-                        // Unescape HTML entities in the whole HTML to fix &amp; etc.
-                        val unescapedHtml = Parser.unescapeEntities(html, false)
-                        val videoUrls = extractVideoUrls(unescapedHtml, mirrorUrl)
+                        val videoUrls = extractVideoUrls(html, mirrorUrl)
 
                         videoUrls.forEach { videoUrl ->
                             val isM3u8 = videoUrl.contains(".m3u8", ignoreCase = true)
@@ -350,10 +398,10 @@ class XmazaProvider : MainAPI() {
                 }
             }.awaitAll()
         }
-
         return foundAny
     }
 
+    // ---------- Episode comparator ----------
     private inner class SeasonAwareComparator : Comparator<Episode> {
         override fun compare(s1: Episode, s2: Episode): Int {
             val (base1, season1, ep1) = parseKey(s1.name ?: "")
