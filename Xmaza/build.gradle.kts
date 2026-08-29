@@ -4,7 +4,7 @@ version = 3
 cloudstream {
     // All of these properties are optional, you can safely remove them
 
-    description = "Hub of Indian Bold Series"
+    description = "Indian Bold Series"
     authors = listOf("ChocoCooper")
 
     /**
