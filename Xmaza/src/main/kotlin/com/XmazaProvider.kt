@@ -42,10 +42,10 @@ class XmazaProvider : MainAPI() {
     private val episodeRegex = Regex("^(.*?)(?:\\s+(\\d+))?\\s+Episode\\s+(\\d+)\\s*$", RegexOption.IGNORE_CASE)
 
     // ---------- Video extraction patterns ----------
-    // 1. JSON‑LD (most reliable for all mirrors)
+    // 1. JSON‑LD – improved to capture both contentUrl and embedUrl, with any characters inside the string
     private val jsonLdVideoRegex = Regex(
-        "\"contentUrl\"\\s*:\\s*\"(https?://[^\"]+\\.(?:mp4|m3u8)[^\"]*)\"|" +
-        "\"embedUrl\"\\s*:\\s*\"(https?://[^\"]+\\.(?:mp4|m3u8)[^\"]*)\"",
+        "\"contentUrl\"\\s*:\\s*\"([^\"]+)\"|" +
+        "\"embedUrl\"\\s*:\\s*\"([^\"]+)\"",
         RegexOption.IGNORE_CASE
     )
 
@@ -61,13 +61,13 @@ class XmazaProvider : MainAPI() {
         RegexOption.IGNORE_CASE
     )
 
-    // 4. Plain "Video url:" label (zmaal.net fallback, though JSON‑LD also exists)
+    // 4. Plain "Video url:" label (zmaal.net fallback)
     private val videoUrlLabelRegex = Regex(
         "Video\\s+url\\s*:\\s*(https?://[^\\s]+)",
         RegexOption.IGNORE_CASE
     )
 
-    // 5. Ultimate fallback – any URL ending with .mp4 or .m3u8
+    // 5. Ultimate fallback – any URL ending with .mp4 or .m3u8, even if it has extra parameters
     private val anyVideoRegex = Regex(
         "https?://[^\\s<>\"']+\\.(?:mp4|m3u8)[^\\s<>\"']*",
         RegexOption.IGNORE_CASE
@@ -314,7 +314,7 @@ class XmazaProvider : MainAPI() {
         val candidates = mutableSetOf<String>()
         val unescapedHtml = Parser.unescapeEntities(html, false)
 
-        // 1. Parse with Jsoup for <source>, <video>, <iframe>
+        // 1. Jsoup for <source>, <video>, <iframe>
         val doc = Parser.parse(unescapedHtml, baseUrl)
         doc.select("source, video").forEach { tag ->
             listOf("src", "data-src").forEach { attr ->
@@ -325,10 +325,13 @@ class XmazaProvider : MainAPI() {
             iframe.attr("src").takeIf { it.isNotBlank() }?.let { candidates.add(it) }
         }
 
-        // 2. JSON‑LD (highest priority)
+        // 2. JSON‑LD (most reliable)
         jsonLdVideoRegex.findAll(unescapedHtml).forEach { match ->
             val url = match.groupValues[1].ifBlank { match.groupValues[2] }
-            if (url.isNotBlank()) candidates.add(url)
+            // Only add if it looks like a video URL (contains .mp4 or .m3u8)
+            if (url.isNotBlank() && (url.contains(".mp4") || url.contains(".m3u8"))) {
+                candidates.add(url)
+            }
         }
 
         // 3. Regex fallbacks
@@ -337,7 +340,7 @@ class XmazaProvider : MainAPI() {
         videoUrlLabelRegex.findAll(unescapedHtml).forEach { match -> candidates.add(match.groupValues[1]) }
         anyVideoRegex.findAll(unescapedHtml).forEach { match -> candidates.add(match.value) }
 
-        // 4. Resolve and clean URLs
+        // Resolve and clean URLs
         val resolved = mutableSetOf<String>()
         val baseDomain = domainOf(baseUrl)
         for (raw in candidates) {
@@ -376,6 +379,11 @@ class XmazaProvider : MainAPI() {
                         val html = app.get(mirrorUrl).text
                         val sourceName = domainOf(site).removePrefix("https://").removePrefix("http://")
                         val videoUrls = extractVideoUrls(html, mirrorUrl)
+
+                        // For debugging – uncomment to log extracted URLs
+                        // if (videoUrls.isNotEmpty()) {
+                        //     println("$sourceName found: ${videoUrls.joinToString()}")
+                        // }
 
                         videoUrls.forEach { videoUrl ->
                             val isM3u8 = videoUrl.contains(".m3u8", ignoreCase = true)
