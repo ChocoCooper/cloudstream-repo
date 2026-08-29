@@ -284,10 +284,17 @@ class XmazaProvider : MainAPI() {
 
         if (seriesUrl == null) return null
 
+        // The clicked episode page's own og:image is a real per-post image (unlike a
+        // taxonomy/archive page's og:image, which some mirrors default to a sitewide
+        // logo - see extractSeriesPoster's docstring). It's also the same image already
+        // shown in search results, so reuse it as the primary backdrop/poster candidate.
+        val episodePoster = extractSeriesPoster(epDoc, url, epDoc.selectFirst("h1, h2")?.text()?.trim() ?: "")
+
         // 2. Fetch the actual series page.
         val seriesDoc = app.get(seriesUrl).document
         val title = seriesDoc.selectFirst("h1, h2")?.text()?.trim() ?: "Unknown Series"
-        val poster = extractSeriesPoster(seriesDoc, seriesUrl, title)
+        val seriesPoster = extractSeriesPoster(seriesDoc, seriesUrl, title)
+        val poster = episodePoster ?: seriesPoster
 
         // 3. Extract episodes using the same per-site card extractor as search/mainPage.
         val episodesList = mutableListOf<Episode>()
@@ -303,7 +310,14 @@ class XmazaProvider : MainAPI() {
 
             val epSlug = epUrl.trimEnd('/').substringAfterLast("/")
             episodesList.add(
-                newEpisode(epSlug) { // data = slug, passed to loadLinks
+                // fixUrl = false is REQUIRED: newEpisode() defaults to true, which runs
+                // the data string through fixUrl() and prepends mainUrl to anything not
+                // starting with "http". Since epSlug is intentionally a bare slug (not a
+                // URL), that default was silently turning "chawl-house-episode-1" into
+                // "https://xmaza2.net/chawl-house-episode-1" before loadLinks ever saw it
+                // - confirmed via logcat's DownloadQueueItem data= field. loadLinks() then
+                // built garbage mirror urls from that mangled value, failing on every title.
+                newEpisode(epSlug, fixUrl = false) { // data = bare slug, passed to loadLinks
                     this.name = epTitle
                     this.posterUrl = fixImageUrl(posterRaw, seriesUrl)
                 }
@@ -315,6 +329,7 @@ class XmazaProvider : MainAPI() {
 
         return newTvSeriesLoadResponse(title, url, TvType.TvSeries, sortedEpisodes) {
             this.posterUrl = poster
+            this.backgroundPosterUrl = poster
         }
     }
 
