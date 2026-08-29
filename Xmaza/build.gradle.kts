@@ -1,10 +1,10 @@
 // use an integer for version numbers
-version = 1
+version = 3
 
 cloudstream {
     // All of these properties are optional, you can safely remove them
 
-    // description = "Lorem Ipsum"
+    description = "Hub of Indian Bold Series"
     authors = listOf("ChocoCooper")
 
     /**
@@ -16,7 +16,7 @@ cloudstream {
      * */
     status = 1 // will be 3 if unspecified
 
-    tvTypes = listOf("TvSeries")
+    tvTypes = listOf("TvSeries", "NSFW")
 
     iconUrl = "https://xmaza.gg/favicon.ico"
 }
