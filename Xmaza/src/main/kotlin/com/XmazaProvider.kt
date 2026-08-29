@@ -36,7 +36,7 @@ class XmazaProvider : MainAPI() {
     override val hasMainPage = true
     override var lang = "hi"
     override val hasDownloadSupport = true
-    override val supportedTypes = setOf(TvType.TvSeries)
+    override val supportedTypes = setOf(TvType.NSFW)
 
     /** All 5 mirrors are treated as equal fallback sources for both search
      * results and streams. loadLinks() labels each ExtractorLink by its own
@@ -63,8 +63,6 @@ class XmazaProvider : MainAPI() {
     // video url under different JS variable names (url:, embedUrl", etc.).
     private val streamPattern = Regex("[\"'](https?://[^\"']+\\.(?:mp4|m3u8)[^\"']*)[\"']")
 
-    // "Chawl House Episode 3" -> (base="Chawl House", season=null, ep=3)
-    // "Chawl House 2 Episode 1" -> (base="Chawl House", season=2, ep=1)
     private val episodeRegex = Regex("^(.*?)(?:\\s+(\\d+))?\\s+Episode\\s+(\\d+)\\s*$", RegexOption.IGNORE_CASE)
 
     private fun normalizeTitle(title: String): String =
@@ -113,22 +111,6 @@ class XmazaProvider : MainAPI() {
     private fun resolveHref(hrefRaw: String, site: String): String =
         if (hrefRaw.startsWith("/")) domainOf(site) + hrefRaw else hrefRaw
 
-    /**
-     * Extracts (title, href, rawPosterOrNull) from any listing/grid page -
-     * search results, mainPage categories, or a series' episode list all use
-     * one of these three markup families, confirmed against live HTML:
-     *
-     *  - xmaza2.net   : <a class="group block" href="/watch/..."><img src="/_next/image?..."></a>
-     *  - zmaal.net    : <article><a class="link" href="..." title="..."></a><img src="..."></article>
-     *                   (the poster <img> is a SIBLING of the anchor, not nested inside it)
-     *  - all others   : <a class="video[ lazy-bg]" data-bg="...webp" style="background-size:cover;..."
-     *                     title="..." href="..."><h2 class="vtitle">Title</h2></a>
-     *                   data-bg must be checked BEFORE the style url() - on maalvdo/xmaza.gg the
-     *                   background-image:url(...) in `style` is injected by client-side "lazy-bg"
-     *                   JS after page load, so the raw HTTP response only has data-bg at fetch time.
-     *                   ottdude renders url() directly server-side with no JS needed, which is why
-     *                   the style-regex fallback is still needed as a second path.
-     */
     private fun extractCards(doc: Document, site: String): List<Triple<String, String, String?>> {
         val results = mutableListOf<Triple<String, String, String?>>()
 
@@ -169,15 +151,6 @@ class XmazaProvider : MainAPI() {
         return results
     }
 
-    /**
-     * Series-page hero poster. Ranks every candidate source (og:image,
-     * twitter:image, link[image_src], WordPress featured-image class) by how
-     * much its filename overlaps with the series title's words, and rejects
-     * a non-positive score outright. This is necessary because some mirrors
-     * (confirmed on maalvdo.net) set a single sitewide og:image (their own
-     * logo) as a generic fallback rather than a real per-post image - without
-     * scoring, that logo would otherwise be shown as if it were the poster.
-     */
     private fun extractSeriesPoster(doc: Document, pageUrl: String, title: String): String? {
         val candidates = mutableListOf<String>()
 
@@ -239,13 +212,6 @@ class XmazaProvider : MainAPI() {
         )
     }
 
-    /**
-     * Searches all 5 mirrors concurrently and deduplicates by normalized
-     * title. Whichever mirror's coroutine finishes first "wins" a given
-     * title (a Mutex guards the shared map from concurrent writes); mirror
-     * response order isn't guaranteed, so this is best-effort rather than a
-     * strict site-priority order.
-     */
     override suspend fun search(query: String): List<SearchResponse> {
         val results = mutableMapOf<String, SearchResponse>()
         val mutex = Mutex()
@@ -350,12 +316,6 @@ class XmazaProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // Defensive: `data` is meant to be a bare slug, but confirmed via logcat that it
-        // can arrive as a full mainUrl-prefixed url instead (DownloadQueueItem showed
-        // "data=https://xmaza2.net/chawl-house-episode-1" for what should have been just
-        // "chawl-house-episode-1") - re-extracting the last path segment here works
-        // correctly either way and was causing every single title's mirror urls to be
-        // built as garbage (e.g. "https://ottdude.com/https://xmaza2.net/.../") before.
         val slug = data.trimEnd('/').substringAfterLast("/")
 
         val mirrorUrls = mirrors.associateWith { site ->
@@ -406,12 +366,6 @@ class XmazaProvider : MainAPI() {
         return true
     }
 
-    /**
-     * Sorts episodes as "Chawl House Episode 1,2,3.." then "Chawl House 2
-     * Episode 1,2,3.." then "Chawl House 3 Episode 1,2,3..", NOT interleaved
-     * by episode number across parts (a plain alphanumeric token sort would
-     * incorrectly place "2 Episode 1" before "Episode 1", since '2' < 'E').
-     */
     private inner class SeasonAwareComparator : Comparator<Episode> {
         override fun compare(s1: Episode, s2: Episode): Int {
             val (base1, season1, ep1) = parseKey(s1.name ?: "")
