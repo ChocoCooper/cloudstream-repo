@@ -353,11 +353,15 @@ class XmazaProvider : MainAPI() {
                         val html = app.get(mirrorUrl).text
                         val sourceName = domainOf(site).removePrefix("https://").removePrefix("http://")
 
-                        streamPattern.findAll(html).forEach { matchResult ->
-                            // Signed CDN urls (AWS S3 &X-Amz-...) are byte-sensitive - the page
-                            // source html-encodes '&' as '&amp;', which MUST be unescaped or the
-                            // request signature will not validate.
-                            val videoUrl = Parser.unescapeEntities(matchResult.groupValues[1], false)
+                        // The same video url routinely appears 2-3 times on one page
+                        // (<video><source src="...">, then again in JSON-LD "embedUrl",
+                        // then again in "contentUrl") - without deduplicating, each repeat
+                        // became its own ExtractorLink with an identical source name.
+                        val videoUrls = streamPattern.findAll(html)
+                            .map { Parser.unescapeEntities(it.groupValues[1], false) }
+                            .distinct()
+
+                        videoUrls.forEach { videoUrl ->
                             val isM3u8 = videoUrl.contains(".m3u8")
 
                             callback.invoke(
@@ -368,7 +372,9 @@ class XmazaProvider : MainAPI() {
                                     type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                 ) {
                                     this.referer = mirrorUrl
-                                    this.quality = if (isM3u8) Qualities.Unknown.value else Qualities.P1080.value
+                                    // Unknown rather than a guessed resolution - we never actually
+                                    // verified the real quality, so don't show a false number.
+                                    this.quality = Qualities.Unknown.value
                                 }
                             )
                         }
