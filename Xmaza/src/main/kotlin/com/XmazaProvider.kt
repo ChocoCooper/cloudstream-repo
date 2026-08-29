@@ -15,7 +15,23 @@ import org.jsoup.parser.Parser
 import java.net.URLDecoder
 
 class XmazaProvider : MainAPI() {
-    override var mainUrl = "https://xmaza2.net"
+
+    /**
+     * EVERY domain used anywhere in this provider is defined here ONCE. If any
+     * mirror changes its domain, update it in this one place - nothing else
+     * in the file needs to change (mirrors list, mainPage categories, and all
+     * dispatch logic in extractCards()/fixImageUrl() reference these constants
+     * rather than hardcoded strings).
+     */
+    private object Domains {
+        const val OTTDUDE = "https://ottdude.com"
+        const val MAALVDO = "https://maalvdo.net"
+        const val XMAZA_GG = "https://xmaza.gg"
+        const val ZMAAL = "https://zmaal.net"
+        const val XMAZA2 = "https://xmaza2.net"
+    }
+
+    override var mainUrl = Domains.XMAZA2
     override var name = "Xmaza"
     override val hasMainPage = true
     override var lang = "hi"
@@ -26,18 +42,18 @@ class XmazaProvider : MainAPI() {
      * results and streams. loadLinks() labels each ExtractorLink by its own
      * domain name (confirmed against real search-page HTML from every site). */
     private val mirrors = listOf(
-        "https://ottdude.com",
-        "https://maalvdo.net",
-        "https://xmaza.gg",
-        "https://zmaal.net",
-        "https://xmaza2.net"
+        Domains.OTTDUDE,
+        Domains.MAALVDO,
+        Domains.XMAZA_GG,
+        Domains.ZMAAL,
+        Domains.XMAZA2
     )
 
     override val mainPage = mainPageOf(
-        "$mainUrl/ott/ullu" to "ULLU",
-        "$mainUrl/ott/atrangii" to "Atrangii",
-        "$mainUrl/ott/primeplay" to "PrimePlay",
-        "$mainUrl/ott/voovi" to "Voovi"
+        "${Domains.OTTDUDE}/ott/ullu/" to "ULLU",
+        "${Domains.OTTDUDE}/ott/atrangii/" to "Atrangii",
+        "${Domains.OTTDUDE}/ott/primeplay/" to "PrimePlay",
+        "${Domains.OTTDUDE}/ott/voovi/" to "Voovi"
     )
 
     private val styleUrlRegex = Regex("url\\((['\"]?)(.*?)\\1\\)")
@@ -117,7 +133,7 @@ class XmazaProvider : MainAPI() {
         val results = mutableListOf<Triple<String, String, String?>>()
 
         when {
-            site.contains("xmaza2") -> {
+            site.contains(Domains.XMAZA2) -> {
                 doc.select("a.group.block").forEach { a ->
                     val title = a.selectFirst("h4")?.text()?.trim() ?: a.attr("title")
                     val href = a.attr("href")
@@ -126,7 +142,7 @@ class XmazaProvider : MainAPI() {
                 }
             }
 
-            site.contains("zmaal") -> {
+            site.contains(Domains.ZMAAL) -> {
                 doc.select("article").forEach { article ->
                     val a = article.selectFirst("a.link") ?: return@forEach
                     val title = a.attr("title").ifBlank { a.attr("aria-label") }.ifBlank { a.text() }
@@ -238,7 +254,7 @@ class XmazaProvider : MainAPI() {
             mirrors.map { site ->
                 async {
                     try {
-                        val searchUrl = if (site.contains("xmaza2")) "$site/search/$query" else "$site/?s=$query"
+                        val searchUrl = if (site.contains(Domains.XMAZA2)) "$site/search/$query" else "$site/?s=$query"
                         val doc = app.get(searchUrl).document
 
                         extractCards(doc, site).forEach { (title, hrefRaw, posterRaw) ->
@@ -343,7 +359,7 @@ class XmazaProvider : MainAPI() {
         val slug = data.trimEnd('/').substringAfterLast("/")
 
         val mirrorUrls = mirrors.associateWith { site ->
-            if (site.contains("xmaza2")) "$site/watch/$slug" else "$site/$slug/"
+            if (site.contains(Domains.XMAZA2)) "$site/watch/$slug" else "$site/$slug/"
         }
 
         coroutineScope {
@@ -353,15 +369,17 @@ class XmazaProvider : MainAPI() {
                         val html = app.get(mirrorUrl).text
                         val sourceName = domainOf(site).removePrefix("https://").removePrefix("http://")
 
-                        // The same video url routinely appears 2-3 times on one page
-                        // (<video><source src="...">, then again in JSON-LD "embedUrl",
-                        // then again in "contentUrl") - without deduplicating, each repeat
-                        // became its own ExtractorLink with an identical source name.
-                        val videoUrls = streamPattern.findAll(html)
+                        // Some mirrors embed the same video url 2-3 times on one page
+                        // (<video><source>, then again in JSON-LD "embedUrl"/"contentUrl");
+                        // others may expose a handful of genuinely different urls (quality
+                        // variants, alternate signed copies). Since every link is labeled
+                        // Unknown quality, showing more than one per mirror is indistinguishable
+                        // from a plain duplicate - only the first working url is surfaced here.
+                        val videoUrl = streamPattern.findAll(html)
                             .map { Parser.unescapeEntities(it.groupValues[1], false) }
-                            .distinct()
+                            .firstOrNull()
 
-                        videoUrls.forEach { videoUrl ->
+                        if (videoUrl != null) {
                             val isM3u8 = videoUrl.contains(".m3u8")
 
                             callback.invoke(
