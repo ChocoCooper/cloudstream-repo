@@ -294,12 +294,24 @@ class ReanimeProvider : MainAPI() {
         val genresArr = extractArrayField(animeObj, "genres")
         val genres = genresArr?.let { extractStringArray(it) } ?: emptyList()
 
-        // Episodes: confirmed to appear either nested at anime.episodes.data (a Jikan/MAL-style
-        // pagination envelope) or as a sibling 'episodes' array next to 'anime' - check both.
+        // Episodes: confirmed to appear in THREE possible shapes depending on page variant:
+        //   1. nested inside anime: anime.episodes.data  (some page variants)
+        //   2. sibling of anime, Jikan/MAL-style wrapped: episodes:{data:[...],limit,total,...}
+        //      (confirmed shape on the plain /anime/{slug} detail page - this is the one that
+        //      was missing before and caused an empty "coming soon" episode list)
+        //   3. sibling of anime, flat array: episodes:[...]  (seen on /watch/ page variants)
         var episodeObjs: List<String> = emptyList()
+
         extractObjectField(animeObj, "episodes")?.let { episodesWrapper ->
             extractArrayField(episodesWrapper, "data")?.let { arr ->
                 episodeObjs = splitTopLevelObjects(arr.removeSurrounding("[", "]"))
+            }
+        }
+        if (episodeObjs.isEmpty()) {
+            extractObjectField(payload, "episodes")?.let { episodesWrapper ->
+                extractArrayField(episodesWrapper, "data")?.let { arr ->
+                    episodeObjs = splitTopLevelObjects(arr.removeSurrounding("[", "]"))
+                }
             }
         }
         if (episodeObjs.isEmpty()) {
