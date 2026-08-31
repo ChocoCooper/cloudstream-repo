@@ -255,6 +255,16 @@ class ReanimeProvider : MainAPI() {
     private fun extractStringArray(arrayLiteral: String): List<String> =
         Regex("\"((?:[^\"\\\\]|\\\\.)*)\"").findAll(arrayLiteral).map { unescapeJsonString(it.groupValues[1]) }.toList()
 
+    // Robust anilist_id extraction
+    private fun extractAnilistId(payload: String, animeObj: String?): Int? {
+        animeObj?.let {
+            extractIntField(it, "anilist_id")?.let { id -> return id }
+        }
+        extractIntField(payload, "anilist_id")?.let { id -> return id }
+        Regex("\\banilist_id\\s*:\\s*[\"']?(\\d+)[\"']?").find(payload)?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
+        return null
+    }
+
     override suspend fun load(url: String): LoadResponse? {
         val html = app.get(url).text
         val payload = extractKitStartPayload(html) ?: return null
@@ -272,7 +282,12 @@ class ReanimeProvider : MainAPI() {
             )
         } else "Unknown"
 
-        val anilistId = extractIntField(animeObj, "anilist_id")
+        val anilistId = extractAnilistId(payload, animeObj)
+        if (anilistId == null) {
+            Log.e("ReanimeProvider", "anilist_id not found in payload or anime object")
+            return null
+        }
+
         val description = extractStringField(animeObj, "description")
         val bannerImage = extractStringField(animeObj, "banner_image")
         val coverObj = extractObjectField(animeObj, "cover_image")
@@ -311,17 +326,18 @@ class ReanimeProvider : MainAPI() {
             val isSubbed = extractBoolField(epObj, "subbed")
             val isDubbed = extractBoolField(epObj, "dubbed")
 
-            val data = "$anilistId|$epNumber"
+            val dataSub = "$anilistId|$epNumber|sub"
+            val dataDub = "$anilistId|$epNumber|dub"
 
-            fun buildEpisode() = newEpisode(data) {
+            fun buildEpisode(dataStr: String) = newEpisode(dataStr) {
                 this.name = epTitle
                 this.episode = epNumber
                 this.posterUrl = epThumb
                 this.description = epDesc
             }
 
-            if (isSubbed) subEpisodes.add(buildEpisode())
-            if (isDubbed) dubEpisodes.add(buildEpisode())
+            if (isSubbed) subEpisodes.add(buildEpisode(dataSub))
+            if (isDubbed) dubEpisodes.add(buildEpisode(dataDub))
         }
 
         return newAnimeLoadResponse(title, url, TvType.Anime) {
@@ -337,20 +353,21 @@ class ReanimeProvider : MainAPI() {
     // ------------------------------------------------------------------
     // LOAD LINKS
     // ------------------------------------------------------------------
-    
-    // Fixed: Added JsonProperty annotations to handle snake_case API responses
     private data class FlixApiResponse(
         @JsonProperty("servers") val servers: List<FlixServer> = emptyList()
     )
-    
+
     private data class FlixServer(
         @JsonProperty("data_link") val data_link: String? = null,
         @JsonProperty("server_name") val server_name: String? = null,
         @JsonProperty("dataLink") val dataLink: String? = null,
-        @JsonProperty("serverName") val serverName: String? = null
+        @JsonProperty("serverName") val serverName: String? = null,
+        @JsonProperty("dataType") val dataType: String? = null,
+        @JsonProperty("data_type") val data_type: String? = null
     ) {
         val link: String get() = data_link ?: dataLink ?: ""
         val name: String get() = server_name ?: serverName ?: ""
+        val type: String? get() = dataType ?: data_type
     }
 
     private data class ResolvedFields(
@@ -489,17 +506,22 @@ class ReanimeProvider : MainAPI() {
         }
         val anilistId = parts[0].toIntOrNull() ?: run { Log.e("ReanimeProvider", "anilistId is null"); return false }
         val ep = parts[1].toIntOrNull() ?: run { Log.e("ReanimeProvider", "ep is null"); return false }
+        val lang = parts.getOrNull(2)?.lowercase() ?: "sub"   // default to sub
 
         // 1. Get flixcloud embed URL
         val flixApiUrl = "$mainUrl/api/flix/$anilistId/$ep"
         val flixResp = app.get(flixApiUrl).parsedSafe<FlixApiResponse>() ?: run {
-            Log.e("ReanimeProvider", "Failed to fetch or parse FlixApiResponse")
+            Log.e("ReanimeProvider", "Failed to fetch FlixApiResponse")
             return false
         }
-        
-        val embedUrl = flixResp.servers.firstOrNull { it.link.contains("flixcloud", ignoreCase = true) }?.link
-        if (embedUrl.isNullOrEmpty()) {
-            Log.e("ReanimeProvider", "No flixcloud server found. Available servers: ${flixResp.servers.map { it.name }}")
+
+        val server = flixResp.servers.firstOrNull {
+            it.link.contains("flixcloud", ignoreCase = true) &&
+            (it.type?.lowercase() == lang || it.type == null)
+        } ?: flixResp.servers.firstOrNull { it.link.contains("flixcloud", ignoreCase = true) }
+
+        val embedUrl = server?.link ?: run {
+            Log.e("ReanimeProvider", "No flixcloud server found")
             return false
         }
 
@@ -517,7 +539,7 @@ class ReanimeProvider : MainAPI() {
         val containerText = extractObjectField(obfCryptoData, fields.containerName) ?: run { Log.e("ReanimeProvider", "containerName ${fields.containerName} not found"); return false }
         val arrayText = extractArrayField(containerText, fields.arrayName) ?: run { Log.e("ReanimeProvider", "arrayName ${fields.arrayName} not found"); return false }
         val firstObj = extractFirstObjectFromArray(arrayText) ?: run { Log.e("ReanimeProvider", "firstObj not found in array"); return false }
-        
+
         val frag1B64 = extractStringField(firstObj, fields.keyField) ?: run { Log.e("ReanimeProvider", "keyField ${fields.keyField} not found"); return false }
         val ivB64 = extractStringField(firstObj, fields.ivField) ?: run { Log.e("ReanimeProvider", "ivField ${fields.ivField} not found"); return false }
         val keyFrag2B64 = extractStringField(dataObj, fields.keyFrag2Field) ?: run { Log.e("ReanimeProvider", "keyFrag2Field ${fields.keyFrag2Field} not found"); return false }
@@ -534,7 +556,7 @@ class ReanimeProvider : MainAPI() {
         val P = tokenResp[k] ?: run { Log.e("ReanimeProvider", "Token P missing. Keys: ${tokenResp.keys}"); return false }
         val U = tokenResp[i] ?: run { Log.e("ReanimeProvider", "Token U missing. Keys: ${tokenResp.keys}"); return false }
 
-        // 5. Base64 decode (Changed to NO_WRAP to prevent crypto corruption)
+        // 5. Base64 decode (NO_WRAP)
         val frag1 = Base64.decode(frag1B64, Base64.NO_WRAP)
         val keyFrag2 = Base64.decode(keyFrag2B64, Base64.NO_WRAP)
         val tokenU = Base64.decode(U, Base64.NO_WRAP)
