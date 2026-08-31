@@ -3,6 +3,7 @@ package com.reanime
 import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import org.jsoup.parser.Parser
 import java.net.URLEncoder
@@ -533,7 +534,7 @@ class ReanimeProvider : MainAPI() {
         //     suppress deprecation on this specific call.
         @Suppress("DEPRECATION")
         callback(
-            ExtractorLink(
+            newExtractorLink(
                 name,                     // source
                 "Reanime HD-2",           // name
                 decryptedUrl,             // url
