@@ -528,15 +528,15 @@ class ReanimeProvider : MainAPI() {
         // 10. AES-CBC decrypt
         val decryptedUrl = aesCbcDecrypt(encryptedData, aesKey, iv) ?: return false
 
-        // 11. Return stream - perfectly maps to the non-deprecated ExtractorLink primary constructor
+        // 11. Return stream using the updated non-deprecated function and exact positional arguments
         callback(
-            ExtractorLink(
-                source = name,
-                name = "Reanime HD-2",
-                url = decryptedUrl,
-                referer = embedUrl,
-                quality = Qualities.Unknown.value,
-                type = INFER_TYPE
+            newExtractorLink(
+                name,                      // source
+                "Reanime HD-2",            // name
+                decryptedUrl,              // url
+                embedUrl,                  // referer
+                Qualities.Unknown.value,   // quality
+                ExtractorLinkType.M3U8     // type
             )
         )
         return true
