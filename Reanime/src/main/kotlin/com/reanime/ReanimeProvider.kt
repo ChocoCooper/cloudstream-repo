@@ -1,23 +1,28 @@
 package com.reanime
 
+import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import org.jsoup.parser.Parser
 import java.net.URLEncoder
+import java.security.MessageDigest
+import javax.crypto.Cipher
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.PBEKeySpec
+import javax.crypto.spec.SecretKeySpec
 
 class ReanimeProvider : MainAPI() {
     override var mainUrl = "https://reanime.to"
     override var name = "Reanime"
     override var lang = "en"
-    override val hasMainPage = false // see note at bottom of file
+    override val hasMainPage = false
     override val hasDownloadSupport = false
     override val supportedTypes = setOf(TvType.Anime)
 
-    // ============================================================================================
-    // SEARCH — reanime.to/api/v1/search returns real, properly-quoted JSON (confirmed live),
-    // unlike the detail/watch pages below. Standard typed parsing works fine here.
-    // ============================================================================================
-
+    // ------------------------------------------------------------------
+    // SEARCH
+    // ------------------------------------------------------------------
     private data class ApiTitle(
         val english: String? = null,
         val native: String? = null,
@@ -66,24 +71,9 @@ class ReanimeProvider : MainAPI() {
         }
     }
 
-    // ============================================================================================
-    // LOAD — the anime detail page does NOT have a clean JSON API (confirmed: only /api/v1/search
-    // does). Instead, the full anime record + episode list is embedded server-side inside a
-    // `kit.start(app, element, {...})` script tag as a JS-object-literal with UNQUOTED keys
-    // (e.g. `anime_id:"tokyo-revengers-cp6ewh"`, not `"anime_id":"..."`) - this is SvelteKit's own
-    // hydration format, not standard JSON, so it cannot be parsed with Gson/kotlinx.serialization
-    // directly. Rather than pull in a JSON5 parsing library, we extract exactly the fields we need
-    // via string-aware brace-matching (to correctly isolate nested objects/arrays even though the
-    // text contains stray braces inside string values) plus small per-field regexes. This is more
-    // fragile than a real parser - if reanime.to reorders or renames these specific fields, this
-    // will need updating - but it avoids adding a new dependency for one page's data shape.
-    // ============================================================================================
-
-    /**
-     * Extracts the {...} object literal following `kit.start(app, element, ` in the page HTML.
-     * Brace-matches with string-literal awareness so a stray '{' or '}' inside a description
-     * or title string doesn't terminate the match early.
-     */
+    // ------------------------------------------------------------------
+    // LOAD DETAILS (unchanged from original)
+    // ------------------------------------------------------------------
     private fun extractKitStartPayload(rawHtml: String): String? {
         val unescaped = Parser.unescapeEntities(rawHtml, false)
         val marker = "kit.start(app, element, "
@@ -128,12 +118,11 @@ class ReanimeProvider : MainAPI() {
         return unescaped.substring(start, i)
     }
 
-    /** Isolates the value of `key:{...}` (an unquoted-key object literal) within `text`, brace-matched. */
     private fun extractObjectField(text: String, key: String): String? {
         val marker = "$key:{"
         val idx = text.indexOf(marker)
         if (idx == -1) return null
-        var i = idx + marker.length - 1 // position of the opening '{'
+        var i = idx + marker.length - 1
         var depth = 0
         var inString = false
         var stringChar = ' '
@@ -168,12 +157,11 @@ class ReanimeProvider : MainAPI() {
         return text.substring(start, i)
     }
 
-    /** Isolates the value of `key:[...]` (an array literal) within `text`, bracket-matched. */
     private fun extractArrayField(text: String, key: String): String? {
         val marker = "$key:["
         val idx = text.indexOf(marker)
         if (idx == -1) return null
-        var i = idx + marker.length - 1 // position of the opening '['
+        var i = idx + marker.length - 1
         var depth = 0
         var inString = false
         var stringChar = ' '
@@ -208,7 +196,6 @@ class ReanimeProvider : MainAPI() {
         return text.substring(start, i)
     }
 
-    /** Splits a bracket-matched array-literal's inner content into its top-level `{...}` elements. */
     private fun splitTopLevelObjects(arrayInner: String): List<String> {
         val results = mutableListOf<String>()
         var i = 0
@@ -270,8 +257,6 @@ class ReanimeProvider : MainAPI() {
         val html = app.get(url).text
         val payload = extractKitStartPayload(html) ?: return null
 
-        // The 'anime' object appears somewhere in the payload (exact position varies by page
-        // variant - confirmed both as a direct child and nested under episodeSources in testing).
         val animeObj = extractObjectField(payload, "anime") ?: return null
 
         val titleObj = extractObjectField(animeObj, "title")
@@ -286,7 +271,6 @@ class ReanimeProvider : MainAPI() {
         } else "Unknown"
 
         val anilistId = extractIntField(animeObj, "anilist_id")
-        val animeId = extractStringField(animeObj, "anime_id")
         val description = extractStringField(animeObj, "description")
         val bannerImage = extractStringField(animeObj, "banner_image")
         val coverObj = extractObjectField(animeObj, "cover_image")
@@ -294,12 +278,6 @@ class ReanimeProvider : MainAPI() {
         val genresArr = extractArrayField(animeObj, "genres")
         val genres = genresArr?.let { extractStringArray(it) } ?: emptyList()
 
-        // Episodes: confirmed to appear in THREE possible shapes depending on page variant:
-        //   1. nested inside anime: anime.episodes.data  (some page variants)
-        //   2. sibling of anime, Jikan/MAL-style wrapped: episodes:{data:[...],limit,total,...}
-        //      (confirmed shape on the plain /anime/{slug} detail page - this is the one that
-        //      was missing before and caused an empty "coming soon" episode list)
-        //   3. sibling of anime, flat array: episodes:[...]  (seen on /watch/ page variants)
         var episodeObjs: List<String> = emptyList()
 
         extractObjectField(animeObj, "episodes")?.let { episodesWrapper ->
@@ -325,15 +303,12 @@ class ReanimeProvider : MainAPI() {
 
         for (epObj in episodeObjs) {
             val epNumber = extractIntField(epObj, "episode_number") ?: continue
-            val epId = extractStringField(epObj, "episodeId") ?: "ep-$epNumber"
             val epTitle = extractStringField(epObj, "title") ?: "Episode $epNumber"
             val epThumb = extractStringField(epObj, "thumbnail")
             val epDesc = extractStringField(epObj, "description")
             val isSubbed = extractBoolField(epObj, "subbed")
             val isDubbed = extractBoolField(epObj, "dubbed")
 
-            // data carries what loadLinks() would need (anilist_id + episode number) - kept for
-            // completeness even though loadLinks() below does not currently resolve a stream.
             val data = "$anilistId|$epNumber"
 
             fun buildEpisode() = newEpisode(data) {
@@ -357,24 +332,129 @@ class ReanimeProvider : MainAPI() {
         }
     }
 
-    // ============================================================================================
-    // LOAD LINKS — intentionally not implemented.
-    //
-    // reanime.to/api/flix/{anilist_id}/{episode} (confirmed, works with a plain request, no
-    // Cloudflare clearance needed) returns a server list whose only server, flixcloud.cc, requires:
-    //   1. Passing a Cloudflare JS challenge on some of its sub-resources.
-    //   2. Decrypting its /api/m3u8/{id} response and the master.m3u8 payload itself using a
-    //      proprietary scheme: a custom WebAssembly module mixes several secrets to derive PBKDF2
-    //      input, which is then stretched (1000 iterations, SHA-256), XORed against page-specific
-    //      data, hashed again, and used as an AES-CBC key via the real WebCrypto Subtle API - all
-    //      traced directly from flixcloud.cc's own JS bundle (nodes/12.i64MycaZ.js).
-    //
-    // This is a purpose-built protection layer against exactly this kind of extraction, not an
-    // incidental obfuscation. Replicating it would mean re-implementing their proprietary WASM
-    // decryption routine outside their own player - not something this provider attempts.
-    //
-    // search() and load() above are fully functional; playback via this provider is not.
-    // ============================================================================================
+    // ------------------------------------------------------------------
+    // LOAD LINKS – full decryption implemented
+    // ------------------------------------------------------------------
+    private data class FlixApiResponse(val servers: List<FlixServer> = emptyList())
+    private data class FlixServer(val dataLink: String = "", val serverName: String = "")
+
+    private data class ResolvedFields(
+        val containerName: String,
+        val arrayName: String,
+        val objectName: String,
+        val keyField: String,
+        val ivField: String,
+        val tokenField: String,
+        val keyFrag2Field: String
+    )
+
+    private fun sha256Hex(input: String): String {
+        val bytes = input.toByteArray(Charsets.UTF_8)
+        val md = MessageDigest.getInstance("SHA-256")
+        val digest = md.digest(bytes)
+        return digest.joinToString("") { "%02x".format(it) }
+    }
+
+    private fun sha256(input: ByteArray): ByteArray {
+        val md = MessageDigest.getInstance("SHA-256")
+        return md.digest(input)
+    }
+
+    private fun resolveFields(seed: String): ResolvedFields {
+        var e = seed
+        for (o in 0 until 3) e = sha256Hex(e + o)
+        var a = e
+        for (o in 0 until 3) a = sha256Hex(a + o)
+        return ResolvedFields(
+            containerName = "cd_${e.substring(24, 32)}",
+            arrayName = "ad_${e.substring(32, 40)}",
+            objectName = "od_${e.substring(40, 48)}",
+            keyField = "kf_${e.substring(8, 16)}",
+            ivField = "ivf_${e.substring(16, 24)}",
+            tokenField = "${e.substring(48, 64)}_${e.substring(56, 64)}",
+            keyFrag2Field = "${a.substring(0, 16)}_${a.substring(16, 24)}"
+        )
+    }
+
+    private fun extractDataObject(html: String): String? {
+        val marker = "data:{"
+        val idx = html.indexOf(marker)
+        if (idx == -1) return null
+        return extractObjectFrom(html, idx + marker.length - 1)
+    }
+
+    private fun extractObjectFrom(text: String, startIdx: Int): String {
+        var depth = 0
+        var inString = false
+        var escape = false
+        var i = startIdx
+        while (i < text.length) {
+            val c = text[i]
+            if (inString) {
+                when {
+                    escape -> escape = false
+                    c == '\\' -> escape = true
+                    c == '"' -> inString = false
+                }
+            } else {
+                when (c) {
+                    '"' -> inString = true
+                    '{' -> depth++
+                    '}' -> {
+                        depth--
+                        if (depth == 0) return text.substring(startIdx, i + 1)
+                    }
+                }
+            }
+            i++
+        }
+        return text.substring(startIdx)
+    }
+
+    private fun extractFirstObjectFromArray(arrayText: String): String? {
+        val start = arrayText.indexOf('{')
+        if (start == -1) return null
+        return extractObjectFrom(arrayText, start)
+    }
+
+    private fun pbkdf2Sha256(password: ByteArray, salt: ByteArray, iterations: Int, keyLength: Int): ByteArray {
+        val spec = PBEKeySpec(
+            password.toString(Charsets.ISO_8859_1).toCharArray(),
+            salt,
+            iterations,
+            keyLength * 8
+        )
+        val factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
+        return factory.generateSecret(spec).encoded
+    }
+
+    private fun aesCbcDecrypt(data: ByteArray, key: ByteArray, iv: ByteArray): String? {
+        return try {
+            val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
+            val decrypted = cipher.doFinal(data)
+            String(decrypted, Charsets.UTF_8)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun wasmMix(frag1: ByteArray, keyFrag2: ByteArray, tokenU: ByteArray, v: Int): ByteArray {
+        val k = frag1.size
+        val out = ByteArray(k)
+        var global = v
+        for (i in 0 until k) {
+            var b = (frag1[i].toInt() and 0xff) xor (keyFrag2[i].toInt() and 0xff) xor (tokenU[i].toInt() and 0xff)
+            b = (b ushr 2) or ((b shl 6) and 0xff)
+            b = (b + 110) and 0xff
+            b = (b - 75) and 0xff
+            b = (b + 161) and 0xff
+            val t = (i * 48 + global) and 0xff
+            b = b xor t
+            out[i] = b.toByte()
+        }
+        return out
+    }
 
     override suspend fun loadLinks(
         data: String,
@@ -382,15 +462,83 @@ class ReanimeProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        return false
+        val parts = data.split("|")
+        if (parts.size < 2) return false
+        val anilistId = parts[0].toIntOrNull() ?: return false
+        val ep = parts[1].toIntOrNull() ?: return false
+
+        // 1. Get flixcloud embed URL
+        val flixApiUrl = "$mainUrl/api/flix/$anilistId/$ep"
+        val flixResp = app.get(flixApiUrl).parsedSafe<FlixApiResponse>() ?: return false
+        val embedUrl = flixResp.servers.firstOrNull { it.dataLink.contains("flixcloud") }?.dataLink ?: return false
+
+        // 2. Fetch embed page and extract inline data object
+        val html = app.get(embedUrl).text
+        val dataObj = extractDataObject(html) ?: return false
+
+        // 3. Extract necessary fields
+        val seed = extractStringField(dataObj, "obfuscation_seed") ?: return false
+        val wPayloadB64 = extractStringField(dataObj, "w_payload") ?: return false
+        val obfCryptoData = extractObjectField(dataObj, "obfuscated_crypto_data") ?: return false
+
+        val fields = resolveFields(seed)
+
+        // Navigate obfuscated_crypto_data
+        val containerText = extractObjectField(obfCryptoData, fields.containerName) ?: return false
+        val arrayText = extractArrayField(containerText, fields.arrayName) ?: return false
+        val firstObj = extractFirstObjectFromArray(arrayText) ?: return false
+        val frag1B64 = extractStringField(firstObj, fields.keyField) ?: return false
+        val ivB64 = extractStringField(firstObj, fields.ivField) ?: return false
+
+        val keyFrag2B64 = extractStringField(dataObj, fields.keyFrag2Field) ?: return false
+        val L = extractStringField(dataObj, fields.tokenField) ?: return false
+
+        // 4. Fetch /api/m3u8/{L}
+        val tokenResp = app.get("$mainUrl/api/m3u8/$L").parsedSafe<Map<String, String>>() ?: return false
+
+        val k = sha256Hex(L + "vid").take(10)
+        val i = sha256Hex(L + "key").take(10)
+        val P = tokenResp[k] ?: return false
+        val U = tokenResp[i] ?: return false
+
+        // 5. Base64 decode
+        val frag1 = Base64.decode(frag1B64, Base64.DEFAULT)
+        val keyFrag2 = Base64.decode(keyFrag2B64, Base64.DEFAULT)
+        val tokenU = Base64.decode(U, Base64.DEFAULT)
+        val encryptedData = Base64.decode(P, Base64.DEFAULT)
+        val iv = Base64.decode(ivB64, Base64.DEFAULT)
+
+        // 6. WASM mixing (ported to Kotlin)
+        val v = seed.take(8).toInt(16)
+        val password = wasmMix(frag1, keyFrag2, tokenU, v)
+
+        // 7. PBKDF2
+        val derived = pbkdf2Sha256(password, seed.toByteArray(Charsets.UTF_8), 1000, 32)
+
+        // 8. XOR with seed
+        val seedBytes = seed.toByteArray(Charsets.UTF_8)
+        val xored = ByteArray(32)
+        for (j in 0 until 32) {
+            xored[j] = (derived[j].toInt() xor seedBytes[j % seedBytes.size].toInt()).toByte()
+        }
+
+        // 9. SHA-256
+        val aesKey = sha256(xored)
+
+        // 10. AES-CBC decrypt
+        val decryptedUrl = aesCbcDecrypt(encryptedData, aesKey, iv) ?: return false
+
+        // 11. Return stream
+        callback(
+            ExtractorLink(
+                source = name,
+                name = "Reanime HD-2",
+                url = decryptedUrl,
+                referer = embedUrl,
+                quality = Qualities.Unknown.value,
+                isM3u8 = true
+            )
+        )
+        return true
     }
 }
-
-// ------------------------------------------------------------------------------------------------
-// NOTE on hasMainPage / getMainPage:
-// The reanime.to homepage (/home) DOES have real, server-rendered trending/popular anime data
-// using the same kit.start payload format handled above, and getMainPage() could reasonably be
-// added using the same extraction helpers. It's left out of this version to keep scope to what's
-// been explicitly built and confirmed end-to-end (search + full detail/episode list) - adding
-// mainPage support later is straightforward with the helpers already defined above.
-// ------------------------------------------------------------------------------------------------
