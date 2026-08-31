@@ -22,7 +22,7 @@ class ReanimeProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.Anime)
 
     // ------------------------------------------------------------------
-    // SEARCH (unchanged)
+    // SEARCH
     // ------------------------------------------------------------------
     private data class ApiTitle(
         val english: String? = null,
@@ -73,7 +73,7 @@ class ReanimeProvider : MainAPI() {
     }
 
     // ------------------------------------------------------------------
-    // LOAD DETAILS (unchanged)
+    // LOAD DETAILS
     // ------------------------------------------------------------------
     private fun extractKitStartPayload(rawHtml: String): String? {
         val unescaped = Parser.unescapeEntities(rawHtml, false)
@@ -457,6 +457,7 @@ class ReanimeProvider : MainAPI() {
         return out
     }
 
+    @Suppress("DEPRECATION")
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -479,7 +480,6 @@ class ReanimeProvider : MainAPI() {
 
         // 3. Extract necessary fields
         val seed = extractStringField(dataObj, "obfuscation_seed") ?: return false
-        val wPayloadB64 = extractStringField(dataObj, "w_payload") ?: return false
         val obfCryptoData = extractObjectField(dataObj, "obfuscated_crypto_data") ?: return false
 
         val fields = resolveFields(seed)
