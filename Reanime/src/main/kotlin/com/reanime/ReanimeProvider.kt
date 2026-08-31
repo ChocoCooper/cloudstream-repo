@@ -3,6 +3,7 @@ package com.reanime
 import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.Qualities
 import org.jsoup.parser.Parser
 import java.net.URLEncoder
 import java.security.MessageDigest
@@ -21,7 +22,7 @@ class ReanimeProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.Anime)
 
     // ------------------------------------------------------------------
-    // SEARCH
+    // SEARCH (unchanged)
     // ------------------------------------------------------------------
     private data class ApiTitle(
         val english: String? = null,
@@ -72,7 +73,7 @@ class ReanimeProvider : MainAPI() {
     }
 
     // ------------------------------------------------------------------
-    // LOAD DETAILS (unchanged from original)
+    // LOAD DETAILS (unchanged)
     // ------------------------------------------------------------------
     private fun extractKitStartPayload(rawHtml: String): String? {
         val unescaped = Parser.unescapeEntities(rawHtml, false)
@@ -530,7 +531,7 @@ class ReanimeProvider : MainAPI() {
 
         // 11. Return stream
         callback(
-            ExtractorLink(
+            newExtractorLink(
                 source = name,
                 name = "Reanime HD-2",
                 url = decryptedUrl,
