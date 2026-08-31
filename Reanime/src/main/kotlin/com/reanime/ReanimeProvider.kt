@@ -3,7 +3,6 @@ package com.reanime
 import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.newExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
 import org.jsoup.parser.Parser
 import java.net.URLEncoder
@@ -23,7 +22,7 @@ class ReanimeProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.Anime)
 
     // ------------------------------------------------------------------
-    // SEARCH (unchanged)
+    // SEARCH
     // ------------------------------------------------------------------
     private data class ApiTitle(
         val english: String? = null,
@@ -74,7 +73,7 @@ class ReanimeProvider : MainAPI() {
     }
 
     // ------------------------------------------------------------------
-    // LOAD DETAILS (unchanged)
+    // LOAD DETAILS
     // ------------------------------------------------------------------
     private fun extractKitStartPayload(rawHtml: String): String? {
         val unescaped = Parser.unescapeEntities(rawHtml, false)
@@ -335,7 +334,7 @@ class ReanimeProvider : MainAPI() {
     }
 
     // ------------------------------------------------------------------
-    // LOAD LINKS – full decryption implemented
+    // LOAD LINKS
     // ------------------------------------------------------------------
     private data class FlixApiResponse(val servers: List<FlixServer> = emptyList())
     private data class FlixServer(val dataLink: String = "", val serverName: String = "")
@@ -458,6 +457,7 @@ class ReanimeProvider : MainAPI() {
         return out
     }
 
+    @Suppress("DEPRECATION") // ExtractorLink constructor is deprecated but we use positional args to avoid import issues
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -530,11 +530,9 @@ class ReanimeProvider : MainAPI() {
         // 10. AES-CBC decrypt
         val decryptedUrl = aesCbcDecrypt(encryptedData, aesKey, iv) ?: return false
 
-        // 11. Return stream – use ExtractorLink constructor with positional arguments,
-        //     suppress deprecation on this specific call.
-        @Suppress("DEPRECATION")
+        // 11. Return stream – using direct constructor with positional arguments
         callback(
-            newExtractorLink(
+            ExtractorLink(
                 name,                     // source
                 "Reanime HD-2",           // name
                 decryptedUrl,             // url
