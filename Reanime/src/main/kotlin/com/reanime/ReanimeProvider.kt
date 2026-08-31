@@ -4,6 +4,7 @@ import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.newExtractorLink  // <-- added this import
 import org.jsoup.parser.Parser
 import java.net.URLEncoder
 import java.security.MessageDigest
@@ -22,7 +23,7 @@ class ReanimeProvider : MainAPI() {
     override val supportedTypes = setOf(TvType.Anime)
 
     // ------------------------------------------------------------------
-    // SEARCH
+    // SEARCH (unchanged)
     // ------------------------------------------------------------------
     private data class ApiTitle(
         val english: String? = null,
@@ -73,7 +74,7 @@ class ReanimeProvider : MainAPI() {
     }
 
     // ------------------------------------------------------------------
-    // LOAD DETAILS
+    // LOAD DETAILS (unchanged)
     // ------------------------------------------------------------------
     private fun extractKitStartPayload(rawHtml: String): String? {
         val unescaped = Parser.unescapeEntities(rawHtml, false)
@@ -457,7 +458,6 @@ class ReanimeProvider : MainAPI() {
         return out
     }
 
-    @Suppress("DEPRECATION")
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -480,6 +480,7 @@ class ReanimeProvider : MainAPI() {
 
         // 3. Extract necessary fields
         val seed = extractStringField(dataObj, "obfuscation_seed") ?: return false
+        val wPayloadB64 = extractStringField(dataObj, "w_payload") ?: return false
         val obfCryptoData = extractObjectField(dataObj, "obfuscated_crypto_data") ?: return false
 
         val fields = resolveFields(seed)
@@ -531,9 +532,9 @@ class ReanimeProvider : MainAPI() {
 
         // 11. Return stream
         callback(
-            ExtractorLink(
+            newExtractorLink(
                 source = name,
-                name = "Reanime",
+                name = "Reanime HD-2",
                 url = decryptedUrl,
                 referer = embedUrl,
                 quality = Qualities.Unknown.value,
