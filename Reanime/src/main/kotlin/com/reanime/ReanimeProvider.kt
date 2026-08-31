@@ -531,14 +531,16 @@ class ReanimeProvider : MainAPI() {
 
         // 11. Return stream – use ExtractorLink constructor directly
         callback(
-            ExtractorLink(
+            newExtractorLink(
                 source = name,
                 name = "Reanime HD-2",
                 url = decryptedUrl,
-                referer = embedUrl,
-                quality = Qualities.Unknown.value,
-                isM3u8 = true
-            )
+                type = null  // or ExtractorLinkType.M3U8, optional
+            ) {
+                this.referer = embedUrl
+                this.quality = Qualities.Unknown.value
+                this.isM3u8 = true
+            }
         )
         return true
     }
