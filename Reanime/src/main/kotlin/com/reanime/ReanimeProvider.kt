@@ -531,9 +531,9 @@ class ReanimeProvider : MainAPI() {
 
         // 11. Return stream
         callback(
-            newExtractorLink(
+            ExtractorLink(
                 source = name,
-                name = "Reanime HD-2",
+                name = "Reanime",
                 url = decryptedUrl,
                 referer = embedUrl,
                 quality = Qualities.Unknown.value,
