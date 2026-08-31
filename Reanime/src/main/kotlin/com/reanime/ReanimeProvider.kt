@@ -2,8 +2,7 @@ package com.reanime
 
 import android.util.Base64
 import com.lagradost.cloudstream3.*
-import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.*
 import org.jsoup.parser.Parser
 import java.net.URLEncoder
 import java.security.MessageDigest
@@ -457,7 +456,6 @@ class ReanimeProvider : MainAPI() {
         return out
     }
 
-    @Suppress("DEPRECATION") // ExtractorLink constructor is deprecated but we use positional args to avoid import issues
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -530,15 +528,15 @@ class ReanimeProvider : MainAPI() {
         // 10. AES-CBC decrypt
         val decryptedUrl = aesCbcDecrypt(encryptedData, aesKey, iv) ?: return false
 
-        // 11. Return stream – using direct constructor with positional arguments
+        // 11. Return stream – using the properly imported newExtractorLink function
         callback(
-            ExtractorLink(
-                name,                     // source
-                "Reanime HD-2",           // name
-                decryptedUrl,             // url
-                embedUrl,                 // referer
-                Qualities.Unknown.value,  // quality
-                true                      // isM3u8
+            newExtractorLink(
+                source = name,
+                name = "Reanime HD-2",
+                url = decryptedUrl,
+                referer = embedUrl,
+                quality = Qualities.Unknown.value,
+                isM3u8 = true
             )
         )
         return true
