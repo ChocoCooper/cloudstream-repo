@@ -529,13 +529,13 @@ class ReanimeProvider : MainAPI() {
         // 10. AES-CBC decrypt
         val decryptedUrl = aesCbcDecrypt(encryptedData, aesKey, iv) ?: return false
 
-        // 11. Return stream – use ExtractorLink constructor directly
+        // 11. Return stream – use newExtractorLink with lambda
         callback(
             newExtractorLink(
                 source = name,
                 name = "Reanime HD-2",
                 url = decryptedUrl,
-                type = null  // or ExtractorLinkType.M3U8, optional
+                type = null  // optional; can omit if you want auto-detection
             ) {
                 this.referer = embedUrl
                 this.quality = Qualities.Unknown.value
