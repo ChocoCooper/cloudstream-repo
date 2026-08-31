@@ -457,6 +457,7 @@ class ReanimeProvider : MainAPI() {
         return out
     }
 
+    @Suppress("DEPRECATION") // ExtractorLink constructor is deprecated but we use positional args to avoid import issues
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -529,18 +530,17 @@ class ReanimeProvider : MainAPI() {
         // 10. AES-CBC decrypt
         val decryptedUrl = aesCbcDecrypt(encryptedData, aesKey, iv) ?: return false
 
-        // 11. Return stream – use newExtractorLink with lambda
+        // 11. Return stream – use ExtractorLink constructor with positional arguments
+        // Order: source, name, url, referer, quality, isM3u8
         callback(
-            newExtractorLink(
-                source = name,
-                name = "Reanime HD-2",
-                url = decryptedUrl,
-                type = null  // optional; can omit if you want auto-detection
-            ) {
-                this.referer = embedUrl
-                this.quality = Qualities.Unknown.value
-                this.isM3u8 = true
-            }
+            ExtractorLink(
+                name,                     // source
+                "Reanime HD-2",           // name
+                decryptedUrl,             // url
+                embedUrl,                 // referer
+                Qualities.Unknown.value,  // quality
+                true                      // isM3u8
+            )
         )
         return true
     }
