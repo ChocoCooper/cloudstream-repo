@@ -4,7 +4,6 @@ import android.util.Base64
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.Qualities
-import com.lagradost.cloudstream3.utils.newExtractorLink  // <-- added this import
 import org.jsoup.parser.Parser
 import java.net.URLEncoder
 import java.security.MessageDigest
@@ -530,9 +529,9 @@ class ReanimeProvider : MainAPI() {
         // 10. AES-CBC decrypt
         val decryptedUrl = aesCbcDecrypt(encryptedData, aesKey, iv) ?: return false
 
-        // 11. Return stream
+        // 11. Return stream – use ExtractorLink constructor directly
         callback(
-            newExtractorLink(
+            ExtractorLink(
                 source = name,
                 name = "Reanime HD-2",
                 url = decryptedUrl,
