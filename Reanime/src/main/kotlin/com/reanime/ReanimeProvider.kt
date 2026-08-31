@@ -1,6 +1,8 @@
 package com.reanime
 
 import android.util.Base64
+import android.util.Log
+import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.parser.Parser
@@ -335,8 +337,21 @@ class ReanimeProvider : MainAPI() {
     // ------------------------------------------------------------------
     // LOAD LINKS
     // ------------------------------------------------------------------
-    private data class FlixApiResponse(val servers: List<FlixServer> = emptyList())
-    private data class FlixServer(val dataLink: String = "", val serverName: String = "")
+    
+    // Fixed: Added JsonProperty annotations to handle snake_case API responses
+    private data class FlixApiResponse(
+        @JsonProperty("servers") val servers: List<FlixServer> = emptyList()
+    )
+    
+    private data class FlixServer(
+        @JsonProperty("data_link") val data_link: String? = null,
+        @JsonProperty("server_name") val server_name: String? = null,
+        @JsonProperty("dataLink") val dataLink: String? = null,
+        @JsonProperty("serverName") val serverName: String? = null
+    ) {
+        val link: String get() = data_link ?: dataLink ?: ""
+        val name: String get() = server_name ?: serverName ?: ""
+    }
 
     private data class ResolvedFields(
         val containerName: String,
@@ -378,8 +393,12 @@ class ReanimeProvider : MainAPI() {
 
     private fun extractDataObject(html: String): String? {
         val marker = "data:{"
-        val idx = html.indexOf(marker)
-        if (idx == -1) return null
+        var idx = html.indexOf(marker)
+        if (idx == -1) {
+            idx = html.indexOf("data: {")
+            if (idx == -1) return null
+            return extractObjectFrom(html, idx + "data: {".length - 1)
+        }
         return extractObjectFrom(html, idx + marker.length - 1)
     }
 
@@ -435,6 +454,7 @@ class ReanimeProvider : MainAPI() {
             val decrypted = cipher.doFinal(data)
             String(decrypted, Charsets.UTF_8)
         } catch (e: Exception) {
+            Log.e("ReanimeProvider", "AES Decrypt Failed: ${e.message}")
             null
         }
     }
@@ -463,52 +483,65 @@ class ReanimeProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val parts = data.split("|")
-        if (parts.size < 2) return false
-        val anilistId = parts[0].toIntOrNull() ?: return false
-        val ep = parts[1].toIntOrNull() ?: return false
+        if (parts.size < 2) {
+            Log.e("ReanimeProvider", "Data split failed. Parts size: ${parts.size}")
+            return false
+        }
+        val anilistId = parts[0].toIntOrNull() ?: run { Log.e("ReanimeProvider", "anilistId is null"); return false }
+        val ep = parts[1].toIntOrNull() ?: run { Log.e("ReanimeProvider", "ep is null"); return false }
 
         // 1. Get flixcloud embed URL
         val flixApiUrl = "$mainUrl/api/flix/$anilistId/$ep"
-        val flixResp = app.get(flixApiUrl).parsedSafe<FlixApiResponse>() ?: return false
-        val embedUrl = flixResp.servers.firstOrNull { it.dataLink.contains("flixcloud") }?.dataLink ?: return false
+        val flixResp = app.get(flixApiUrl).parsedSafe<FlixApiResponse>() ?: run {
+            Log.e("ReanimeProvider", "Failed to fetch or parse FlixApiResponse")
+            return false
+        }
+        
+        val embedUrl = flixResp.servers.firstOrNull { it.link.contains("flixcloud", ignoreCase = true) }?.link
+        if (embedUrl.isNullOrEmpty()) {
+            Log.e("ReanimeProvider", "No flixcloud server found. Available servers: ${flixResp.servers.map { it.name }}")
+            return false
+        }
 
         // 2. Fetch embed page and extract inline data object
         val html = app.get(embedUrl).text
-        val dataObj = extractDataObject(html) ?: return false
+        val dataObj = extractDataObject(html) ?: run { Log.e("ReanimeProvider", "extractDataObject returned null"); return false }
 
         // 3. Extract necessary fields
-        val seed = extractStringField(dataObj, "obfuscation_seed") ?: return false
-        val wPayloadB64 = extractStringField(dataObj, "w_payload") ?: return false
-        val obfCryptoData = extractObjectField(dataObj, "obfuscated_crypto_data") ?: return false
+        val seed = extractStringField(dataObj, "obfuscation_seed") ?: run { Log.e("ReanimeProvider", "obfuscation_seed not found"); return false }
+        val obfCryptoData = extractObjectField(dataObj, "obfuscated_crypto_data") ?: run { Log.e("ReanimeProvider", "obfuscated_crypto_data not found"); return false }
 
         val fields = resolveFields(seed)
 
         // Navigate obfuscated_crypto_data
-        val containerText = extractObjectField(obfCryptoData, fields.containerName) ?: return false
-        val arrayText = extractArrayField(containerText, fields.arrayName) ?: return false
-        val firstObj = extractFirstObjectFromArray(arrayText) ?: return false
-        val frag1B64 = extractStringField(firstObj, fields.keyField) ?: return false
-        val ivB64 = extractStringField(firstObj, fields.ivField) ?: return false
-
-        val keyFrag2B64 = extractStringField(dataObj, fields.keyFrag2Field) ?: return false
-        val L = extractStringField(dataObj, fields.tokenField) ?: return false
+        val containerText = extractObjectField(obfCryptoData, fields.containerName) ?: run { Log.e("ReanimeProvider", "containerName ${fields.containerName} not found"); return false }
+        val arrayText = extractArrayField(containerText, fields.arrayName) ?: run { Log.e("ReanimeProvider", "arrayName ${fields.arrayName} not found"); return false }
+        val firstObj = extractFirstObjectFromArray(arrayText) ?: run { Log.e("ReanimeProvider", "firstObj not found in array"); return false }
+        
+        val frag1B64 = extractStringField(firstObj, fields.keyField) ?: run { Log.e("ReanimeProvider", "keyField ${fields.keyField} not found"); return false }
+        val ivB64 = extractStringField(firstObj, fields.ivField) ?: run { Log.e("ReanimeProvider", "ivField ${fields.ivField} not found"); return false }
+        val keyFrag2B64 = extractStringField(dataObj, fields.keyFrag2Field) ?: run { Log.e("ReanimeProvider", "keyFrag2Field ${fields.keyFrag2Field} not found"); return false }
+        val L = extractStringField(dataObj, fields.tokenField) ?: run { Log.e("ReanimeProvider", "tokenField ${fields.tokenField} not found"); return false }
 
         // 4. Fetch /api/m3u8/{L}
-        val tokenResp = app.get("$mainUrl/api/m3u8/$L").parsedSafe<Map<String, String>>() ?: return false
+        val tokenResp = app.get("$mainUrl/api/m3u8/$L").parsedSafe<Map<String, String>>() ?: run {
+            Log.e("ReanimeProvider", "Failed to fetch token m3u8 JSON")
+            return false
+        }
 
         val k = sha256Hex(L + "vid").take(10)
         val i = sha256Hex(L + "key").take(10)
-        val P = tokenResp[k] ?: return false
-        val U = tokenResp[i] ?: return false
+        val P = tokenResp[k] ?: run { Log.e("ReanimeProvider", "Token P missing. Keys: ${tokenResp.keys}"); return false }
+        val U = tokenResp[i] ?: run { Log.e("ReanimeProvider", "Token U missing. Keys: ${tokenResp.keys}"); return false }
 
-        // 5. Base64 decode
-        val frag1 = Base64.decode(frag1B64, Base64.DEFAULT)
-        val keyFrag2 = Base64.decode(keyFrag2B64, Base64.DEFAULT)
-        val tokenU = Base64.decode(U, Base64.DEFAULT)
-        val encryptedData = Base64.decode(P, Base64.DEFAULT)
-        val iv = Base64.decode(ivB64, Base64.DEFAULT)
+        // 5. Base64 decode (Changed to NO_WRAP to prevent crypto corruption)
+        val frag1 = Base64.decode(frag1B64, Base64.NO_WRAP)
+        val keyFrag2 = Base64.decode(keyFrag2B64, Base64.NO_WRAP)
+        val tokenU = Base64.decode(U, Base64.NO_WRAP)
+        val encryptedData = Base64.decode(P, Base64.NO_WRAP)
+        val iv = Base64.decode(ivB64, Base64.NO_WRAP)
 
-        // 6. WASM mixing (ported to Kotlin)
+        // 6. WASM mixing
         val v = seed.take(8).toInt(16)
         val password = wasmMix(frag1, keyFrag2, tokenU, v)
 
@@ -526,9 +559,9 @@ class ReanimeProvider : MainAPI() {
         val aesKey = sha256(xored)
 
         // 10. AES-CBC decrypt
-        val decryptedUrl = aesCbcDecrypt(encryptedData, aesKey, iv) ?: return false
+        val decryptedUrl = aesCbcDecrypt(encryptedData, aesKey, iv) ?: run { Log.e("ReanimeProvider", "Final AES string decryption failed"); return false }
 
-        // 11. Return stream using the DSL implementation
+        // 11. Return stream
         callback(
             newExtractorLink(
                 name,
