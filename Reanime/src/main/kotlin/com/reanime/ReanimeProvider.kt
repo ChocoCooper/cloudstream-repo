@@ -569,16 +569,17 @@ class ReanimeProvider : MainAPI() {
         val decryptedUrl = aesCbcDecrypt(encrypted, aesKey, iv)
         if (decryptedUrl == null) { Log.e("ReanimeProvider", "AES decrypt failed"); return false }
 
-        // 10. Return stream
+        // 10. Return stream using newExtractorLink with lambda initializer
         callback(
-            ExtractorLink(
+            newExtractorLink(
                 source = name,
                 name = "Reanime HD-2",
                 url = decryptedUrl,
-                referer = embedUrl,
-                quality = Qualities.Unknown.value,
-                isM3u8 = true
-            )
+                type = ExtractorLinkType.M3U8
+            ) {
+                this.referer = embedUrl
+                this.quality = Qualities.Unknown.value
+            }
         )
         Log.d("ReanimeProvider", "Successfully provided stream: ${decryptedUrl.take(60)}...")
         return true
