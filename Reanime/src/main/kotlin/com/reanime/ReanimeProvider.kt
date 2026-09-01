@@ -18,6 +18,7 @@ import javax.crypto.spec.SecretKeySpec
 import com.dylibso.chicory.runtime.Instance
 import com.dylibso.chicory.runtime.Module
 import com.dylibso.chicory.runtime.Memory
+import com.dylibso.chicory.wasm.types.Value
 
 class ReanimeProvider : MainAPI() {
     override var mainUrl = "https://reanime.to"
@@ -227,12 +228,10 @@ class ReanimeProvider : MainAPI() {
         val html = app.get(url).text
         val payload = extractKitStartPayload(html) ?: return null
 
-        // Extract anime object (nested inside data[2].data)
         val animeObj = extractObjectField(payload, "anime") ?: return null
         val animeId = extractStringField(animeObj, "anime_id") ?: return null
         val anilistId = extractIntField(animeObj, "anilist_id") ?: return null
 
-        // Fetch episodes from API
         val episodeUrl = "$mainUrl/api/v1/anime/$animeId/episodes"
         val epResp = app.get(episodeUrl).parsedSafe<EpisodeApiResponse>() ?: return null
         val episodes = epResp.episodes ?: epResp.data ?: emptyList()
@@ -258,7 +257,6 @@ class ReanimeProvider : MainAPI() {
             if (ep.isDub) dubEpisodes.add(buildEpisode(dataDub))
         }
 
-        // Extract metadata for display
         val titleObj = extractObjectField(animeObj, "title")
         val title = if (titleObj != null) {
             extractStringField(titleObj, "english")
@@ -266,6 +264,7 @@ class ReanimeProvider : MainAPI() {
                 ?: extractStringField(titleObj, "native")
                 ?: "Unknown"
         } else "Unknown"
+
         val coverObj = extractObjectField(animeObj, "cover_image")
         val poster = coverObj?.let {
             extractStringField(it, "large") ?: extractStringField(it, "extra_large")
@@ -284,7 +283,7 @@ class ReanimeProvider : MainAPI() {
     }
 
     // ------------------------------------------------------------------
-    // LOAD LINKS – actual WASM decryption
+    // LOAD LINKS – actual WASM decryption with Chicory
     // ------------------------------------------------------------------
     private data class FlixApiResponse(
         @JsonProperty("servers") val servers: List<FlixServer> = emptyList()
@@ -346,13 +345,13 @@ class ReanimeProvider : MainAPI() {
         memory.write(base + k, keyFrag2)
         memory.write(base + 2 * k, tokenU)
 
-        instance.export("_s").apply(v.toLong())
+        instance.export("_s").apply(Value.i32(v))
         instance.export("_r").apply(
-            base.toLong(),
-            (base + k).toLong(),
-            (base + 2 * k).toLong(),
-            (base + 3 * k).toLong(),
-            k.toLong()
+            Value.i32(base),
+            Value.i32(base + k),
+            Value.i32(base + 2 * k),
+            Value.i32(base + 3 * k),
+            Value.i32(k)
         )
 
         val output = ByteArray(k)
@@ -381,7 +380,6 @@ class ReanimeProvider : MainAPI() {
         }
     }
 
-    // Helper to extract the `data` object from the embed page
     private fun extractDataObjectFromEmbedHtml(html: String): String? {
         val marker = "data:{"
         var idx = html.indexOf(marker)
