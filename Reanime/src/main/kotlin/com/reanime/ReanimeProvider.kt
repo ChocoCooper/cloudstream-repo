@@ -18,8 +18,8 @@ import javax.crypto.spec.SecretKeySpec
 import com.dylibso.chicory.runtime.Instance
 import com.dylibso.chicory.runtime.Module
 import com.dylibso.chicory.runtime.Memory
+import com.dylibso.chicory.wasm.types.Value
 
-@Suppress("DEPRECATION")
 class ReanimeProvider : MainAPI() {
     override var mainUrl = "https://reanime.to"
     override var name = "Reanime"
@@ -283,7 +283,7 @@ class ReanimeProvider : MainAPI() {
     }
 
     // ------------------------------------------------------------------
-    // LOAD LINKS – actual WASM decryption with Chicory
+    // LOAD LINKS – actual WASM decryption with Chicory (fixed)
     // ------------------------------------------------------------------
     private data class FlixApiResponse(
         @JsonProperty("servers") val servers: List<FlixServer> = emptyList()
@@ -330,9 +330,6 @@ class ReanimeProvider : MainAPI() {
         )
     }
 
-    // --------------------------------------------------------------
-    // WebAssembly execution via Chicory (fixed Long offsets)
-    // --------------------------------------------------------------
     private fun wasmMix(wasmB64: String, frag1: ByteArray, keyFrag2: ByteArray, tokenU: ByteArray, v: Int): ByteArray {
         val wasmBin = Base64.decode(wasmB64, Base64.DEFAULT)
         val module = Module.builder(wasmBin).build()
@@ -340,23 +337,23 @@ class ReanimeProvider : MainAPI() {
         val memory: Memory = instance.memory()
 
         val k = frag1.size
-        val base = 1000L  // use Long constant
-        memory.write(base, frag1)
+        val base = 1000
+        memory.write(base, frag1)                    // Int address
         memory.write(base + k, keyFrag2)
-        memory.write(base + 2L * k, tokenU)
+        memory.write(base + 2 * k, tokenU)
 
-        instance.export("_s").apply(v.toLong())
+        instance.export("_s").apply(Value.i32(v))
         instance.export("_r").apply(
-            base,
-            base + k,
-            base + 2L * k,
-            base + 3L * k,
-            k.toLong()
+            Value.i32(base),
+            Value.i32(base + k),
+            Value.i32(base + 2 * k),
+            Value.i32(base + 3 * k),
+            Value.i32(k)
         )
 
         val output = ByteArray(k)
         for (i in 0 until k) {
-            output[i] = memory.read(base + 3L * k + i)
+            output[i] = memory.read(base + 3 * k + i)   // Int address
         }
         return output
     }
@@ -439,6 +436,7 @@ class ReanimeProvider : MainAPI() {
         val ep = parts[1].toIntOrNull() ?: return false
         val lang = parts.getOrNull(2)?.lowercase() ?: "sub"
 
+        // 1. Get flixcloud embed URL
         val flixApiUrl = "$mainUrl/api/flix/$anilistId/$ep"
         val flixResp = app.get(flixApiUrl).parsedSafe<FlixApiResponse>() ?: return false
         val server = flixResp.servers.firstOrNull {
@@ -448,6 +446,7 @@ class ReanimeProvider : MainAPI() {
             ?: return false
         val embedUrl = server.dataLink ?: return false
 
+        // 2. Fetch embed page and extract data object
         val html = app.get(embedUrl).text
         val dataObjStr = extractDataObjectFromEmbedHtml(html) ?: return false
         val seed = extractStringField(dataObjStr, "obfuscation_seed") ?: return false
@@ -463,6 +462,7 @@ class ReanimeProvider : MainAPI() {
         val L = extractStringField(dataObjStr, fields.tokenField) ?: return false
         val wasmB64 = extractStringField(dataObjStr, "w_payload") ?: return false
 
+        // 3. Fetch token
         val tokenUrl = "https://flixcloud.cc/api/m3u8/$L"
         val tokenResp = app.get(tokenUrl).parsedSafe<Map<String, String>>() ?: return false
         val k = sha256Hex(L + "vid").take(10)
@@ -470,6 +470,7 @@ class ReanimeProvider : MainAPI() {
         val P = tokenResp[k] ?: return false
         val U = tokenResp[i] ?: return false
 
+        // 4. Decode
         val frag1 = Base64.decode(frag1B64, Base64.NO_WRAP)
         val keyFrag2 = Base64.decode(keyFrag2B64, Base64.NO_WRAP)
         val tokenU = Base64.decode(U, Base64.NO_WRAP)
@@ -477,25 +478,34 @@ class ReanimeProvider : MainAPI() {
         val iv = Base64.decode(ivB64, Base64.NO_WRAP)
         val v = seed.take(8).toInt(16)
 
+        // 5. Actual WASM mix
         val password = wasmMix(wasmB64, frag1, keyFrag2, tokenU, v)
+
+        // 6. PBKDF2
         val derived = pbkdf2Sha256(password, seed.toByteArray(Charsets.UTF_8), 1000, 32)
 
+        // 7. XOR with seed
         val seedBytes = seed.toByteArray(Charsets.UTF_8)
         val xored = ByteArray(32)
         for (j in 0 until 32) {
             xored[j] = (derived[j].toInt() xor seedBytes[j % seedBytes.size].toInt()).toByte()
         }
+
+        // 8. SHA-256
         val aesKey = sha256(xored)
+
+        // 9. AES-CBC decrypt
         val decryptedUrl = aesCbcDecrypt(encrypted, aesKey, iv) ?: return false
 
+        // 10. Return stream using newExtractorLink (positional args)
         callback(
-            ExtractorLink(
-                source = name,
-                name = "Reanime HD-2",
-                url = decryptedUrl,
-                referer = embedUrl,
-                quality = Qualities.Unknown.value,
-                isM3u8 = true
+            newExtractorLink(
+                name,
+                "Reanime HD-2",
+                decryptedUrl,
+                ExtractorLinkType.M3U8,
+                embedUrl,
+                Qualities.Unknown.value
             )
         )
         return true
