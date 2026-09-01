@@ -11,6 +11,6 @@ cloudstream {
 }
 
 dependencies {
-    // WebAssembly runtime – pure JVM, no native libs
-    implementation("com.dylibso.chicory:runtime:0.0.14")
+    // Pure JVM WebAssembly runtime – version known to exist on Maven Central
+    implementation("com.dylibso.chicory:runtime:0.0.10")
 }
