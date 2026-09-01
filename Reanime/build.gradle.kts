@@ -2,26 +2,15 @@
 version = 1
 
 cloudstream {
-    // All of these properties are optional, you can safely remove them
-
     language = "en"
     authors = listOf("ChocoCooper")
-
-    /**
-     * Status int as the following:
-     * 0: Down
-     * 1: Ok
-     * 2: Slow
-     * 3: Beta only
-     * */
-    status = 1 // will be 3 if unspecified
-
-    // List of video source types. Users are able to filter for extensions in a given category.
-    // You can find a list of available types here:
-    // https://recloudstream.github.io/cloudstream/html/app/com.lagradost.cloudstream3/-tv-type/index.html
-    tvTypes = listOf(
-        "Anime",
-    )
+    status = 1
+    tvTypes = listOf("Anime")
     iconUrl = "https://reanime.to/favicon.ico"
     isCrossPlatform = true
+}
+
+dependencies {
+    // WebAssembly runtime – pure JVM, no native libs
+    implementation("com.dylibso.chicory:runtime:0.0.14")
 }
