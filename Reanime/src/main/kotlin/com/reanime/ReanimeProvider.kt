@@ -5,6 +5,7 @@ import android.util.Log
 import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import org.jsoup.parser.Parser
 import java.net.URLEncoder
 import java.security.MessageDigest
@@ -14,11 +15,10 @@ import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
 
-// Chicory WebAssembly runtime imports
+// Chicory WebAssembly runtime
 import com.dylibso.chicory.runtime.Instance
 import com.dylibso.chicory.runtime.Module
 import com.dylibso.chicory.runtime.Memory
-import com.dylibso.chicory.wasm.types.Value
 
 class ReanimeProvider : MainAPI() {
     override var mainUrl = "https://reanime.to"
@@ -331,7 +331,7 @@ class ReanimeProvider : MainAPI() {
     }
 
     // --------------------------------------------------------------
-    // WebAssembly execution via Chicory
+    // WebAssembly execution via Chicory (fixed)
     // --------------------------------------------------------------
     private fun wasmMix(wasmB64: String, frag1: ByteArray, keyFrag2: ByteArray, tokenU: ByteArray, v: Int): ByteArray {
         val wasmBin = Base64.decode(wasmB64, Base64.DEFAULT)
@@ -345,17 +345,21 @@ class ReanimeProvider : MainAPI() {
         memory.write(base + k, keyFrag2)
         memory.write(base + 2 * k, tokenU)
 
-        instance.export("_s").apply(Value.i32(v))
+        // Use Long arguments for Chicory apply
+        instance.export("_s").apply(v.toLong())
         instance.export("_r").apply(
-            Value.i32(base),
-            Value.i32(base + k),
-            Value.i32(base + 2 * k),
-            Value.i32(base + 3 * k),
-            Value.i32(k)
+            base.toLong(),
+            (base + k).toLong(),
+            (base + 2 * k).toLong(),
+            (base + 3 * k).toLong(),
+            k.toLong()
         )
 
+        // Read output byte by byte (Chicory 0.0.10 Memory.read only returns Byte)
         val output = ByteArray(k)
-        memory.read(base + 3 * k, output, 0, k)
+        for (i in 0 until k) {
+            output[i] = memory.read(base + 3 * k + i)
+        }
         return output
     }
 
@@ -498,15 +502,15 @@ class ReanimeProvider : MainAPI() {
         // 9. AES-CBC decrypt
         val decryptedUrl = aesCbcDecrypt(encrypted, aesKey, iv) ?: return false
 
-        // 10. Return stream
+        // 10. Return stream using newExtractorLink (no deprecation)
         callback(
-            ExtractorLink(
+            newExtractorLink(
                 source = name,
                 name = "Reanime HD-2",
                 url = decryptedUrl,
+                type = ExtractorLinkType.M3U8,
                 referer = embedUrl,
-                quality = Qualities.Unknown.value,
-                isM3u8 = true
+                quality = Qualities.Unknown.value
             )
         )
         return true
