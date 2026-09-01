@@ -14,6 +14,11 @@ import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
 
+// Chicory WebAssembly runtime imports
+import com.dylibso.chicory.runtime.Instance
+import com.dylibso.chicory.runtime.Module
+import com.dylibso.chicory.runtime.Memory
+
 class ReanimeProvider : MainAPI() {
     override var mainUrl = "https://reanime.to"
     override var name = "Reanime"
@@ -61,9 +66,7 @@ class ReanimeProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         val encoded = URLEncoder.encode(query, "UTF-8")
         val url = "$mainUrl/api/v1/search?q=$encoded&limit=36&offset=0"
-
         val res = app.get(url).parsedSafe<SearchApiResponse>() ?: return emptyList()
-
         return res.results.map { item ->
             val title = bestTitle(item.title)
             val poster = item.cover_image?.large ?: item.cover_image?.extra_large ?: item.cover_image?.medium
@@ -74,15 +77,14 @@ class ReanimeProvider : MainAPI() {
     }
 
     // ------------------------------------------------------------------
-    // LOAD DETAILS
+    // DETAIL PAGE & EPISODE API
     // ------------------------------------------------------------------
     private fun extractKitStartPayload(rawHtml: String): String? {
         val unescaped = Parser.unescapeEntities(rawHtml, false)
         val marker = "kit.start(app, element, "
-        val markerIdx = unescaped.indexOf(marker)
-        if (markerIdx == -1) return null
-
-        var start = markerIdx + marker.length
+        val idx = unescaped.indexOf(marker)
+        if (idx == -1) return null
+        var start = idx + marker.length
         while (start < unescaped.length && unescaped[start] != '{') start++
         if (start >= unescaped.length) return null
 
@@ -101,17 +103,11 @@ class ReanimeProvider : MainAPI() {
                 }
             } else {
                 when (c) {
-                    '"', '\'' -> {
-                        inString = true
-                        stringChar = c
-                    }
+                    '"', '\'' -> { inString = true; stringChar = c }
                     '{' -> depth++
                     '}' -> {
                         depth--
-                        if (depth == 0) {
-                            i++
-                            break
-                        }
+                        if (depth == 0) { i++; break }
                     }
                 }
             }
@@ -140,17 +136,11 @@ class ReanimeProvider : MainAPI() {
                 }
             } else {
                 when (c) {
-                    '"', '\'' -> {
-                        inString = true
-                        stringChar = c
-                    }
+                    '"', '\'' -> { inString = true; stringChar = c }
                     '{' -> depth++
                     '}' -> {
                         depth--
-                        if (depth == 0) {
-                            i++
-                            break
-                        }
+                        if (depth == 0) { i++; break }
                     }
                 }
             }
@@ -179,63 +169,17 @@ class ReanimeProvider : MainAPI() {
                 }
             } else {
                 when (c) {
-                    '"', '\'' -> {
-                        inString = true
-                        stringChar = c
-                    }
+                    '"', '\'' -> { inString = true; stringChar = c }
                     '[' -> depth++
                     ']' -> {
                         depth--
-                        if (depth == 0) {
-                            i++
-                            break
-                        }
+                        if (depth == 0) { i++; break }
                     }
                 }
             }
             i++
         }
         return text.substring(start, i)
-    }
-
-    private fun splitTopLevelObjects(arrayInner: String): List<String> {
-        val results = mutableListOf<String>()
-        var i = 0
-        var depth = 0
-        var inString = false
-        var stringChar = ' '
-        var escape = false
-        var objStart = -1
-        while (i < arrayInner.length) {
-            val c = arrayInner[i]
-            if (inString) {
-                when {
-                    escape -> escape = false
-                    c == '\\' -> escape = true
-                    c == stringChar -> inString = false
-                }
-            } else {
-                when (c) {
-                    '"', '\'' -> {
-                        inString = true
-                        stringChar = c
-                    }
-                    '{' -> {
-                        if (depth == 0) objStart = i
-                        depth++
-                    }
-                    '}' -> {
-                        depth--
-                        if (depth == 0 && objStart != -1) {
-                            results.add(arrayInner.substring(objStart, i + 1))
-                            objStart = -1
-                        }
-                    }
-                }
-            }
-            i++
-        }
-        return results
     }
 
     private fun unescapeJsonString(s: String): String =
@@ -255,134 +199,83 @@ class ReanimeProvider : MainAPI() {
     private fun extractStringArray(arrayLiteral: String): List<String> =
         Regex("\"((?:[^\"\\\\]|\\\\.)*)\"").findAll(arrayLiteral).map { unescapeJsonString(it.groupValues[1]) }.toList()
 
-    // Try to extract anilist_id from payload
-    private fun extractAnilistIdFromPayload(payload: String, animeObj: String?): Int? {
-        animeObj?.let {
-            extractIntField(it, "anilist_id")?.let { id -> return id }
-        }
-        extractIntField(payload, "anilist_id")?.let { id -> return id }
-        Regex("\\banilist_id\\s*:\\s*[\"']?(\\d+)[\"']?").find(payload)?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
-        return null
-    }
+    // --------------------------------------------------------------
+    // EPISODE API RESPONSE
+    // --------------------------------------------------------------
+    private data class EpisodeApiResponse(
+        @JsonProperty("episodes") val episodes: List<EpisodeItem>? = null,
+        @JsonProperty("data") val data: List<EpisodeItem>? = null,
+    )
 
-    // Search API fallback
-    private suspend fun getAnilistIdFromSearch(slug: String): Int? {
-        // Try full slug first
-        try {
-            val encoded = URLEncoder.encode(slug, "UTF-8")
-            val url = "$mainUrl/api/v1/search?q=$encoded&limit=1"
-            val res = app.get(url).parsedSafe<SearchApiResponse>() ?: return null
-            res.results.firstOrNull()?.anilist_id?.let { return it }
-        } catch (e: Exception) {
-            Log.e("ReanimeProvider", "Search API fallback failed: ${e.message}")
-        }
-        // Try stripping the last dash segment (usually the hash)
-        val stripped = slug.substringBeforeLast("-")
-        if (stripped.isNotEmpty() && stripped != slug) {
-            return try {
-                val encoded = URLEncoder.encode(stripped, "UTF-8")
-                val url = "$mainUrl/api/v1/search?q=$encoded&limit=1"
-                val res = app.get(url).parsedSafe<SearchApiResponse>() ?: return null
-                res.results.firstOrNull()?.anilist_id
-            } catch (e: Exception) {
-                Log.e("ReanimeProvider", "Search API fallback with stripped slug failed: ${e.message}")
-                null
-            }
-        }
-        return null
+    private data class EpisodeItem(
+        @JsonProperty("episode_number") val episode_number: Int? = null,
+        @JsonProperty("number") val number: Int? = null,
+        @JsonProperty("title") val title: String? = null,
+        @JsonProperty("thumbnail") val thumbnail: String? = null,
+        @JsonProperty("description") val description: String? = null,
+        @JsonProperty("subbed") val subbed: Boolean? = null,
+        @JsonProperty("dubbed") val dubbed: Boolean? = null,
+        @JsonProperty("sub") val sub: Boolean? = null,
+        @JsonProperty("dub") val dub: Boolean? = null,
+    ) {
+        val epNum: Int get() = episode_number ?: number ?: 0
+        val isSub: Boolean get() = subbed ?: sub ?: false
+        val isDub: Boolean get() = dubbed ?: dub ?: false
     }
 
     override suspend fun load(url: String): LoadResponse? {
         val html = app.get(url).text
         val payload = extractKitStartPayload(html) ?: return null
 
+        // Extract anime object (nested inside data[2].data)
         val animeObj = extractObjectField(payload, "anime") ?: return null
+        val animeId = extractStringField(animeObj, "anime_id") ?: return null
+        val anilistId = extractIntField(animeObj, "anilist_id") ?: return null
 
-        val titleObj = extractObjectField(animeObj, "title")
-        val title = if (titleObj != null) {
-            bestTitle(
-                ApiTitle(
-                    english = extractStringField(titleObj, "english"),
-                    romaji = extractStringField(titleObj, "romaji"),
-                    native = extractStringField(titleObj, "native"),
-                )
-            )
-        } else "Unknown"
-
-        // Extract anime_id (slug) from payload for search fallback
-        val animeIdFromPayload = extractStringField(animeObj, "anime_id")
-
-        var anilistId = extractAnilistIdFromPayload(payload, animeObj)
-
-        if (anilistId == null) {
-            // Use anime_id from payload if available, else URL slug
-            val slug = animeIdFromPayload ?: url.substringAfterLast("/")
-            Log.w("ReanimeProvider", "anilist_id not found in payload. Trying search API with slug: $slug")
-            anilistId = getAnilistIdFromSearch(slug)
-        }
-
-        if (anilistId == null) {
-            Log.e("ReanimeProvider", "Could not determine anilist_id for $url")
-            return null
-        }
-
-        Log.d("ReanimeProvider", "anilist_id = $anilistId for $url")
-
-        val description = extractStringField(animeObj, "description")
-        val bannerImage = extractStringField(animeObj, "banner_image")
-        val coverObj = extractObjectField(animeObj, "cover_image")
-        val poster = coverObj?.let { extractStringField(it, "large") ?: extractStringField(it, "extra_large") }
-        val genresArr = extractArrayField(animeObj, "genres")
-        val genres = genresArr?.let { extractStringArray(it) } ?: emptyList()
-
-        var episodeObjs: List<String> = emptyList()
-
-        extractObjectField(animeObj, "episodes")?.let { episodesWrapper ->
-            extractArrayField(episodesWrapper, "data")?.let { arr ->
-                episodeObjs = splitTopLevelObjects(arr.removeSurrounding("[", "]"))
-            }
-        }
-        if (episodeObjs.isEmpty()) {
-            extractObjectField(payload, "episodes")?.let { episodesWrapper ->
-                extractArrayField(episodesWrapper, "data")?.let { arr ->
-                    episodeObjs = splitTopLevelObjects(arr.removeSurrounding("[", "]"))
-                }
-            }
-        }
-        if (episodeObjs.isEmpty()) {
-            extractArrayField(payload, "episodes")?.let { arr ->
-                episodeObjs = splitTopLevelObjects(arr.removeSurrounding("[", "]"))
-            }
-        }
+        // Fetch episodes from API
+        val episodeUrl = "$mainUrl/api/v1/anime/$animeId/episodes"
+        val epResp = app.get(episodeUrl).parsedSafe<EpisodeApiResponse>() ?: return null
+        val episodes = epResp.episodes ?: epResp.data ?: emptyList()
 
         val subEpisodes = mutableListOf<Episode>()
         val dubEpisodes = mutableListOf<Episode>()
 
-        for (epObj in episodeObjs) {
-            val epNumber = extractIntField(epObj, "episode_number") ?: continue
-            val epTitle = extractStringField(epObj, "title") ?: "Episode $epNumber"
-            val epThumb = extractStringField(epObj, "thumbnail")
-            val epDesc = extractStringField(epObj, "description")
-            val isSubbed = extractBoolField(epObj, "subbed")
-            val isDubbed = extractBoolField(epObj, "dubbed")
+        for (ep in episodes) {
+            val epNum = ep.epNum
+            if (epNum <= 0) continue
+            val epTitle = ep.title ?: "Episode $epNum"
+            val dataSub = "$anilistId|$epNum|sub"
+            val dataDub = "$anilistId|$epNum|dub"
 
-            val dataSub = "$anilistId|$epNumber|sub"
-            val dataDub = "$anilistId|$epNumber|dub"
-
-            fun buildEpisode(dataStr: String) = newEpisode(dataStr) {
+            fun buildEpisode(data: String) = newEpisode(data) {
                 this.name = epTitle
-                this.episode = epNumber
-                this.posterUrl = epThumb
-                this.description = epDesc
+                this.episode = epNum
+                this.posterUrl = ep.thumbnail
+                this.description = ep.description
             }
 
-            if (isSubbed) subEpisodes.add(buildEpisode(dataSub))
-            if (isDubbed) dubEpisodes.add(buildEpisode(dataDub))
+            if (ep.isSub) subEpisodes.add(buildEpisode(dataSub))
+            if (ep.isDub) dubEpisodes.add(buildEpisode(dataDub))
         }
+
+        // Extract metadata for display
+        val titleObj = extractObjectField(animeObj, "title")
+        val title = if (titleObj != null) {
+            extractStringField(titleObj, "english")
+                ?: extractStringField(titleObj, "romaji")
+                ?: extractStringField(titleObj, "native")
+                ?: "Unknown"
+        } else "Unknown"
+        val coverObj = extractObjectField(animeObj, "cover_image")
+        val poster = coverObj?.let {
+            extractStringField(it, "large") ?: extractStringField(it, "extra_large")
+        }
+        val description = extractStringField(animeObj, "description")
+        val genresArr = extractArrayField(animeObj, "genres")
+        val genres = genresArr?.let { extractStringArray(it) } ?: emptyList()
 
         return newAnimeLoadResponse(title, url, TvType.Anime) {
             this.posterUrl = poster
-            this.backgroundPosterUrl = bannerImage ?: poster
             this.plot = description
             this.tags = genres
             if (subEpisodes.isNotEmpty()) addEpisodes(DubStatus.Subbed, subEpisodes)
@@ -391,24 +284,16 @@ class ReanimeProvider : MainAPI() {
     }
 
     // ------------------------------------------------------------------
-    // LOAD LINKS – full decryption implemented
+    // LOAD LINKS – actual WASM decryption
     // ------------------------------------------------------------------
     private data class FlixApiResponse(
         @JsonProperty("servers") val servers: List<FlixServer> = emptyList()
     )
 
     private data class FlixServer(
-        @JsonProperty("data_link") val data_link: String? = null,
-        @JsonProperty("server_name") val server_name: String? = null,
         @JsonProperty("dataLink") val dataLink: String? = null,
-        @JsonProperty("serverName") val serverName: String? = null,
         @JsonProperty("dataType") val dataType: String? = null,
-        @JsonProperty("data_type") val data_type: String? = null
-    ) {
-        val link: String get() = data_link ?: dataLink ?: ""
-        val name: String get() = server_name ?: serverName ?: ""
-        val type: String? get() = dataType ?: data_type
-    }
+    )
 
     private data class ResolvedFields(
         val containerName: String,
@@ -423,13 +308,11 @@ class ReanimeProvider : MainAPI() {
     private fun sha256Hex(input: String): String {
         val bytes = input.toByteArray(Charsets.UTF_8)
         val md = MessageDigest.getInstance("SHA-256")
-        val digest = md.digest(bytes)
-        return digest.joinToString("") { "%02x".format(it) }
+        return md.digest(bytes).joinToString("") { "%02x".format(it) }
     }
 
     private fun sha256(input: ByteArray): ByteArray {
-        val md = MessageDigest.getInstance("SHA-256")
-        return md.digest(input)
+        return MessageDigest.getInstance("SHA-256").digest(input)
     }
 
     private fun resolveFields(seed: String): ResolvedFields {
@@ -448,7 +331,58 @@ class ReanimeProvider : MainAPI() {
         )
     }
 
-    private fun extractDataObject(html: String): String? {
+    // --------------------------------------------------------------
+    // WebAssembly execution via Chicory
+    // --------------------------------------------------------------
+    private fun wasmMix(wasmB64: String, frag1: ByteArray, keyFrag2: ByteArray, tokenU: ByteArray, v: Int): ByteArray {
+        val wasmBin = Base64.decode(wasmB64, Base64.DEFAULT)
+        val module = Module.builder(wasmBin).build()
+        val instance = module.instantiate()
+        val memory: Memory = instance.memory()
+
+        val k = frag1.size
+        val base = 1000
+        memory.write(base, frag1)
+        memory.write(base + k, keyFrag2)
+        memory.write(base + 2 * k, tokenU)
+
+        instance.export("_s").apply(v.toLong())
+        instance.export("_r").apply(
+            base.toLong(),
+            (base + k).toLong(),
+            (base + 2 * k).toLong(),
+            (base + 3 * k).toLong(),
+            k.toLong()
+        )
+
+        val output = ByteArray(k)
+        memory.read(base + 3 * k, output, 0, k)
+        return output
+    }
+
+    private fun pbkdf2Sha256(password: ByteArray, salt: ByteArray, iterations: Int, keyLength: Int): ByteArray {
+        val spec = PBEKeySpec(
+            password.toString(Charsets.ISO_8859_1).toCharArray(),
+            salt,
+            iterations,
+            keyLength * 8
+        )
+        return SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded
+    }
+
+    private fun aesCbcDecrypt(data: ByteArray, key: ByteArray, iv: ByteArray): String? {
+        return try {
+            val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
+            String(cipher.doFinal(data), Charsets.UTF_8)
+        } catch (e: Exception) {
+            Log.e("ReanimeProvider", "AES decrypt failed", e)
+            null
+        }
+    }
+
+    // Helper to extract the `data` object from the embed page
+    private fun extractDataObjectFromEmbedHtml(html: String): String? {
         val marker = "data:{"
         var idx = html.indexOf(marker)
         if (idx == -1) {
@@ -493,46 +427,6 @@ class ReanimeProvider : MainAPI() {
         return extractObjectFrom(arrayText, start)
     }
 
-    private fun pbkdf2Sha256(password: ByteArray, salt: ByteArray, iterations: Int, keyLength: Int): ByteArray {
-        val spec = PBEKeySpec(
-            password.toString(Charsets.ISO_8859_1).toCharArray(),
-            salt,
-            iterations,
-            keyLength * 8
-        )
-        val factory = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256")
-        return factory.generateSecret(spec).encoded
-    }
-
-    private fun aesCbcDecrypt(data: ByteArray, key: ByteArray, iv: ByteArray): String? {
-        return try {
-            val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
-            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
-            val decrypted = cipher.doFinal(data)
-            String(decrypted, Charsets.UTF_8)
-        } catch (e: Exception) {
-            Log.e("ReanimeProvider", "AES Decrypt Failed: ${e.message}")
-            null
-        }
-    }
-
-    private fun wasmMix(frag1: ByteArray, keyFrag2: ByteArray, tokenU: ByteArray, v: Int): ByteArray {
-        val k = frag1.size
-        val out = ByteArray(k)
-        var global = v
-        for (i in 0 until k) {
-            var b = (frag1[i].toInt() and 0xff) xor (keyFrag2[i].toInt() and 0xff) xor (tokenU[i].toInt() and 0xff)
-            b = (b ushr 2) or ((b shl 6) and 0xff)
-            b = (b + 110) and 0xff
-            b = (b - 75) and 0xff
-            b = (b + 161) and 0xff
-            val t = (i * 48 + global) and 0xff
-            b = b xor t
-            out[i] = b.toByte()
-        }
-        return out
-    }
-
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -540,99 +434,82 @@ class ReanimeProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val parts = data.split("|")
-        if (parts.size < 2) {
-            Log.e("ReanimeProvider", "Data split failed. Parts size: ${parts.size}")
-            return false
-        }
-        val anilistId = parts[0].toIntOrNull() ?: run { Log.e("ReanimeProvider", "anilistId is null"); return false }
-        val ep = parts[1].toIntOrNull() ?: run { Log.e("ReanimeProvider", "ep is null"); return false }
+        if (parts.size < 2) return false
+        val anilistId = parts[0].toIntOrNull() ?: return false
+        val ep = parts[1].toIntOrNull() ?: return false
         val lang = parts.getOrNull(2)?.lowercase() ?: "sub"
 
         // 1. Get flixcloud embed URL
         val flixApiUrl = "$mainUrl/api/flix/$anilistId/$ep"
-        val flixResp = app.get(flixApiUrl).parsedSafe<FlixApiResponse>() ?: run {
-            Log.e("ReanimeProvider", "Failed to fetch FlixApiResponse")
-            return false
-        }
-
+        val flixResp = app.get(flixApiUrl).parsedSafe<FlixApiResponse>() ?: return false
         val server = flixResp.servers.firstOrNull {
-            it.link.contains("flixcloud", ignoreCase = true) &&
-            (it.type?.lowercase() == lang || it.type == null)
-        } ?: flixResp.servers.firstOrNull { it.link.contains("flixcloud", ignoreCase = true) }
+            it.dataLink?.contains("flixcloud") == true &&
+            (it.dataType?.lowercase() == lang || it.dataType == null)
+        } ?: flixResp.servers.firstOrNull { it.dataLink?.contains("flixcloud") == true }
+            ?: return false
+        val embedUrl = server.dataLink ?: return false
 
-        val embedUrl = server?.link ?: run {
-            Log.e("ReanimeProvider", "No flixcloud server found")
-            return false
-        }
-
-        // 2. Fetch embed page and extract inline data object
+        // 2. Fetch embed page and extract data object
         val html = app.get(embedUrl).text
-        val dataObj = extractDataObject(html) ?: run { Log.e("ReanimeProvider", "extractDataObject returned null"); return false }
-
-        // 3. Extract necessary fields
-        val seed = extractStringField(dataObj, "obfuscation_seed") ?: run { Log.e("ReanimeProvider", "obfuscation_seed not found"); return false }
-        val obfCryptoData = extractObjectField(dataObj, "obfuscated_crypto_data") ?: run { Log.e("ReanimeProvider", "obfuscated_crypto_data not found"); return false }
-
+        val dataObjStr = extractDataObjectFromEmbedHtml(html) ?: return false
+        val seed = extractStringField(dataObjStr, "obfuscation_seed") ?: return false
+        val obfCryptoData = extractObjectField(dataObjStr, "obfuscated_crypto_data") ?: return false
         val fields = resolveFields(seed)
 
-        val containerText = extractObjectField(obfCryptoData, fields.containerName) ?: run { Log.e("ReanimeProvider", "containerName ${fields.containerName} not found"); return false }
-        val arrayText = extractArrayField(containerText, fields.arrayName) ?: run { Log.e("ReanimeProvider", "arrayName ${fields.arrayName} not found"); return false }
-        val firstObj = extractFirstObjectFromArray(arrayText) ?: run { Log.e("ReanimeProvider", "firstObj not found in array"); return false }
+        val containerText = extractObjectField(obfCryptoData, fields.containerName) ?: return false
+        val arrayText = extractArrayField(containerText, fields.arrayName) ?: return false
+        val firstObj = extractFirstObjectFromArray(arrayText) ?: return false
+        val frag1B64 = extractStringField(firstObj, fields.keyField) ?: return false
+        val ivB64 = extractStringField(firstObj, fields.ivField) ?: return false
+        val keyFrag2B64 = extractStringField(dataObjStr, fields.keyFrag2Field) ?: return false
+        val L = extractStringField(dataObjStr, fields.tokenField) ?: return false
+        val wasmB64 = extractStringField(dataObjStr, "w_payload") ?: return false
 
-        val frag1B64 = extractStringField(firstObj, fields.keyField) ?: run { Log.e("ReanimeProvider", "keyField ${fields.keyField} not found"); return false }
-        val ivB64 = extractStringField(firstObj, fields.ivField) ?: run { Log.e("ReanimeProvider", "ivField ${fields.ivField} not found"); return false }
-        val keyFrag2B64 = extractStringField(dataObj, fields.keyFrag2Field) ?: run { Log.e("ReanimeProvider", "keyFrag2Field ${fields.keyFrag2Field} not found"); return false }
-        val L = extractStringField(dataObj, fields.tokenField) ?: run { Log.e("ReanimeProvider", "tokenField ${fields.tokenField} not found"); return false }
-
-        // 4. Fetch /api/m3u8/{L}
-        val tokenResp = app.get("$mainUrl/api/m3u8/$L").parsedSafe<Map<String, String>>() ?: run {
-            Log.e("ReanimeProvider", "Failed to fetch token m3u8 JSON")
-            return false
-        }
-
+        // 3. Fetch token
+        val tokenUrl = "https://flixcloud.cc/api/m3u8/$L"
+        val tokenResp = app.get(tokenUrl).parsedSafe<Map<String, String>>() ?: return false
         val k = sha256Hex(L + "vid").take(10)
         val i = sha256Hex(L + "key").take(10)
-        val P = tokenResp[k] ?: run { Log.e("ReanimeProvider", "Token P missing. Keys: ${tokenResp.keys}"); return false }
-        val U = tokenResp[i] ?: run { Log.e("ReanimeProvider", "Token U missing. Keys: ${tokenResp.keys}"); return false }
+        val P = tokenResp[k] ?: return false
+        val U = tokenResp[i] ?: return false
 
-        // 5. Base64 decode
+        // 4. Decode
         val frag1 = Base64.decode(frag1B64, Base64.NO_WRAP)
         val keyFrag2 = Base64.decode(keyFrag2B64, Base64.NO_WRAP)
         val tokenU = Base64.decode(U, Base64.NO_WRAP)
-        val encryptedData = Base64.decode(P, Base64.NO_WRAP)
+        val encrypted = Base64.decode(P, Base64.NO_WRAP)
         val iv = Base64.decode(ivB64, Base64.NO_WRAP)
-
-        // 6. WASM mixing
         val v = seed.take(8).toInt(16)
-        val password = wasmMix(frag1, keyFrag2, tokenU, v)
 
-        // 7. PBKDF2
+        // 5. Actual WASM mix
+        val password = wasmMix(wasmB64, frag1, keyFrag2, tokenU, v)
+
+        // 6. PBKDF2
         val derived = pbkdf2Sha256(password, seed.toByteArray(Charsets.UTF_8), 1000, 32)
 
-        // 8. XOR with seed
+        // 7. XOR with seed
         val seedBytes = seed.toByteArray(Charsets.UTF_8)
         val xored = ByteArray(32)
         for (j in 0 until 32) {
             xored[j] = (derived[j].toInt() xor seedBytes[j % seedBytes.size].toInt()).toByte()
         }
 
-        // 9. SHA-256
+        // 8. SHA-256
         val aesKey = sha256(xored)
 
-        // 10. AES-CBC decrypt
-        val decryptedUrl = aesCbcDecrypt(encryptedData, aesKey, iv) ?: run { Log.e("ReanimeProvider", "Final AES string decryption failed"); return false }
+        // 9. AES-CBC decrypt
+        val decryptedUrl = aesCbcDecrypt(encrypted, aesKey, iv) ?: return false
 
-        // 11. Return stream
+        // 10. Return stream
         callback(
-            newExtractorLink(
-                name,
-                "Reanime HD-2",
-                decryptedUrl,
-                ExtractorLinkType.M3U8
-            ) {
-                this.referer = embedUrl
-                this.quality = Qualities.Unknown.value
-            }
+            ExtractorLink(
+                source = name,
+                name = "Reanime HD-2",
+                url = decryptedUrl,
+                referer = embedUrl,
+                quality = Qualities.Unknown.value,
+                isM3u8 = true
+            )
         )
         return true
     }
