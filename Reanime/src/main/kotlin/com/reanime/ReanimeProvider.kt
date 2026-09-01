@@ -255,26 +255,40 @@ class ReanimeProvider : MainAPI() {
     private fun extractStringArray(arrayLiteral: String): List<String> =
         Regex("\"((?:[^\"\\\\]|\\\\.)*)\"").findAll(arrayLiteral).map { unescapeJsonString(it.groupValues[1]) }.toList()
 
-    // Fetch anilist_id from search API using slug
-    private suspend fun getAnilistIdFromSearch(slug: String): Int? {
-        return try {
-            val encoded = URLEncoder.encode(slug, "UTF-8")
-            val url = "$mainUrl/api/v1/search?q=$encoded&limit=1"
-            val res = app.get(url).parsedSafe<SearchApiResponse>() ?: return null
-            res.results.firstOrNull()?.anilist_id
-        } catch (e: Exception) {
-            Log.e("ReanimeProvider", "Search fallback failed: ${e.message}")
-            null
-        }
-    }
-
-    // Robust anilist_id extraction
+    // Try to extract anilist_id from payload
     private fun extractAnilistIdFromPayload(payload: String, animeObj: String?): Int? {
         animeObj?.let {
             extractIntField(it, "anilist_id")?.let { id -> return id }
         }
         extractIntField(payload, "anilist_id")?.let { id -> return id }
         Regex("\\banilist_id\\s*:\\s*[\"']?(\\d+)[\"']?").find(payload)?.groupValues?.get(1)?.toIntOrNull()?.let { return it }
+        return null
+    }
+
+    // Search API fallback
+    private suspend fun getAnilistIdFromSearch(slug: String): Int? {
+        // Try full slug first
+        try {
+            val encoded = URLEncoder.encode(slug, "UTF-8")
+            val url = "$mainUrl/api/v1/search?q=$encoded&limit=1"
+            val res = app.get(url).parsedSafe<SearchApiResponse>() ?: return null
+            res.results.firstOrNull()?.anilist_id?.let { return it }
+        } catch (e: Exception) {
+            Log.e("ReanimeProvider", "Search API fallback failed: ${e.message}")
+        }
+        // Try stripping the last dash segment (usually the hash)
+        val stripped = slug.substringBeforeLast("-")
+        if (stripped.isNotEmpty() && stripped != slug) {
+            return try {
+                val encoded = URLEncoder.encode(stripped, "UTF-8")
+                val url = "$mainUrl/api/v1/search?q=$encoded&limit=1"
+                val res = app.get(url).parsedSafe<SearchApiResponse>() ?: return null
+                res.results.firstOrNull()?.anilist_id
+            } catch (e: Exception) {
+                Log.e("ReanimeProvider", "Search API fallback with stripped slug failed: ${e.message}")
+                null
+            }
+        }
         return null
     }
 
@@ -295,13 +309,15 @@ class ReanimeProvider : MainAPI() {
             )
         } else "Unknown"
 
-        // Try extracting anilist_id from payload first
+        // Extract anime_id (slug) from payload for search fallback
+        val animeIdFromPayload = extractStringField(animeObj, "anime_id")
+
         var anilistId = extractAnilistIdFromPayload(payload, animeObj)
 
-        // If not found, fallback to search API using slug from URL
         if (anilistId == null) {
-            val slug = url.substringAfterLast("/")
-            Log.w("ReanimeProvider", "anilist_id not found in payload, trying search API for slug: $slug")
+            // Use anime_id from payload if available, else URL slug
+            val slug = animeIdFromPayload ?: url.substringAfterLast("/")
+            Log.w("ReanimeProvider", "anilist_id not found in payload. Trying search API with slug: $slug")
             anilistId = getAnilistIdFromSearch(slug)
         }
 
@@ -309,6 +325,8 @@ class ReanimeProvider : MainAPI() {
             Log.e("ReanimeProvider", "Could not determine anilist_id for $url")
             return null
         }
+
+        Log.d("ReanimeProvider", "anilist_id = $anilistId for $url")
 
         val description = extractStringField(animeObj, "description")
         val bannerImage = extractStringField(animeObj, "banner_image")
@@ -373,7 +391,7 @@ class ReanimeProvider : MainAPI() {
     }
 
     // ------------------------------------------------------------------
-    // LOAD LINKS
+    // LOAD LINKS – full decryption implemented
     // ------------------------------------------------------------------
     private data class FlixApiResponse(
         @JsonProperty("servers") val servers: List<FlixServer> = emptyList()
