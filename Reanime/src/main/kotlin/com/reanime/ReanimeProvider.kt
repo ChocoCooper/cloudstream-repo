@@ -454,16 +454,22 @@ class ReanimeProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         Log.d("ReanimeProvider", "loadLinks($data) called")
+
+        // Fix: CloudStream may prepend mainUrl to data; extract last path segment
         val parts = data.split("|")
         if (parts.size < 2) {
             Log.e("ReanimeProvider", "Invalid data format: $data")
             return false
         }
-        val anilistId = parts[0].toIntOrNull()
+
+        // Take the numeric part after the last slash (handles full URL prefix)
+        val anilistPart = parts[0].substringAfterLast('/')
+        val anilistId = anilistPart.toIntOrNull()
         if (anilistId == null) {
-            Log.e("ReanimeProvider", "anilistId is null in data: $data")
+            Log.e("ReanimeProvider", "anilistId is null, extracted part: '$anilistPart' from '$data'")
             return false
         }
+
         val ep = parts[1].toIntOrNull()
         if (ep == null) {
             Log.e("ReanimeProvider", "ep is null in data: $data")
