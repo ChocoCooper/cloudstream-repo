@@ -283,7 +283,7 @@ class ReanimeProvider : MainAPI() {
     }
 
     // ------------------------------------------------------------------
-    // LOAD LINKS – actual WASM decryption with Chicory (fixed)
+    // LOAD LINKS – actual WASM decryption with Chicory
     // ------------------------------------------------------------------
     private data class FlixApiResponse(
         @JsonProperty("servers") val servers: List<FlixServer> = emptyList()
@@ -330,6 +330,9 @@ class ReanimeProvider : MainAPI() {
         )
     }
 
+    // --------------------------------------------------------------
+    // WebAssembly execution via Chicory (fixed)
+    // --------------------------------------------------------------
     private fun wasmMix(wasmB64: String, frag1: ByteArray, keyFrag2: ByteArray, tokenU: ByteArray, v: Int): ByteArray {
         val wasmBin = Base64.decode(wasmB64, Base64.DEFAULT)
         val module = Module.builder(wasmBin).build()
@@ -338,22 +341,23 @@ class ReanimeProvider : MainAPI() {
 
         val k = frag1.size
         val base = 1000
-        memory.write(base, frag1)                    // Int address
+        memory.write(base, frag1)
         memory.write(base + k, keyFrag2)
         memory.write(base + 2 * k, tokenU)
 
-        instance.export("_s").apply(Value.i32(v))
+        // Value.i32 expects Long in Chicory 0.0.10
+        instance.export("_s").apply(Value.i32(v.toLong()))
         instance.export("_r").apply(
-            Value.i32(base),
-            Value.i32(base + k),
-            Value.i32(base + 2 * k),
-            Value.i32(base + 3 * k),
-            Value.i32(k)
+            Value.i32(base.toLong()),
+            Value.i32((base + k).toLong()),
+            Value.i32((base + 2 * k).toLong()),
+            Value.i32((base + 3 * k).toLong()),
+            Value.i32(k.toLong())
         )
 
         val output = ByteArray(k)
         for (i in 0 until k) {
-            output[i] = memory.read(base + 3 * k + i)   // Int address
+            output[i] = memory.read(base + 3 * k + i)
         }
         return output
     }
@@ -497,16 +501,17 @@ class ReanimeProvider : MainAPI() {
         // 9. AES-CBC decrypt
         val decryptedUrl = aesCbcDecrypt(encrypted, aesKey, iv) ?: return false
 
-        // 10. Return stream using newExtractorLink (positional args)
+        // 10. Return stream using newExtractorLink with lambda initializer
         callback(
             newExtractorLink(
                 name,
                 "Reanime HD-2",
                 decryptedUrl,
-                ExtractorLinkType.M3U8,
-                embedUrl,
-                Qualities.Unknown.value
-            )
+                ExtractorLinkType.M3U8
+            ) {
+                this.referer = embedUrl
+                this.quality = Qualities.Unknown.value
+            }
         )
         return true
     }
