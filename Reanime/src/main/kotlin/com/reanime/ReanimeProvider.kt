@@ -14,7 +14,7 @@ import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
 
-// Chicory WebAssembly runtime imports
+// Chicory WebAssembly runtime
 import com.dylibso.chicory.runtime.Instance
 import com.dylibso.chicory.runtime.Module
 import com.dylibso.chicory.runtime.Memory
@@ -225,16 +225,37 @@ class ReanimeProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
+        Log.d("ReanimeProvider", "load($url) called")
         val html = app.get(url).text
-        val payload = extractKitStartPayload(html) ?: return null
+        val payload = extractKitStartPayload(html)
+        if (payload == null) {
+            Log.e("ReanimeProvider", "extractKitStartPayload returned null")
+            return null
+        }
 
-        val animeObj = extractObjectField(payload, "anime") ?: return null
-        val animeId = extractStringField(animeObj, "anime_id") ?: return null
-        val anilistId = extractIntField(animeObj, "anilist_id") ?: return null
+        val animeObj = extractObjectField(payload, "anime")
+        if (animeObj == null) {
+            Log.e("ReanimeProvider", "anime object not found in payload")
+            return null
+        }
+
+        val animeId = extractStringField(animeObj, "anime_id")
+        val anilistId = extractIntField(animeObj, "anilist_id")
+        Log.d("ReanimeProvider", "animeId=$animeId anilistId=$anilistId")
+
+        if (animeId == null || anilistId == null) {
+            Log.e("ReanimeProvider", "Missing animeId or anilistId")
+            return null
+        }
 
         val episodeUrl = "$mainUrl/api/v1/anime/$animeId/episodes"
-        val epResp = app.get(episodeUrl).parsedSafe<EpisodeApiResponse>() ?: return null
+        val epResp = app.get(episodeUrl).parsedSafe<EpisodeApiResponse>()
+        if (epResp == null) {
+            Log.e("ReanimeProvider", "Failed to fetch episode list")
+            return null
+        }
         val episodes = epResp.episodes ?: epResp.data ?: emptyList()
+        Log.d("ReanimeProvider", "Fetched ${episodes.size} episodes")
 
         val subEpisodes = mutableListOf<Episode>()
         val dubEpisodes = mutableListOf<Episode>()
@@ -256,6 +277,8 @@ class ReanimeProvider : MainAPI() {
             if (ep.isSub) subEpisodes.add(buildEpisode(dataSub))
             if (ep.isDub) dubEpisodes.add(buildEpisode(dataDub))
         }
+
+        Log.d("ReanimeProvider", "Sub episodes: ${subEpisodes.size}, Dub episodes: ${dubEpisodes.size}")
 
         val titleObj = extractObjectField(animeObj, "title")
         val title = if (titleObj != null) {
@@ -330,9 +353,6 @@ class ReanimeProvider : MainAPI() {
         )
     }
 
-    // --------------------------------------------------------------
-    // WebAssembly execution via Chicory (fixed)
-    // --------------------------------------------------------------
     private fun wasmMix(wasmB64: String, frag1: ByteArray, keyFrag2: ByteArray, tokenU: ByteArray, v: Int): ByteArray {
         val wasmBin = Base64.decode(wasmB64, Base64.DEFAULT)
         val module = Module.builder(wasmBin).build()
@@ -345,7 +365,6 @@ class ReanimeProvider : MainAPI() {
         memory.write(base + k, keyFrag2)
         memory.write(base + 2 * k, tokenU)
 
-        // Value.i32 expects Long in Chicory 0.0.10
         instance.export("_s").apply(Value.i32(v.toLong()))
         instance.export("_r").apply(
             Value.i32(base.toLong()),
@@ -434,45 +453,93 @@ class ReanimeProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        Log.d("ReanimeProvider", "loadLinks($data) called")
         val parts = data.split("|")
-        if (parts.size < 2) return false
-        val anilistId = parts[0].toIntOrNull() ?: return false
-        val ep = parts[1].toIntOrNull() ?: return false
+        if (parts.size < 2) {
+            Log.e("ReanimeProvider", "Invalid data format: $data")
+            return false
+        }
+        val anilistId = parts[0].toIntOrNull()
+        if (anilistId == null) {
+            Log.e("ReanimeProvider", "anilistId is null in data: $data")
+            return false
+        }
+        val ep = parts[1].toIntOrNull()
+        if (ep == null) {
+            Log.e("ReanimeProvider", "ep is null in data: $data")
+            return false
+        }
         val lang = parts.getOrNull(2)?.lowercase() ?: "sub"
+        Log.d("ReanimeProvider", "anilistId=$anilistId ep=$ep lang=$lang")
 
         // 1. Get flixcloud embed URL
         val flixApiUrl = "$mainUrl/api/flix/$anilistId/$ep"
-        val flixResp = app.get(flixApiUrl).parsedSafe<FlixApiResponse>() ?: return false
+        val flixResp = app.get(flixApiUrl).parsedSafe<FlixApiResponse>()
+        if (flixResp == null) {
+            Log.e("ReanimeProvider", "Failed to fetch flix server list")
+            return false
+        }
         val server = flixResp.servers.firstOrNull {
             it.dataLink?.contains("flixcloud") == true &&
             (it.dataType?.lowercase() == lang || it.dataType == null)
         } ?: flixResp.servers.firstOrNull { it.dataLink?.contains("flixcloud") == true }
-            ?: return false
-        val embedUrl = server.dataLink ?: return false
+        if (server == null) {
+            Log.e("ReanimeProvider", "No flixcloud server found")
+            return false
+        }
+        val embedUrl = server.dataLink
+        if (embedUrl.isNullOrEmpty()) {
+            Log.e("ReanimeProvider", "embedUrl is null")
+            return false
+        }
+        Log.d("ReanimeProvider", "embedUrl=$embedUrl")
 
         // 2. Fetch embed page and extract data object
         val html = app.get(embedUrl).text
-        val dataObjStr = extractDataObjectFromEmbedHtml(html) ?: return false
-        val seed = extractStringField(dataObjStr, "obfuscation_seed") ?: return false
-        val obfCryptoData = extractObjectField(dataObjStr, "obfuscated_crypto_data") ?: return false
+        val dataObjStr = extractDataObjectFromEmbedHtml(html)
+        if (dataObjStr == null) {
+            Log.e("ReanimeProvider", "Failed to extract data object from embed page")
+            return false
+        }
+        val seed = extractStringField(dataObjStr, "obfuscation_seed")
+        if (seed == null) {
+            Log.e("ReanimeProvider", "obfuscation_seed missing")
+            return false
+        }
+        val obfCryptoData = extractObjectField(dataObjStr, "obfuscated_crypto_data")
+        if (obfCryptoData == null) {
+            Log.e("ReanimeProvider", "obfuscated_crypto_data missing")
+            return false
+        }
         val fields = resolveFields(seed)
 
-        val containerText = extractObjectField(obfCryptoData, fields.containerName) ?: return false
-        val arrayText = extractArrayField(containerText, fields.arrayName) ?: return false
-        val firstObj = extractFirstObjectFromArray(arrayText) ?: return false
-        val frag1B64 = extractStringField(firstObj, fields.keyField) ?: return false
-        val ivB64 = extractStringField(firstObj, fields.ivField) ?: return false
-        val keyFrag2B64 = extractStringField(dataObjStr, fields.keyFrag2Field) ?: return false
-        val L = extractStringField(dataObjStr, fields.tokenField) ?: return false
-        val wasmB64 = extractStringField(dataObjStr, "w_payload") ?: return false
+        val containerText = extractObjectField(obfCryptoData, fields.containerName)
+        if (containerText == null) { Log.e("ReanimeProvider", "container missing"); return false }
+        val arrayText = extractArrayField(containerText, fields.arrayName)
+        if (arrayText == null) { Log.e("ReanimeProvider", "array missing"); return false }
+        val firstObj = extractFirstObjectFromArray(arrayText)
+        if (firstObj == null) { Log.e("ReanimeProvider", "firstObj missing"); return false }
+        val frag1B64 = extractStringField(firstObj, fields.keyField)
+        if (frag1B64 == null) { Log.e("ReanimeProvider", "frag1B64 missing"); return false }
+        val ivB64 = extractStringField(firstObj, fields.ivField)
+        if (ivB64 == null) { Log.e("ReanimeProvider", "ivB64 missing"); return false }
+        val keyFrag2B64 = extractStringField(dataObjStr, fields.keyFrag2Field)
+        if (keyFrag2B64 == null) { Log.e("ReanimeProvider", "keyFrag2B64 missing"); return false }
+        val L = extractStringField(dataObjStr, fields.tokenField)
+        if (L == null) { Log.e("ReanimeProvider", "L missing"); return false }
+        val wasmB64 = extractStringField(dataObjStr, "w_payload")
+        if (wasmB64 == null) { Log.e("ReanimeProvider", "wasmB64 missing"); return false }
 
         // 3. Fetch token
         val tokenUrl = "https://flixcloud.cc/api/m3u8/$L"
-        val tokenResp = app.get(tokenUrl).parsedSafe<Map<String, String>>() ?: return false
+        val tokenResp = app.get(tokenUrl).parsedSafe<Map<String, String>>()
+        if (tokenResp == null) { Log.e("ReanimeProvider", "token fetch failed"); return false }
         val k = sha256Hex(L + "vid").take(10)
         val i = sha256Hex(L + "key").take(10)
-        val P = tokenResp[k] ?: return false
-        val U = tokenResp[i] ?: return false
+        val P = tokenResp[k]
+        if (P == null) { Log.e("ReanimeProvider", "P missing. Keys=${tokenResp.keys}"); return false }
+        val U = tokenResp[i]
+        if (U == null) { Log.e("ReanimeProvider", "U missing. Keys=${tokenResp.keys}"); return false }
 
         // 4. Decode
         val frag1 = Base64.decode(frag1B64, Base64.NO_WRAP)
@@ -499,20 +566,21 @@ class ReanimeProvider : MainAPI() {
         val aesKey = sha256(xored)
 
         // 9. AES-CBC decrypt
-        val decryptedUrl = aesCbcDecrypt(encrypted, aesKey, iv) ?: return false
+        val decryptedUrl = aesCbcDecrypt(encrypted, aesKey, iv)
+        if (decryptedUrl == null) { Log.e("ReanimeProvider", "AES decrypt failed"); return false }
 
-        // 10. Return stream using newExtractorLink with lambda initializer
+        // 10. Return stream
         callback(
-            newExtractorLink(
-                name,
-                "Reanime HD-2",
-                decryptedUrl,
-                ExtractorLinkType.M3U8
-            ) {
-                this.referer = embedUrl
-                this.quality = Qualities.Unknown.value
-            }
+            ExtractorLink(
+                source = name,
+                name = "Reanime HD-2",
+                url = decryptedUrl,
+                referer = embedUrl,
+                quality = Qualities.Unknown.value,
+                isM3u8 = true
+            )
         )
+        Log.d("ReanimeProvider", "Successfully provided stream: ${decryptedUrl.take(60)}...")
         return true
     }
 }
