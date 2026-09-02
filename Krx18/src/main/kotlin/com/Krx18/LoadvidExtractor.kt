@@ -6,6 +6,7 @@ import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.INFER_TYPE
 import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.newExtractorLink
 
 class LoadvidExtractor : ExtractorApi() {
     override val name = "Loadvid"
@@ -23,20 +24,20 @@ class LoadvidExtractor : ExtractorApi() {
         val videoUrl = extractVideoUrl(doc)
         if (videoUrl != null) {
             callback.invoke(
-                ExtractorLink(
+                newExtractorLink(
                     source = name,
                     name = "$name MP4",
                     url = videoUrl,
                     type = INFER_TYPE,
                     quality = Qualities.Unknown.value,
-                    referer = mainUrl
+                    referer = mainUrl,
+                    headers = mapOf("Referer" to mainUrl)
                 )
             )
         }
     }
 
     private suspend fun extractVideoUrl(doc: org.jsoup.nodes.Document): String? {
-        // Scan inline scripts
         for (script in doc.select("script:not([src])")) {
             val data = script.data()
             val patterns = listOf(
@@ -53,7 +54,6 @@ class LoadvidExtractor : ExtractorApi() {
             }
         }
 
-        // Load main JS
         val jsUrl = doc.select("script[src*='video-player-main']").firstOrNull()?.attr("abs:src")
         if (jsUrl != null) {
             try {
@@ -63,7 +63,6 @@ class LoadvidExtractor : ExtractorApi() {
             } catch (_: Exception) { }
         }
 
-        // Fallback: video/source tags
         doc.select("source[src], video[src]").firstOrNull()?.attr("abs:src")?.let { return it }
 
         return null
