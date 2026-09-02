@@ -9,9 +9,8 @@ import org.jsoup.parser.Parser
 import java.net.URLEncoder
 import java.security.MessageDigest
 import javax.crypto.Cipher
-import javax.crypto.SecretKeyFactory
+import javax.crypto.Mac
 import javax.crypto.spec.IvParameterSpec
-import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
 
 class ReanimeProvider : MainAPI() {
@@ -301,7 +300,7 @@ class ReanimeProvider : MainAPI() {
     }
 
     // ------------------------------------------------------------------
-    // LOAD LINKS – Pure Kotlin WASM mix (no external runtime)
+    // LOAD LINKS – Pure Kotlin WASM mix + manual PBKDF2
     // ------------------------------------------------------------------
     private data class FlixApiResponse(
         @JsonProperty("servers") val servers: List<FlixServer> = emptyList()
@@ -348,7 +347,7 @@ class ReanimeProvider : MainAPI() {
         )
     }
 
-    // Pure Kotlin implementation of WebAssembly mixing (corrected)
+    // Pure Kotlin implementation of WebAssembly mixing (correct)
     private fun wasmMix(frag1: ByteArray, keyFrag2: ByteArray, tokenU: ByteArray, v: Int): ByteArray {
         val k = frag1.size
         val out = ByteArray(k)
@@ -368,14 +367,36 @@ class ReanimeProvider : MainAPI() {
         return out
     }
 
+    // Manual PBKDF2-HMAC-SHA256 to avoid charset issues
     private fun pbkdf2Sha256(password: ByteArray, salt: ByteArray, iterations: Int, keyLength: Int): ByteArray {
-        val spec = PBEKeySpec(
-            password.toString(Charsets.ISO_8859_1).toCharArray(),
-            salt,
-            iterations,
-            keyLength * 8
-        )
-        return SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded
+        val mac = Mac.getInstance("HmacSHA256")
+        mac.init(SecretKeySpec(password, "HmacSHA256"))
+        val hLen = 32
+        val blocks = (keyLength + hLen - 1) / hLen
+        val derivedKey = ByteArray(blocks * hLen)
+        val block = ByteArray(hLen)
+        for (blockIndex in 1..blocks) {
+            mac.reset()
+            mac.update(salt)
+            mac.update(byteArrayOf(
+                (blockIndex ushr 24).toByte(),
+                (blockIndex ushr 16).toByte(),
+                (blockIndex ushr 8).toByte(),
+                blockIndex.toByte()
+            ))
+            val u = mac.doFinal()
+            System.arraycopy(u, 0, block, 0, hLen)
+            for (i in 1 until iterations) {
+                mac.reset()
+                mac.update(u)
+                val t = mac.doFinal()
+                for (j in 0 until hLen) {
+                    block[j] = (block[j].toInt() xor t[j].toInt()).toByte()
+                }
+            }
+            System.arraycopy(block, 0, derivedKey, (blockIndex - 1) * hLen, hLen)
+        }
+        return derivedKey.copyOf(keyLength)
     }
 
     private fun aesCbcDecrypt(data: ByteArray, key: ByteArray, iv: ByteArray): String? {
@@ -500,7 +521,7 @@ class ReanimeProvider : MainAPI() {
         // 5. WASM mix (pure Kotlin)
         val password = wasmMix(frag1, keyFrag2, tokenU, v)
 
-        // 6. PBKDF2
+        // 6. PBKDF2 (manual)
         val derived = pbkdf2Sha256(password, seed.toByteArray(Charsets.UTF_8), 1000, 32)
 
         // 7. XOR with seed
@@ -510,6 +531,14 @@ class ReanimeProvider : MainAPI() {
 
         // 8. SHA-256
         val aesKey = sha256(xored)
+
+        // Log intermediate values for debugging
+        Log.d("ReanimeProvider", "password=${password.toHex()}")
+        Log.d("ReanimeProvider", "derived=${derived.toHex()}")
+        Log.d("ReanimeProvider", "xored=${xored.toHex()}")
+        Log.d("ReanimeProvider", "aesKey=${aesKey.toHex()}")
+        Log.d("ReanimeProvider", "iv=${iv.toHex()}")
+        Log.d("ReanimeProvider", "encrypted=${encrypted.toHex()}")
 
         // 9. AES-CBC decrypt
         val decryptedUrl = aesCbcDecrypt(encrypted, aesKey, iv) ?: return false
@@ -529,4 +558,6 @@ class ReanimeProvider : MainAPI() {
         Log.d("ReanimeProvider", "Successfully provided stream: ${decryptedUrl.take(60)}...")
         return true
     }
+
+    private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
 }
