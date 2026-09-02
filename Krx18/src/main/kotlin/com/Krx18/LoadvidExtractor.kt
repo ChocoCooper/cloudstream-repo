@@ -6,13 +6,13 @@ import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.INFER_TYPE
 import com.lagradost.cloudstream3.utils.Qualities
-import com.lagradost.cloudstream3.utils.newExtractorLink
 
 class LoadvidExtractor : ExtractorApi() {
     override val name = "Loadvid"
     override val mainUrl = "https://cdn.loadvid.com"
     override val requiresReferer = true
 
+    @Suppress("DEPRECATION")
     override suspend fun getUrl(
         url: String,
         referer: String?,
@@ -24,13 +24,13 @@ class LoadvidExtractor : ExtractorApi() {
         val videoUrl = extractVideoUrl(doc)
         if (videoUrl != null) {
             callback.invoke(
-                newExtractorLink(
+                ExtractorLink(
                     source = name,
                     name = "$name MP4",
                     url = videoUrl,
-                    type = INFER_TYPE,
-                    quality = Qualities.Unknown.value,
                     referer = mainUrl,
+                    quality = Qualities.Unknown.value,
+                    type = INFER_TYPE,
                     headers = mapOf("Referer" to mainUrl)
                 )
             )
