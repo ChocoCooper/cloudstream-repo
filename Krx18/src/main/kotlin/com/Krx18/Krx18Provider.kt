@@ -10,9 +10,9 @@ import org.jsoup.nodes.Element
  * Servers are handled by separate ExtractorApi implementations (PlayKrx18Extractor,
  * Mov18plusExtractor, LoadvidExtractor) which are auto‑discovered.
  */
-class Krx18Provider : MainAPI() {
+class KRX18Provider : MainAPI() {
     override var mainUrl = "https://krx18.com"
-    override var name = "KRX 18"
+    override var name = "KRX18"
     override val hasMainPage = true
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.NSFW)
