@@ -119,7 +119,6 @@ subprojects {
         implementation("me.xdrop:fuzzywuzzy:1.4.0")
         implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
         implementation("org.bouncycastle:bcpkix-jdk15to18:1.77")
-        implementation("com.dylibso.chicory:runtime:0.0.10")
     }
 
     // Skip cross-platform check task
