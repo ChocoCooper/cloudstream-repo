@@ -7,6 +7,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.INFER_TYPE
 import com.lagradost.cloudstream3.utils.M3u8Helper
 import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import okhttp3.FormBody
 import okhttp3.RequestBody
 import org.json.JSONObject
@@ -35,9 +36,8 @@ class PlayKrx18Extractor : ExtractorApi() {
 
             val regex = Regex("const\\s*id(?:User|file)_enc\\s*=\\s*\"(.*?)\"")
             val matches = regex.findAll(html).map { it.groupValues[1] }.toList()
-            if (matches.size < 2) {
-                return
-            }
+            if (matches.size < 2) return
+
             val encryptedFileId = matches[0]
             val encryptedUserId = matches[1]
 
@@ -115,19 +115,20 @@ class PlayKrx18Extractor : ExtractorApi() {
                 ).forEach(callback)
             } else {
                 callback.invoke(
-                    ExtractorLink(
+                    newExtractorLink(
                         source = "$name MP4",
                         name = "$name MP4",
                         url = videoUrl,
                         type = INFER_TYPE,
                         quality = Qualities.Unknown.value,
-                        referer = url
+                        referer = url,
+                        headers = mapOf("Referer" to mainUrl)
                     )
                 )
             }
 
-        } catch (e: Exception) {
-            // silently fail
+        } catch (_: Exception) {
+            // silent fail
         }
     }
 
