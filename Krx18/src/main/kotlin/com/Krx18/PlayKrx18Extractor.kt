@@ -7,7 +7,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.INFER_TYPE
 import com.lagradost.cloudstream3.utils.M3u8Helper
 import com.lagradost.cloudstream3.utils.Qualities
-import com.lagradost.cloudstream3.utils.newExtractorLink
 import okhttp3.FormBody
 import okhttp3.RequestBody
 import org.json.JSONObject
@@ -24,6 +23,7 @@ class PlayKrx18Extractor : ExtractorApi() {
     override val requiresReferer = true
     private val domainApi = "https://api-play-240924.playkrx18.site/api/tp1rd"
 
+    @Suppress("DEPRECATION")
     override suspend fun getUrl(
         url: String,
         referer: String?,
@@ -115,20 +115,20 @@ class PlayKrx18Extractor : ExtractorApi() {
                 ).forEach(callback)
             } else {
                 callback.invoke(
-                    newExtractorLink(
+                    ExtractorLink(
                         source = "$name MP4",
                         name = "$name MP4",
                         url = videoUrl,
-                        type = INFER_TYPE,
-                        quality = Qualities.Unknown.value,
                         referer = url,
+                        quality = Qualities.Unknown.value,
+                        type = INFER_TYPE,
                         headers = mapOf("Referer" to mainUrl)
                     )
                 )
             }
 
         } catch (_: Exception) {
-            // silent fail
+            // silently fail
         }
     }
 
