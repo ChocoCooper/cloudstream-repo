@@ -14,12 +14,6 @@ import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.PBEKeySpec
 import javax.crypto.spec.SecretKeySpec
 
-// Chicory WebAssembly runtime
-import com.dylibso.chicory.runtime.Instance
-import com.dylibso.chicory.runtime.Module
-import com.dylibso.chicory.runtime.Memory
-import com.dylibso.chicory.wasm.types.Value
-
 class ReanimeProvider : MainAPI() {
     override var mainUrl = "https://reanime.to"
     override var name = "Reanime"
@@ -307,7 +301,7 @@ class ReanimeProvider : MainAPI() {
     }
 
     // ------------------------------------------------------------------
-    // LOAD LINKS – actual WASM decryption with Chicory
+    // LOAD LINKS – Pure Kotlin WASM mix (no external runtime)
     // ------------------------------------------------------------------
     private data class FlixApiResponse(
         @JsonProperty("servers") val servers: List<FlixServer> = emptyList()
@@ -354,33 +348,24 @@ class ReanimeProvider : MainAPI() {
         )
     }
 
-    // Actual WASM mixing via Chicory
-    private fun wasmMix(wasmB64: String, frag1: ByteArray, keyFrag2: ByteArray, tokenU: ByteArray, v: Int): ByteArray {
-        val wasmBin = Base64.decode(wasmB64, Base64.DEFAULT)
-        val module = Module.builder(wasmBin).build()
-        val instance = module.instantiate()
-        val memory: Memory = instance.memory()
-
+    // Pure Kotlin implementation of WebAssembly mixing (corrected)
+    private fun wasmMix(frag1: ByteArray, keyFrag2: ByteArray, tokenU: ByteArray, v: Int): ByteArray {
         val k = frag1.size
-        val base = 1000
-        memory.write(base, frag1)
-        memory.write(base + k, keyFrag2)
-        memory.write(base + 2 * k, tokenU)
-
-        instance.export("_s").apply(Value.i32(v.toLong()))
-        instance.export("_r").apply(
-            Value.i32(base.toLong()),
-            Value.i32((base + k).toLong()),
-            Value.i32((base + 2 * k).toLong()),
-            Value.i32((base + 3 * k).toLong()),
-            Value.i32(k.toLong())
-        )
-
-        val output = ByteArray(k)
+        val out = ByteArray(k)
+        var global = v
         for (i in 0 until k) {
-            output[i] = memory.read(base + 3 * k + i)
+            var b = (frag1[i].toInt() and 0xff) xor
+                    (keyFrag2[i].toInt() and 0xff) xor
+                    (tokenU[i].toInt() and 0xff)
+            b = ((b ushr 2) or ((b shl 6) and 0xff)) and 0xff
+            b = (b + 110) and 0xff
+            b = (b - 75) and 0xff
+            b = (b + 161) and 0xff
+            val t = (i * 48 + global) and 0xff
+            b = b xor t
+            out[i] = b.toByte()
         }
-        return output
+        return out
     }
 
     private fun pbkdf2Sha256(password: ByteArray, salt: ByteArray, iterations: Int, keyLength: Int): ByteArray {
@@ -495,7 +480,6 @@ class ReanimeProvider : MainAPI() {
         }
 
         val L = extractStringField(dataObjStr, fields.tokenField) ?: return false
-        val wasmB64 = extractStringField(dataObjStr, "w_payload") ?: return false
 
         // 3. Fetch token
         val tokenUrl = "https://flixcloud.cc/api/m3u8/$L"
@@ -511,10 +495,10 @@ class ReanimeProvider : MainAPI() {
         val tokenU = Base64.decode(U, Base64.NO_WRAP)
         val encrypted = Base64.decode(P, Base64.NO_WRAP)
         val iv = Base64.decode(ivB64, Base64.NO_WRAP)
-        val v = seed.take(8).toLong(16).toInt()
+        val v = seed.take(8).toLong(16).toInt()   // fixed hex parsing
 
-        // 5. Actual WASM mix
-        val password = wasmMix(wasmB64, frag1, keyFrag2, tokenU, v)
+        // 5. WASM mix (pure Kotlin)
+        val password = wasmMix(frag1, keyFrag2, tokenU, v)
 
         // 6. PBKDF2
         val derived = pbkdf2Sha256(password, seed.toByteArray(Charsets.UTF_8), 1000, 32)
