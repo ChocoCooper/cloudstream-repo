@@ -6,22 +6,25 @@ import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
 
 /**
- * Krx18 Provider – fetches NSFW movies and uses AJAX to get server embed links.
- * Servers are handled by separate ExtractorApi implementations (PlayKrx18Extractor,
- * Mov18plusExtractor, LoadvidExtractor) which are auto‑discovered.
+ * KRX 18 Provider – fetches NSFW movies.
+ * Uses AJAX to retrieve server embed links and stores them in the load response's `data` field.
  */
-class KRX18Provider : MainAPI() {
+class Krx18Provider : MainAPI() {
     override var mainUrl = "https://krx18.com"
-    override var name = "KRX18"
+    override var name = "KRX 18"
     override val hasMainPage = true
     override val hasDownloadSupport = true
+    override val vpnStatus = VPNStatus.MightBeNeeded
     override val supportedTypes = setOf(TvType.NSFW)
 
     override val mainPage = mainPageOf(
+        "movies" to "Recently added",
+        "genre/eng-sub" to "English SUB",
         "genre/korea" to "Korea",
+        "genre/china" to "China",
         "genre/japan" to "Japan",
-        "genre/philippines" to "Philippines",
-        "genre/eng-sub" to "English SUB"
+        "genre/thailand" to "Thailand",
+        "genre/philippines" to "Philippines"
     )
 
     override suspend fun getMainPage(
@@ -107,7 +110,6 @@ class KRX18Provider : MainAPI() {
 
             // Server spans with data‑link / onclick
             document.select("span.server, div.server, [class*='server']").forEach { elem ->
-                // Check data‑* attributes
                 for (attr in listOf("data-link", "data-src", "data-url", "data-href")) {
                     val value = elem.attr(attr)
                     if (value.isNotEmpty()) {
@@ -115,7 +117,6 @@ class KRX18Provider : MainAPI() {
                         break
                     }
                 }
-                // Check onclick for embedded URL
                 val onclick = elem.attr("onclick")
                 if (onclick.isNotEmpty()) {
                     Regex("""['"](https?://[^'"]+)['"]""").find(onclick)?.groupValues?.get(1)?.let {
@@ -125,21 +126,14 @@ class KRX18Provider : MainAPI() {
             }
         }
 
-        // Store all embed URLs in episode data (separated by |||)
-        val episodeData = embedLinks.distinct().joinToString("|||")
+        // Store all embed URLs in the `data` field (separated by |||)
+        val responseData = embedLinks.distinct().joinToString("|||")
 
-        return newMovieLoadResponse(title, url, TvType.NSFW, url) {
+        return newMovieLoadResponse(title, url, TvType.NSFW, responseData) {
             this.posterUrl = poster
             this.plot = description
             this.recommendations = recommendations
             this.tags = tags
-            this.episodes = listOf(
-                newEpisode() {
-                    this.name = "Movie"
-                    this.posterUrl = poster
-                    this.data = episodeData
-                }
-            )
         }
     }
 
@@ -151,8 +145,6 @@ class KRX18Provider : MainAPI() {
     ): Boolean {
         val embedUrls = data.split("|||").filter { it.isNotEmpty() }
         embedUrls.forEach { embedUrl ->
-            // The loadExtractor function will automatically pick the right ExtractorApi
-            // based on the URL domain (PlayKrx18Extractor, Mov18plusExtractor, LoadvidExtractor, etc.)
             loadExtractor(embedUrl, subtitleCallback, callback)
         }
         return true
