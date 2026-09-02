@@ -7,7 +7,7 @@ import android.content.Context
 @CloudstreamPlugin
 class Krx18Plugin : Plugin() {
     override fun load(context: Context) {
-        registerProvider(Krx18Provider())
+        registerMainAPI(Krx18Provider())
         registerExtractorAPI(PlayKrx18Extractor())
         registerExtractorAPI(Mov18plusExtractor())
         registerExtractorAPI(LoadvidExtractor())
