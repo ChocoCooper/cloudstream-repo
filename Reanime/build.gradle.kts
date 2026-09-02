@@ -1,5 +1,5 @@
 // use an integer for version numbers
-version = 1
+version = 2
 
 cloudstream {
     language = "en"
@@ -10,7 +10,3 @@ cloudstream {
     isCrossPlatform = true
 }
 
-dependencies {
-    // Pure JVM WebAssembly runtime – version known to exist on Maven Central
-    implementation("com.dylibso.chicory:runtime:0.0.10")
-}
