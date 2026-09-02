@@ -6,7 +6,6 @@ import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.INFER_TYPE
 import com.lagradost.cloudstream3.utils.Qualities
-import com.lagradost.cloudstream3.utils.newExtractorLink
 
 class Mov18plusExtractor : ExtractorApi() {
     override val name = "Mov18plus"
@@ -22,7 +21,6 @@ class Mov18plusExtractor : ExtractorApi() {
         val doc = app.get(url, referer = referer ?: "https://krx18.com/").document
         val iframeSrc = doc.selectFirst("iframe")?.attr("abs:src")
             ?: run {
-                // Fallback: extract from script
                 val script = doc.select("script").find { it.data().contains("abyssplayer.com") }
                 val extracted = script?.data()?.let {
                     Regex("https?://player\\.abyssplayer\\.com/[A-Za-z0-9]+").find(it)?.value
@@ -30,14 +28,11 @@ class Mov18plusExtractor : ExtractorApi() {
                 extracted ?: return
             }
 
-        // Load iframe
         val iframeDoc = app.get(iframeSrc, referer = mainUrl).document
-
-        // Extract video URL
         val videoUrl = extractVideo(iframeDoc)
         if (videoUrl != null) {
             callback.invoke(
-                newExtractorLink(
+                ExtractorLink(
                     source = name,
                     name = "$name MP4",
                     url = videoUrl,
