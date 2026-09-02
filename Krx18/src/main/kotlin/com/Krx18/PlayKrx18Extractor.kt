@@ -1,7 +1,5 @@
 package com.KRX18
 
-import com.google.gson.JsonObject
-import com.google.gson.JsonParser
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.utils.ExtractorApi
@@ -9,9 +7,9 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.INFER_TYPE
 import com.lagradost.cloudstream3.utils.M3u8Helper
 import com.lagradost.cloudstream3.utils.Qualities
-import com.lagradost.cloudstream3.utils.newExtractorLink
 import okhttp3.FormBody
 import okhttp3.RequestBody
+import org.json.JSONObject
 import java.math.BigInteger
 import java.nio.charset.StandardCharsets
 import java.security.MessageDigest
@@ -38,7 +36,6 @@ class PlayKrx18Extractor : ExtractorApi() {
             val regex = Regex("const\\s*id(?:User|file)_enc\\s*=\\s*\"(.*?)\"")
             val matches = regex.findAll(html).map { it.groupValues[1] }.toList()
             if (matches.size < 2) {
-                println("encrypted ids not found")
                 return
             }
             val encryptedFileId = matches[0]
@@ -47,53 +44,53 @@ class PlayKrx18Extractor : ExtractorApi() {
             val decryptedFileId = decryptHexAes(encryptedFileId, "jcLycoRJT6OWjoWspgLMOZwS3aSS0lEn")
             val decryptedUserId = decryptHexAes(encryptedUserId, "PZZ3J3LDbLT0GY7qSA5wW5vchqgpO36O")
 
-            val postContent = JsonObject().apply {
-                addProperty("idfile", decryptedFileId)
-                addProperty("iduser", decryptedUserId)
-                addProperty("domain_play", "https://my.9stream.net")
-                addProperty("platform", "Linux armv81")
-                addProperty("hlsSupport", true)
+            val postContent = JSONObject().apply {
+                put("idfile", decryptedFileId)
+                put("iduser", decryptedUserId)
+                put("domain_play", "https://my.9stream.net")
+                put("platform", "Linux armv81")
+                put("hlsSupport", true)
 
-                val jw = JsonObject()
-                val browser = JsonObject()
-                browser.addProperty("androidNative", false)
-                browser.addProperty("chrome", true)
-                browser.addProperty("edge", false)
-                browser.addProperty("facebook", false)
-                browser.addProperty("firefox", false)
-                browser.addProperty("ie", false)
-                browser.addProperty("msie", false)
-                browser.addProperty("safari", false)
-                val ver = JsonObject()
-                ver.addProperty("version", "137.0.0.0")
-                ver.addProperty("major", 137)
-                ver.addProperty("minor", 0)
-                browser.add("version", ver)
-                jw.add("Browser", browser)
+                val jw = JSONObject()
+                val browser = JSONObject()
+                browser.put("androidNative", false)
+                browser.put("chrome", true)
+                browser.put("edge", false)
+                browser.put("facebook", false)
+                browser.put("firefox", false)
+                browser.put("ie", false)
+                browser.put("msie", false)
+                browser.put("safari", false)
+                val ver = JSONObject()
+                ver.put("version", "137.0.0.0")
+                ver.put("major", 137)
+                ver.put("minor", 0)
+                browser.put("version", ver)
+                jw.put("Browser", browser)
 
-                val os = JsonObject()
-                os.addProperty("android", true)
-                os.addProperty("iOS", false)
-                os.addProperty("mobile", true)
-                os.addProperty("mac", false)
-                os.addProperty("iPad", false)
-                os.addProperty("iPhone", false)
-                os.addProperty("windows", false)
-                os.addProperty("tizen", false)
-                os.addProperty("tizenApp", false)
-                val osver = JsonObject()
-                osver.addProperty("version", "10")
-                osver.addProperty("major", 10)
-                os.add("version", osver)
-                jw.add("OS", os)
+                val os = JSONObject()
+                os.put("android", true)
+                os.put("iOS", false)
+                os.put("mobile", true)
+                os.put("mac", false)
+                os.put("iPad", false)
+                os.put("iPhone", false)
+                os.put("windows", false)
+                os.put("tizen", false)
+                os.put("tizenApp", false)
+                val osver = JSONObject()
+                osver.put("version", "10")
+                osver.put("major", 10)
+                os.put("version", osver)
+                jw.put("OS", os)
 
-                val feats = JsonObject()
-                feats.addProperty("iframe", false)
-                feats.addProperty("passiveEvents", true)
-                feats.addProperty("backgroundLoading", true)
-                jw.add("Features", feats)
+                val feats = JSONObject()
+                feats.put("iframe", false)
+                feats.put("passiveEvents", true)
+                feats.put("backgroundLoading", true)
+                jw.put("Features", feats)
 
-                add("jwplayer", jw)
+                put("jwplayer", jw)
             }
 
             val encryptedPayloadHex = encryptHexAes(postContent.toString(), "vlVbUQhkOhoSfyteyzGeeDzU0BHoeTyZ")
@@ -104,8 +101,8 @@ class PlayKrx18Extractor : ExtractorApi() {
                 .build() as RequestBody
 
             val postRes = app.post("$domainApi/playiframe", requestBody = form, referer = mainUrl).textLarge
-            val json = JsonParser.parseString(postRes).asJsonObject
-            val encryptedData = json.getAsJsonPrimitive("data").asString
+            val json = JSONObject(postRes)
+            val encryptedData = json.getString("data")
 
             val videoUrl = decryptHexAes(encryptedData, "oJwmvmVBajMaRCTklxbfjavpQO7SZpsL")
 
@@ -118,20 +115,19 @@ class PlayKrx18Extractor : ExtractorApi() {
                 ).forEach(callback)
             } else {
                 callback.invoke(
-                    newExtractorLink(
+                    ExtractorLink(
                         source = "$name MP4",
                         name = "$name MP4",
                         url = videoUrl,
-                        type = INFER_TYPE
-                    ) {
-                        this.referer = url
-                        this.quality = Qualities.Unknown.value
-                    }
+                        type = INFER_TYPE,
+                        quality = Qualities.Unknown.value,
+                        referer = url
+                    )
                 )
             }
 
         } catch (e: Exception) {
-            println("Extractor error: ${e.message}")
+            // silently fail
         }
     }
 
