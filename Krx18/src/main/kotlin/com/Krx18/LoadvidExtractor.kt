@@ -2,10 +2,7 @@ package com.KRX18
 
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.SubtitleFile
-import com.lagradost.cloudstream3.utils.ExtractorApi
-import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.INFER_TYPE
-import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.*
 
 class LoadvidExtractor : ExtractorApi() {
     override val name = "Loadvid"
@@ -24,7 +21,7 @@ class LoadvidExtractor : ExtractorApi() {
         val videoUrl = extractVideoUrl(doc)
         if (videoUrl != null) {
             callback.invoke(
-                ExtractorLink(
+                newExtractorLink(
                     source = name,
                     name = "$name MP4",
                     url = videoUrl,
