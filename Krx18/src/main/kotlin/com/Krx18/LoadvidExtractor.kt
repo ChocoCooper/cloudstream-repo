@@ -9,7 +9,6 @@ class LoadvidExtractor : ExtractorApi() {
     override val mainUrl = "https://cdn.loadvid.com"
     override val requiresReferer = true
 
-    @Suppress("DEPRECATION")
     override suspend fun getUrl(
         url: String,
         referer: String?,
@@ -25,11 +24,12 @@ class LoadvidExtractor : ExtractorApi() {
                     source = name,
                     name = "$name MP4",
                     url = videoUrl,
-                    referer = mainUrl,
-                    quality = Qualities.Unknown.value,
-                    type = INFER_TYPE,
-                    headers = mapOf("Referer" to mainUrl)
-                )
+                    type = INFER_TYPE
+                ) {
+                    this.referer = mainUrl
+                    this.quality = Qualities.Unknown.value
+                    this.headers = mapOf("Referer" to mainUrl)
+                }
             )
         }
     }
