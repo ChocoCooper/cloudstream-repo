@@ -2,11 +2,7 @@ package com.KRX18
 
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.SubtitleFile
-import com.lagradost.cloudstream3.utils.ExtractorApi
-import com.lagradost.cloudstream3.utils.ExtractorLink
-import com.lagradost.cloudstream3.utils.INFER_TYPE
-import com.lagradost.cloudstream3.utils.M3u8Helper
-import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.*
 import okhttp3.FormBody
 import okhttp3.RequestBody
 import org.json.JSONObject
@@ -115,7 +111,7 @@ class PlayKrx18Extractor : ExtractorApi() {
                 ).forEach(callback)
             } else {
                 callback.invoke(
-                    ExtractorLink(
+                    newExtractorLink(
                         source = "$name MP4",
                         name = "$name MP4",
                         url = videoUrl,
