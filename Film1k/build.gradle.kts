@@ -4,7 +4,7 @@ version = 5
 cloudstream {
     // All of these properties are optional, you can safely remove them
 
-    description = "Cave of Rare Films"
+    description = "Old Erotic Films"
     language = "en"
     authors = listOf("ChocoCooper")
 
@@ -20,7 +20,7 @@ cloudstream {
     // List of video source types. Users are able to filter for extensions in a given category.
     // You can find a list of available types here:
     // https://recloudstream.github.io/cloudstream/html/app/com.lagradost.cloudstream3/-tv-type/index.html
-    tvTypes = listOf("Movie")
+    tvTypes = listOf("NSFW")
     iconUrl = "https://www.film1k.com/favicon.ico"
     isCrossPlatform = true
 }
