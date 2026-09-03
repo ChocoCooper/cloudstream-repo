@@ -19,7 +19,6 @@ class PlayKrx18Extractor : ExtractorApi() {
     override val requiresReferer = true
     private val domainApi = "https://api-play-240924.playkrx18.site/api/tp1rd"
 
-    @Suppress("DEPRECATION")
     override suspend fun getUrl(
         url: String,
         referer: String?,
@@ -77,7 +76,7 @@ class PlayKrx18Extractor : ExtractorApi() {
                 val osver = JSONObject()
                 osver.put("version", "10")
                 osver.put("major", 10)
-                os.put("version", osver)
+                osver.put("version", osver)
                 jw.put("OS", os)
 
                 val feats = JSONObject()
@@ -115,11 +114,12 @@ class PlayKrx18Extractor : ExtractorApi() {
                         source = "$name MP4",
                         name = "$name MP4",
                         url = videoUrl,
-                        referer = url,
-                        quality = Qualities.Unknown.value,
-                        type = INFER_TYPE,
-                        headers = mapOf("Referer" to mainUrl)
-                    )
+                        type = INFER_TYPE
+                    ) {
+                        this.referer = url
+                        this.quality = Qualities.Unknown.value
+                        this.headers = mapOf("Referer" to mainUrl)
+                    }
                 )
             }
 
