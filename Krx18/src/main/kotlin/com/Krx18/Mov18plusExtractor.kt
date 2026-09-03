@@ -9,7 +9,6 @@ class Mov18plusExtractor : ExtractorApi() {
     override val mainUrl = "https://mov18plus.cloud"
     override val requiresReferer = true
 
-    @Suppress("DEPRECATION")
     override suspend fun getUrl(
         url: String,
         referer: String?,
@@ -34,11 +33,12 @@ class Mov18plusExtractor : ExtractorApi() {
                     source = name,
                     name = "$name MP4",
                     url = videoUrl,
-                    referer = mainUrl,
-                    quality = Qualities.Unknown.value,
-                    type = INFER_TYPE,
-                    headers = mapOf("Referer" to mainUrl)
-                )
+                    type = INFER_TYPE
+                ) {
+                    this.referer = mainUrl
+                    this.quality = Qualities.Unknown.value
+                    this.headers = mapOf("Referer" to mainUrl)
+                }
             )
         }
     }
