@@ -4,11 +4,10 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
-import org.jsoup.select.Elements
 
 class Krx18Provider : MainAPI() {
     override var mainUrl = "https://krx18.com"
-    override var name = "KRX18"
+    override var name = "KRX 18"
     override val hasMainPage = true
     override val hasDownloadSupport = true
     override val vpnStatus = VPNStatus.MightBeNeeded
@@ -18,8 +17,12 @@ class Krx18Provider : MainAPI() {
     private val articleSelector = "#archive-content article, div.items.normal article, div#content article, article.post"
 
     override val mainPage = mainPageOf(
+        "movies" to "Recently added",
+        "genre/eng-sub" to "English SUB",
         "genre/korea" to "Korea",
+        "genre/china" to "China",
         "genre/japan" to "Japan",
+        "genre/thailand" to "Thailand",
         "genre/philippines" to "Philippines"
     )
 
@@ -28,10 +31,10 @@ class Krx18Provider : MainAPI() {
         request: MainPageRequest
     ): HomePageResponse {
         val url = "$mainUrl/${request.data}/?page/$page"
-        logDebug("MainPage URL: $url")
+        println("MainPage URL: $url")
         val document = app.get(url).document
         val articles = document.select(articleSelector)
-        logDebug("Found ${articles.size} articles on main page")
+        println("Found ${articles.size} articles on main page")
         val home = articles.mapNotNull { it.toSearchResult() }
         return newHomePageResponse(
             list = HomePageList(
@@ -53,22 +56,22 @@ class Krx18Provider : MainAPI() {
                 this.posterUrl = posterUrl
             }
         } catch (e: Exception) {
-            logError("Error parsing article: ${e.message}")
+            println("Error parsing article: ${e.message}")
             return null
         }
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
         val url = "$mainUrl/?s=${query.replace(" ", "+")}"
-        logDebug("Search URL: $url")
+        println("Search URL: $url")
         val document = app.get(url).document
         val articles = document.select(articleSelector)
-        logDebug("Found ${articles.size} search results")
+        println("Found ${articles.size} search results")
         return articles.mapNotNull { it.toSearchResult() }
     }
 
     override suspend fun load(url: String): LoadResponse {
-        logDebug("Loading URL: $url")
+        println("Loading URL: $url")
         val document = app.get(url).document
 
         val title = document.selectFirst("div.data h1")?.text()
@@ -86,7 +89,7 @@ class Krx18Provider : MainAPI() {
         // ----- Extract server embed URLs via AJAX (primary) -----
         val embedLinks = mutableSetOf<String>()
         val serverItems = document.select("ul#playeroptionsul li, ul.servers-list li, div.servers-list li, div.server-item")
-        logDebug("Found ${serverItems.size} server items")
+        println("Found ${serverItems.size} server items")
 
         serverItems.forEach { li ->
             val post = li.attr("data-post")
@@ -109,24 +112,24 @@ class Krx18Provider : MainAPI() {
                     val embedUrl = response.embed_url?.let { fixUrl(it) }
                     if (!embedUrl.isNullOrEmpty()) {
                         embedLinks.add(embedUrl)
-                        logDebug("AJAX embed: $embedUrl")
+                        println("AJAX embed: $embedUrl")
                     }
                 } catch (e: Exception) {
-                    logError("AJAX request failed for $post/$nume: ${e.message}")
+                    println("AJAX request failed for $post/$nume: ${e.message}")
                 }
             }
         }
 
         // ----- Fallback: direct iframes or data attributes -----
         if (embedLinks.isEmpty()) {
-            logDebug("No AJAX links found, trying fallback")
+            println("No AJAX links found, trying fallback")
             // Direct iframe from player container
             document.select("div.player-iframe iframe, div#player iframe, div[class*='player'] iframe, div.embed-responsive iframe")
                 .forEach { iframe ->
                     val src = iframe.attr("abs:src")
                     if (src.isNotEmpty() && !src.contains("about:blank")) {
                         embedLinks.add(src)
-                        logDebug("Fallback iframe: $src")
+                        println("Fallback iframe: $src")
                     }
                 }
 
@@ -138,7 +141,7 @@ class Krx18Provider : MainAPI() {
                         val fixed = fixUrl(value)
                         if (fixed.isNotEmpty()) {
                             embedLinks.add(fixed)
-                            logDebug("Fallback data-attr: $fixed")
+                            println("Fallback data-attr: $fixed")
                             break
                         }
                     }
@@ -147,7 +150,7 @@ class Krx18Provider : MainAPI() {
                 if (onclick.isNotEmpty()) {
                     Regex("""['"](https?://[^'"]+)['"]""").find(onclick)?.groupValues?.get(1)?.let {
                         embedLinks.add(fixUrl(it))
-                        logDebug("Fallback onclick: $it")
+                        println("Fallback onclick: $it")
                     }
                 }
             }
@@ -157,14 +160,14 @@ class Krx18Provider : MainAPI() {
                 val src = srcEl.attr("abs:src")
                 if (src.isNotEmpty()) {
                     embedLinks.add(src)
-                    logDebug("Fallback video source: $src")
+                    println("Fallback video source: $src")
                 }
             }
         }
 
         // Store distinct embed URLs in the `data` field (separated by |||)
         val responseData = embedLinks.joinToString("|||")
-        logDebug("Total embed links extracted: ${embedLinks.size}")
+        println("Total embed links extracted: ${embedLinks.size}")
 
         return newMovieLoadResponse(title, url, TvType.NSFW, responseData) {
             this.posterUrl = poster
@@ -181,9 +184,9 @@ class Krx18Provider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val embedUrls = data.split("|||").filter { it.isNotEmpty() }
-        logDebug("loadLinks: processing ${embedUrls.size} embed URLs")
+        println("loadLinks: processing ${embedUrls.size} embed URLs")
         if (embedUrls.isEmpty()) {
-            logError("No embed URLs found in data")
+            println("No embed URLs found in data")
             return false
         }
 
@@ -193,9 +196,9 @@ class Krx18Provider : MainAPI() {
                 // Attempt to load extractor for this URL
                 val result = loadExtractor(embedUrl, subtitleCallback, callback)
                 if (result) success = true
-                logDebug("loadExtractor for $embedUrl returned $result")
+                println("loadExtractor for $embedUrl returned $result")
             } catch (e: Exception) {
-                logError("Error loading extractor for $embedUrl: ${e.message}")
+                println("Error loading extractor for $embedUrl: ${e.message}")
             }
         }
         return success
