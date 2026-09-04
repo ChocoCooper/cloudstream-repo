@@ -55,13 +55,13 @@ class LoadvidExtractor : ExtractorApi() {
             val dataUri = "data:application/vnd.apple.mpegurl;base64,$base64M3u8"
 
             callback.invoke(
-                newExtractorLink(
+                ExtractorLink(
                     source = name,
                     name = name,
                     url = dataUri,
                     referer = url,
                     quality = Qualities.Unknown.value,
-                    isM3u8 = true // Signals ExoPlayer to parse it as HLS
+                    type = ExtractorLinkType.M3U8 // Fixed: Enforces HLS parsing in modern Cloudstream
                 )
             )
         }
