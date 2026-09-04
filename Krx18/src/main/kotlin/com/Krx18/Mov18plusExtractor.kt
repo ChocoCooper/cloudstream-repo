@@ -48,39 +48,30 @@ class Mov18plusExtractor : ExtractorApi() {
     ) {
         val document = app.get(url, referer = referer ?: "$mainUrl/").text
 
-        // 1. Extract Base64 `datas` token
         val datasRegex = Regex("""(?:const|var)\s+datas\s*=\s*["']([^"']+)["']""")
         val rawBase64 = datasRegex.find(document)?.groupValues?.get(1) ?: return
 
-        // 2. Decode using Latin-1 to preserve ciphertext bytes
+        // Decode using Latin-1
         val jsonPayloadString = String(Base64.decode(rawBase64, Base64.DEFAULT), StandardCharsets.ISO_8859_1)
         val payload = parseJson<Mov18Payload>(jsonPayloadString)
         val mediaStr = payload.media ?: return
 
-        // 3. Build the key pattern
         val keyPattern = "${payload.userId}:${payload.slug}:${payload.md5Id}"
-
-        // 4. Generate MD5 Hex digest
         val md5Digest = MessageDigest.getInstance("MD5").digest(keyPattern.toByteArray(StandardCharsets.UTF_8))
         val md5Hex = md5Digest.joinToString("") { "%02x".format(it) }
 
-        // 5. Initialize AES-CTR (NoPadding)
         val keyBytes = md5Hex.toByteArray(StandardCharsets.UTF_8)
         val ivBytes = keyBytes.copyOfRange(0, 16)
 
         val cipher = Cipher.getInstance("AES/CTR/NoPadding")
         cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keyBytes, "AES"), IvParameterSpec(ivBytes))
 
-        // 6. Convert media string to unsigned byte array
         val mediaBytes = ByteArray(mediaStr.length) { i -> (mediaStr[i].code and 0xFF).toByte() }
-
-        // 7. Decrypt ciphertext into UTF-8 JSON
         val decryptedJson = String(cipher.doFinal(mediaBytes), StandardCharsets.UTF_8)
         val mediaData = parseJson<Mov18DecryptedResponse>(decryptedJson)
 
-        val headers = mapOf("Referer" to url)
+        val reqHeaders = mapOf("Referer" to url)
 
-        // 8. Yield the stream links
         mediaData.mp4?.sources?.forEach { source ->
             if (source.status == true && !source.path.isNullOrBlank()) {
                 val streamUrl = if (!source.url.isNullOrBlank()) {
@@ -91,35 +82,30 @@ class Mov18plusExtractor : ExtractorApi() {
 
                 if (streamUrl != null) {
                     val qualityInt = when (source.label?.lowercase()) {
-                        "360p" -> Qualities.P360.value
                         "480p" -> Qualities.P480.value
                         "720p" -> Qualities.P720.value
                         "1080p" -> Qualities.P1080.value
                         else -> Qualities.Unknown.value
                     }
 
-                    // ---- FIX: Detect if the URL is an M3U8 playlist ----
-                    val isM3u8 = try {
-                        // Perform a HEAD request to check Content-Type, or fetch a small part
-                        val headResponse = app.head(streamUrl, headers = headers)
-                        headResponse.headers["Content-Type"]?.contains("application/vnd.apple.mpegurl") == true
-                    } catch (_: Exception) {
-                        // Fallback: check extension or fetch first few bytes
-                        streamUrl.contains(".m3u8") || streamUrl.contains(".m3u")
-                    }
+                    val isM3u8Stream = streamUrl.contains(".m3u8")
+                    
+                    // ExoPlayer Fix: Bypasses the "NoDeclaredBrand" crash by spoofing MP4 extension
+                    val forcedUrl = if (isM3u8Stream) streamUrl else "$streamUrl#.mp4"
+                    val linkType = if (isM3u8Stream) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
 
-                    val linkType = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-
+                    // Compiler Fix: Safely uses the Builder Lambda with correct properties
                     callback.invoke(
-                        ExtractorLink(
+                        newExtractorLink(
                             source = name,
-                            name = "$name ${source.label ?: "video"}",
-                            url = streamUrl,
-                            referer = url,
-                            quality = qualityInt,
-                            type = linkType,
-                            headers = headers
-                        )
+                            name = "$name ${source.label ?: "MP4"}",
+                            url = forcedUrl,
+                            type = linkType
+                        ) {
+                            this.referer = url
+                            this.quality = qualityInt
+                            this.headers = reqHeaders
+                        }
                     )
                 }
             }
