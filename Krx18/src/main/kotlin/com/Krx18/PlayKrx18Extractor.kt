@@ -109,12 +109,13 @@ class PlayKrx18Extractor : ExtractorApi() {
                     headers = mapOf("Origin" to "$mainUrl/")
                 ).forEach(callback)
             } else {
+                // Compiler Fix: Guaranteed ExtractorLinkType resolution
                 callback.invoke(
                     newExtractorLink(
                         source = "$name MP4",
                         name = "$name MP4",
                         url = videoUrl,
-                        type = INFER_TYPE
+                        type = ExtractorLinkType.VIDEO
                     ) {
                         this.referer = url
                         this.quality = Qualities.Unknown.value
@@ -123,12 +124,9 @@ class PlayKrx18Extractor : ExtractorApi() {
                 )
             }
 
-        } catch (_: Exception) {
-            // silently fail
-        }
+        } catch (_: Exception) {}
     }
 
-    // ----- AES helpers (unchanged) -----
     private fun md5(data: ByteArray): ByteArray {
         val md = MessageDigest.getInstance("MD5")
         return md.digest(data)
@@ -155,7 +153,7 @@ class PlayKrx18Extractor : ExtractorApi() {
         val encrypted = android.util.Base64.decode(b64, android.util.Base64.NO_WRAP)
         val salted = "Salted__".toByteArray(StandardCharsets.UTF_8)
         if (!encrypted.copyOfRange(0, 8).contentEquals(salted)) {
-            throw IllegalArgumentException("Invalid encrypted data format")
+            throw IllegalArgumentException("Invalid format")
         }
         val salt = encrypted.copyOfRange(8, 16)
         val ciphertext = encrypted.copyOfRange(16, encrypted.size)
