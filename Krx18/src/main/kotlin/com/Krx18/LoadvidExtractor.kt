@@ -1,10 +1,10 @@
 package com.KRX18
 
-import android.util.Base64
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
+import java.io.File
 
 class LoadvidExtractor : ExtractorApi() {
     override val name = "Loadvid"
@@ -20,14 +20,14 @@ class LoadvidExtractor : ExtractorApi() {
         // 1. Establish session and fetch live HTML
         val document = app.get(url, referer = referer).text
         
-        // 2. Extract Config and Tokens
+        // 2. Extract Laravel configuration and CSRF tokens
         val videoHash = Regex("""videoHash:\s*'([^']+)'""").find(document)?.groupValues?.get(1) ?: return
         val videoToken = Regex("""videoToken:\s*'([^']+)'""").find(document)?.groupValues?.get(1) ?: return
         
         val parsedDoc = Jsoup.parse(document)
         val csrfToken = parsedDoc.selectFirst("meta[name=csrf-token]")?.attr("content") ?: return
 
-        // 3. Execute the Server-Side Resolution POST Request instantly
+        // 3. Execute the Server-Side Resolution POST Request
         val resolveUrl = "$mainUrl/videos/resolve-token"
         val payload = mapOf(
             "token" to videoToken,
@@ -49,19 +49,32 @@ class LoadvidExtractor : ExtractorApi() {
 
         // 4. Process the raw M3U8 Text
         if (m3u8Response.contains("#EXTM3U")) {
-            // Because the segments use absolute URLs (https://...), we can feed the raw text 
-            // directly into ExoPlayer as a Base64 Data URI without needing a local proxy server.
-            val base64M3u8 = Base64.encodeToString(m3u8Response.toByteArray(), Base64.NO_WRAP)
-            val dataUri = "data:application/vnd.apple.mpegurl;base64,$base64M3u8"
+            
+            // Bypass Cronet data: URI block by saving to local app cache.
+            // Note: We use `System.getProperty("java.io.tmpdir")` which evaluates to the app's safe cache directory.
+            val cacheDir = File(System.getProperty("java.io.tmpdir") ?: "/tmp")
+            val tempM3u8File = File.createTempFile("loadvid_manifest_", ".m3u8", cacheDir)
+            tempM3u8File.writeText(m3u8Response)
+            tempM3u8File.deleteOnExit() // Automatic cleanup
+            
+            val localFileUri = "file://${tempM3u8File.absolutePath}"
+
+            // CRITICAL: We pass the exact Headers that ExoPlayer must attach when fetching the chunks inside the M3U8.
+            val exoHeaders = mapOf(
+                "Referer" to mainUrl,
+                "Origin" to mainUrl,
+                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            )
 
             callback.invoke(
-                ExtractorLink(
+                newExtractorLink(
                     source = name,
-                    name = name,
-                    url = dataUri,
-                    referer = url,
+                    name = "$name Auto",
+                    url = localFileUri,
+                    referer = mainUrl,
                     quality = Qualities.Unknown.value,
-                    type = ExtractorLinkType.M3U8 // Fixed: Enforces HLS parsing in modern Cloudstream
+                    type = ExtractorLinkType.M3U8,
+                    headers = exoHeaders // Forces ExoPlayer to use these headers for .png segments
                 )
             )
         }
