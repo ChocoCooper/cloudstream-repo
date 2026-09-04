@@ -1,7 +1,7 @@
 {
-  "name": "ChocoCooper Repo",
+  "name": "ChocoCooper's Repo",
   "iconUrl": "https://raw.githubusercontent.com/ChocoCooper/cloudstream-repo/refs/heads/builds/img.png",
-  "description": "ChocoCooper Repo",
+  "description": "ChocoCooper's Repo",
   "manifestVersion": 1,
   "pluginLists": [
     "https://raw.githubusercontent.com/ChocoCooper/cloudstream-repo/refs/heads/builds/plugins.json"
