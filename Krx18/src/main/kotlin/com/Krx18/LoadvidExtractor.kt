@@ -50,31 +50,34 @@ class LoadvidExtractor : ExtractorApi() {
         // 4. Process the raw M3U8 Text
         if (m3u8Response.contains("#EXTM3U")) {
             
-            // Bypass Cronet data: URI block by saving to local app cache.
-            // Note: We use `System.getProperty("java.io.tmpdir")` which evaluates to the app's safe cache directory.
+            // THE FIX: Bypassing Cronet's ERR_UNKNOWN_URL_SCHEME crash.
+            // Cronet blocks data: URIs, but Cloudstream natively allows file:// URIs for local playback.
+            // We write the manifest to the Android cache directory; ExoPlayer will read it and 
+            // extract the absolute HTTPS chunk URLs automatically.
+            
             val cacheDir = File(System.getProperty("java.io.tmpdir") ?: "/tmp")
             val tempM3u8File = File.createTempFile("loadvid_manifest_", ".m3u8", cacheDir)
             tempM3u8File.writeText(m3u8Response)
-            tempM3u8File.deleteOnExit() // Automatic cleanup
+            tempM3u8File.deleteOnExit() // Android will auto-cleanup this file
             
             val localFileUri = "file://${tempM3u8File.absolutePath}"
 
-            // CRITICAL: We pass the exact Headers that ExoPlayer must attach when fetching the chunks inside the M3U8.
             val exoHeaders = mapOf(
                 "Referer" to mainUrl,
                 "Origin" to mainUrl,
                 "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
             )
 
+            // Using the non-deprecated primary ExtractorLink constructor
             callback.invoke(
-                newExtractorLink(
+                ExtractorLink(
                     source = name,
                     name = "$name Auto",
                     url = localFileUri,
                     referer = mainUrl,
                     quality = Qualities.Unknown.value,
                     type = ExtractorLinkType.M3U8,
-                    headers = exoHeaders // Forces ExoPlayer to use these headers for .png segments
+                    headers = exoHeaders
                 )
             )
         }
