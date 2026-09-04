@@ -1,8 +1,12 @@
 package com.KRX18
 
-import com.lagradost.cloudstream3.app
+import android.util.Base64
 import com.lagradost.cloudstream3.SubtitleFile
-import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.utils.ExtractorApi
+import com.lagradost.cloudstream3.utils.ExtractorLink
+import com.lagradost.cloudstream3.utils.Qualities
+import org.jsoup.Jsoup
 
 class LoadvidExtractor : ExtractorApi() {
     override val name = "Loadvid"
@@ -15,53 +19,53 @@ class LoadvidExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        val doc = app.get(url, referer = referer ?: "https://krx18.com/").document
+        // 1. Establish session and fetch live HTML
+        val document = app.get(url, referer = referer).text
+        
+        // 2. Extract Config and Tokens
+        val videoHash = Regex("""videoHash:\s*'([^']+)'""").find(document)?.groupValues?.get(1) ?: return
+        val videoToken = Regex("""videoToken:\s*'([^']+)'""").find(document)?.groupValues?.get(1) ?: return
+        
+        val parsedDoc = Jsoup.parse(document)
+        val csrfToken = parsedDoc.selectFirst("meta[name=csrf-token]")?.attr("content") ?: return
 
-        val videoUrl = extractVideoUrl(doc)
-        if (videoUrl != null) {
+        // 3. Execute the Server-Side Resolution POST Request instantly
+        val resolveUrl = "$mainUrl/videos/resolve-token"
+        val payload = mapOf(
+            "token" to videoToken,
+            "hash" to videoHash
+        )
+
+        val m3u8Response = app.post(
+            resolveUrl,
+            headers = mapOf(
+                "Content-Type" to "application/json",
+                "X-CSRF-TOKEN" to csrfToken,
+                "Accept" to "application/vnd.apple.mpegurl,*/*",
+                "X-Requested-With" to "XMLHttpRequest",
+                "Referer" to url,
+                "Origin" to mainUrl
+            ),
+            json = payload
+        ).text
+
+        // 4. Process the raw M3U8 Text
+        if (m3u8Response.contains("#EXTM3U")) {
+            // Because the segments use absolute URLs (https://...), we can feed the raw text 
+            // directly into ExoPlayer as a Base64 Data URI without needing a local proxy server.
+            val base64M3u8 = Base64.encodeToString(m3u8Response.toByteArray(), Base64.NO_WRAP)
+            val dataUri = "data:application/vnd.apple.mpegurl;base64,$base64M3u8"
+
             callback.invoke(
-                newExtractorLink(
+                ExtractorLink(
                     source = name,
-                    name = "$name MP4",
-                    url = videoUrl,
-                    type = INFER_TYPE
-                ) {
-                    this.referer = mainUrl
-                    this.quality = Qualities.Unknown.value
-                    this.headers = mapOf("Referer" to mainUrl)
-                }
+                    name = name,
+                    url = dataUri,
+                    referer = url,
+                    quality = Qualities.Unknown.value,
+                    isM3u8 = true // Signals ExoPlayer to parse it as HLS
+                )
             )
         }
-    }
-
-    private suspend fun extractVideoUrl(doc: org.jsoup.nodes.Document): String? {
-        for (script in doc.select("script:not([src])")) {
-            val data = script.data()
-            val patterns = listOf(
-                Regex(""""file"\s*:\s*"([^"]+)""""),
-                Regex(""""src"\s*:\s*"([^"]+)""""),
-                Regex(""""video"\s*:\s*"([^"]+)""""),
-                Regex("""https?://[^"'\s]+\.(?:mp4|m3u8|mkv|webm)""")
-            )
-            for (pat in patterns) {
-                pat.find(data)?.let {
-                    val url = if (pat.pattern.contains("https?")) it.value else it.groupValues[1]
-                    return url
-                }
-            }
-        }
-
-        val jsUrl = doc.select("script[src*='video-player-main']").firstOrNull()?.attr("abs:src")
-        if (jsUrl != null) {
-            try {
-                val jsContent = app.get(jsUrl, referer = mainUrl).text
-                val pattern = Regex("""https?://[^"'\s]+\.(?:mp4|m3u8|mkv|webm)""")
-                pattern.find(jsContent)?.value?.let { return it }
-            } catch (_: Exception) { }
-        }
-
-        doc.select("source[src], video[src]").firstOrNull()?.attr("abs:src")?.let { return it }
-
-        return null
     }
 }
