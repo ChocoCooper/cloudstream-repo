@@ -4,26 +4,22 @@ import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.nodes.Element
+import org.jsoup.select.Elements
 
-/**
- * KRX 18 Provider – fetches NSFW movies.
- * Uses AJAX to retrieve server embed links and stores them in the load response's `data` field.
- */
 class Krx18Provider : MainAPI() {
     override var mainUrl = "https://krx18.com"
-    override var name = "KRX 18"
+    override var name = "KRX18"
     override val hasMainPage = true
     override val hasDownloadSupport = true
     override val vpnStatus = VPNStatus.MightBeNeeded
     override val supportedTypes = setOf(TvType.NSFW)
 
+    // Common selector for articles on both main page and search results
+    private val articleSelector = "#archive-content article, div.items.normal article, div#content article, article.post"
+
     override val mainPage = mainPageOf(
-        "movies" to "Recently added",
-        "genre/eng-sub" to "English SUB",
         "genre/korea" to "Korea",
-        "genre/china" to "China",
         "genre/japan" to "Japan",
-        "genre/thailand" to "Thailand",
         "genre/philippines" to "Philippines"
     )
 
@@ -31,45 +27,68 @@ class Krx18Provider : MainAPI() {
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
-        val document = app.get("$mainUrl/${request.data}/?page/$page").document
-        val home = document.select("#archive-content article, div.items.normal article")
-            .map { it.toSearchResult() }
+        val url = "$mainUrl/${request.data}/?page/$page"
+        logDebug("MainPage URL: $url")
+        val document = app.get(url).document
+        val articles = document.select(articleSelector)
+        logDebug("Found ${articles.size} articles on main page")
+        val home = articles.mapNotNull { it.toSearchResult() }
         return newHomePageResponse(
             list = HomePageList(
                 name = request.name,
                 list = home,
                 isHorizontalImages = false
             ),
-            hasNext = true
+            hasNext = home.isNotEmpty()
         )
     }
 
-    private fun Element.toSearchResult(): SearchResponse {
-        val title = this.select("h3").text()
-        val href = fixUrl(this.select("h3 a").attr("href"))
-        val posterUrl = fixUrlNull(this.select("img").attr("src"))
-        return newMovieSearchResponse(title, href, TvType.Movie) {
-            this.posterUrl = posterUrl
+    private fun Element.toSearchResult(): SearchResponse? {
+        try {
+            val linkEl = this.selectFirst("h3 a") ?: this.selectFirst("a")
+            val href = linkEl?.attr("abs:href") ?: return null
+            val title = linkEl.text().ifEmpty { this.selectFirst("img")?.attr("alt") ?: "Unknown" }
+            val posterUrl = this.selectFirst("img")?.attr("abs:src")
+            return newMovieSearchResponse(title, href, TvType.Movie) {
+                this.posterUrl = posterUrl
+            }
+        } catch (e: Exception) {
+            logError("Error parsing article: ${e.message}")
+            return null
         }
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val document = app.get("$mainUrl/search/videos?search_query=$query").document
-        return document.select("div.card.border-0").map { it.toSearchResult() }
+        val url = "$mainUrl/?s=${query.replace(" ", "+")}"
+        logDebug("Search URL: $url")
+        val document = app.get(url).document
+        val articles = document.select(articleSelector)
+        logDebug("Found ${articles.size} search results")
+        return articles.mapNotNull { it.toSearchResult() }
     }
 
     override suspend fun load(url: String): LoadResponse {
+        logDebug("Loading URL: $url")
         val document = app.get(url).document
 
-        val title = document.selectFirst("div.data h1")?.text() ?: "Unknown"
-        val poster = document.selectFirst("meta[property=og:image]")?.attr("content")?.trim() ?: ""
-        val tags = document.select("div:nth-child(2) > div.video-details__item_links a").map { it.text() }
-        val description = document.selectFirst("div.wp-content p")?.text()?.trim() ?: "No description"
-        val recommendations = document.select("div.card.border-0").map { it.toSearchResult() }
+        val title = document.selectFirst("div.data h1")?.text()
+            ?: document.selectFirst("h1.entry-title")?.text()
+            ?: "Unknown"
+        val poster = document.selectFirst("meta[property=og:image]")?.attr("content")?.trim()
+            ?: document.selectFirst("div.post-thumbnail img")?.attr("abs:src")
+            ?: ""
+        val tags = document.select("div:nth-child(2) > div.video-details__item_links a, .tags-links a")
+            .map { it.text() }
+        val description = document.selectFirst("div.wp-content p, div.entry-content p")?.text()?.trim()
+            ?: "No description"
+        val recommendations = document.select(articleSelector).mapNotNull { it.toSearchResult() }
 
-        // ----- Extract server embed URLs via AJAX -----
-        val embedLinks = mutableListOf<String>()
-        document.select("ul#playeroptionsul li").forEach { li ->
+        // ----- Extract server embed URLs via AJAX (primary) -----
+        val embedLinks = mutableSetOf<String>()
+        val serverItems = document.select("ul#playeroptionsul li, ul.servers-list li, div.servers-list li, div.server-item")
+        logDebug("Found ${serverItems.size} server items")
+
+        serverItems.forEach { li ->
             val post = li.attr("data-post")
             val nume = li.attr("data-nume")
             val type = li.attr("data-type")
@@ -87,47 +106,65 @@ class Krx18Provider : MainAPI() {
                         headers = mapOf("X-Requested-With" to "XMLHttpRequest")
                     ).parsed<ResponseHash>()
 
-                    val embedUrl = response.embed_url
-                    if (!embedUrl.isNullOrEmpty() && !embedLinks.contains(embedUrl)) {
+                    val embedUrl = response.embed_url?.let { fixUrl(it) }
+                    if (!embedUrl.isNullOrEmpty()) {
                         embedLinks.add(embedUrl)
+                        logDebug("AJAX embed: $embedUrl")
                     }
-                } catch (_: Exception) {
-                    // Skip failed server
+                } catch (e: Exception) {
+                    logError("AJAX request failed for $post/$nume: ${e.message}")
                 }
             }
         }
 
-        // ----- Fallback: direct iframes or server spans (if AJAX fails) -----
+        // ----- Fallback: direct iframes or data attributes -----
         if (embedLinks.isEmpty()) {
-            // Direct iframe (default player)
-            document.select("div.player-iframe iframe, div#player iframe, div[class*='player'] iframe")
+            logDebug("No AJAX links found, trying fallback")
+            // Direct iframe from player container
+            document.select("div.player-iframe iframe, div#player iframe, div[class*='player'] iframe, div.embed-responsive iframe")
                 .forEach { iframe ->
                     val src = iframe.attr("abs:src")
                     if (src.isNotEmpty() && !src.contains("about:blank")) {
                         embedLinks.add(src)
+                        logDebug("Fallback iframe: $src")
                     }
                 }
 
-            // Server spans with data‑link / onclick
+            // Server spans with data-link / onclick
             document.select("span.server, div.server, [class*='server']").forEach { elem ->
-                for (attr in listOf("data-link", "data-src", "data-url", "data-href")) {
+                for (attr in listOf("data-link", "data-src", "data-url", "data-href", "data-embed")) {
                     val value = elem.attr(attr)
                     if (value.isNotEmpty()) {
-                        embedLinks.add(value)
-                        break
+                        val fixed = fixUrl(value)
+                        if (fixed.isNotEmpty()) {
+                            embedLinks.add(fixed)
+                            logDebug("Fallback data-attr: $fixed")
+                            break
+                        }
                     }
                 }
                 val onclick = elem.attr("onclick")
                 if (onclick.isNotEmpty()) {
                     Regex("""['"](https?://[^'"]+)['"]""").find(onclick)?.groupValues?.get(1)?.let {
-                        embedLinks.add(it)
+                        embedLinks.add(fixUrl(it))
+                        logDebug("Fallback onclick: $it")
                     }
+                }
+            }
+
+            // Also check for video source elements (sometimes directly embedded)
+            document.select("video source, source[src]").forEach { srcEl ->
+                val src = srcEl.attr("abs:src")
+                if (src.isNotEmpty()) {
+                    embedLinks.add(src)
+                    logDebug("Fallback video source: $src")
                 }
             }
         }
 
-        // Store all embed URLs in the `data` field (separated by |||)
-        val responseData = embedLinks.distinct().joinToString("|||")
+        // Store distinct embed URLs in the `data` field (separated by |||)
+        val responseData = embedLinks.joinToString("|||")
+        logDebug("Total embed links extracted: ${embedLinks.size}")
 
         return newMovieLoadResponse(title, url, TvType.NSFW, responseData) {
             this.posterUrl = poster
@@ -144,10 +181,24 @@ class Krx18Provider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val embedUrls = data.split("|||").filter { it.isNotEmpty() }
-        embedUrls.forEach { embedUrl ->
-            loadExtractor(embedUrl, subtitleCallback, callback)
+        logDebug("loadLinks: processing ${embedUrls.size} embed URLs")
+        if (embedUrls.isEmpty()) {
+            logError("No embed URLs found in data")
+            return false
         }
-        return true
+
+        var success = false
+        embedUrls.forEach { embedUrl ->
+            try {
+                // Attempt to load extractor for this URL
+                val result = loadExtractor(embedUrl, subtitleCallback, callback)
+                if (result) success = true
+                logDebug("loadExtractor for $embedUrl returned $result")
+            } catch (e: Exception) {
+                logError("Error loading extractor for $embedUrl: ${e.message}")
+            }
+        }
+        return success
     }
 
     // ----- JSON response from AJAX -----
@@ -156,4 +207,12 @@ class Krx18Provider : MainAPI() {
         @JsonProperty("key") val key: String? = null,
         @JsonProperty("type") val type: String? = null
     )
+
+    // Helper to fix relative URLs
+    private fun fixUrl(url: String): String {
+        if (url.startsWith("//")) return "https:$url"
+        if (url.startsWith("http")) return url
+        if (url.startsWith("/")) return "$mainUrl$url"
+        return url
+    }
 }
