@@ -52,15 +52,15 @@ class Mov18plusExtractor : ExtractorApi() {
         val datasRegex = Regex("""(?:const|var)\s+datas\s*=\s*["']([^"']+)["']""")
         val rawBase64 = datasRegex.find(document)?.groupValues?.get(1) ?: return
 
-        // 2. Decode using Latin-1 (ISO-8859-1) to preserve ciphertext bytes!
+        // 2. Decode using Latin-1 to preserve ciphertext bytes
         val jsonPayloadString = String(Base64.decode(rawBase64, Base64.DEFAULT), StandardCharsets.ISO_8859_1)
         val payload = parseJson<Mov18Payload>(jsonPayloadString)
         val mediaStr = payload.media ?: return
 
-        // 3. Build the exact key pattern we brute-forced
+        // 3. Build the key pattern
         val keyPattern = "${payload.userId}:${payload.slug}:${payload.md5Id}"
 
-        // 4. Generate MD5 Hex digest of the key pattern
+        // 4. Generate MD5 Hex digest
         val md5Digest = MessageDigest.getInstance("MD5").digest(keyPattern.toByteArray(StandardCharsets.UTF_8))
         val md5Hex = md5Digest.joinToString("") { "%02x".format(it) }
 
@@ -71,7 +71,7 @@ class Mov18plusExtractor : ExtractorApi() {
         val cipher = Cipher.getInstance("AES/CTR/NoPadding")
         cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keyBytes, "AES"), IvParameterSpec(ivBytes))
 
-        // 6. Convert media string back to unsigned byte array safely
+        // 6. Convert media string to unsigned byte array
         val mediaBytes = ByteArray(mediaStr.length) { i -> (mediaStr[i].code and 0xFF).toByte() }
 
         // 7. Decrypt ciphertext into UTF-8 JSON
@@ -91,19 +91,29 @@ class Mov18plusExtractor : ExtractorApi() {
 
                 if (streamUrl != null) {
                     val qualityInt = when (source.label?.lowercase()) {
+                        "360p" -> Qualities.P360.value
                         "480p" -> Qualities.P480.value
                         "720p" -> Qualities.P720.value
                         "1080p" -> Qualities.P1080.value
                         else -> Qualities.Unknown.value
                     }
 
-                    // Fixed: Explicitly declare the enum type based on the file extension
-                    val linkType = if (streamUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                    // ---- FIX: Detect if the URL is an M3U8 playlist ----
+                    val isM3u8 = try {
+                        // Perform a HEAD request to check Content-Type, or fetch a small part
+                        val headResponse = app.head(streamUrl, headers = headers)
+                        headResponse.headers["Content-Type"]?.contains("application/vnd.apple.mpegurl") == true
+                    } catch (_: Exception) {
+                        // Fallback: check extension or fetch first few bytes
+                        streamUrl.contains(".m3u8") || streamUrl.contains(".m3u")
+                    }
+
+                    val linkType = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
 
                     callback.invoke(
                         ExtractorLink(
                             source = name,
-                            name = "$name ${source.label ?: "MP4"}",
+                            name = "$name ${source.label ?: "video"}",
                             url = streamUrl,
                             referer = url,
                             quality = qualityInt,
