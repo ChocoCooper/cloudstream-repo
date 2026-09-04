@@ -97,14 +97,17 @@ class Mov18plusExtractor : ExtractorApi() {
                         else -> Qualities.Unknown.value
                     }
 
+                    // Fixed: Explicitly declare the enum type based on the file extension
+                    val linkType = if (streamUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+
                     callback.invoke(
-                        newExtractorLink(
+                        ExtractorLink(
                             source = name,
                             name = "$name ${source.label ?: "MP4"}",
                             url = streamUrl,
                             referer = url,
                             quality = qualityInt,
-                            isM3u8 = streamUrl.contains(".m3u8"),
+                            type = linkType,
                             headers = headers
                         )
                     )
