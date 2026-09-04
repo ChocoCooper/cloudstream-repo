@@ -4,7 +4,6 @@ import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.*
 import org.jsoup.Jsoup
-import java.io.File
 
 class LoadvidExtractor : ExtractorApi() {
     override val name = "Loadvid"
@@ -46,9 +45,12 @@ class LoadvidExtractor : ExtractorApi() {
             json = payload
         ).text
 
-        if (!m3u8Content.contains("#EXTM3U")) return
+        if (!m3u8Content.contains("#EXTM3U")) {
+            println("Loadvid: Response is not a valid M3U8 manifest.")
+            return
+        }
 
-        // 3. Host the manifest via local HTTP server (so ExoPlayer can read it)
+        // 3. Serve the manifest via local HTTP server (to avoid Cronet file:// issues)
         val localServer = LocalHttpServer()
         val manifestPath = "/loadvid_${System.currentTimeMillis()}.m3u8"
         localServer.serve(manifestPath, m3u8Content)
@@ -64,11 +66,12 @@ class LoadvidExtractor : ExtractorApi() {
         // 4. Use M3u8Helper to parse and yield the streams
         M3u8Helper.generateM3u8(
             source = name,
-            url = manifestUrl,
+            streamUrl = manifestUrl,
             referer = mainUrl,
             headers = headers
         ).forEach(callback)
 
-        // Note: The local server will be automatically cleaned up when the app stops.
+        // The local server will be cleaned up automatically when the app stops.
+        println("Loadvid: Successfully served manifest via local server.")
     }
 }
