@@ -247,7 +247,6 @@ class XmaalProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse? {
-        // 1. Fetch clicked episode page to find the parent series/web-series link.
         val epDoc = app.get(url).document
 
         var seriesUrl: String? = null
@@ -257,28 +256,29 @@ class XmaalProvider : MainAPI() {
             val full = if (href.startsWith("http")) href else domainOf(url) + href
             val pathParts = full.substringAfter("://").substringAfter("/").split("/").filter { it.isNotBlank() }
 
-            // "series"/"web-series" root alone (size 1) is the category index, not a specific title.
             if ((pathParts.contains("series") || pathParts.contains("web-series")) && pathParts.size > 1) {
                 seriesUrl = full
                 break
             }
         }
 
-        if (seriesUrl == null) return null
+        val clickedTitle = epDoc.selectFirst("h1, h2")?.text()?.trim() ?: "Unknown Title"
+        val clickedPoster = extractSeriesPoster(epDoc, url, clickedTitle)
 
-        // The clicked episode page's own og:image is a real per-post image (unlike a
-        // taxonomy/archive page's og:image, which some mirrors default to a sitewide
-        // logo - see extractSeriesPoster's docstring). It's also the same image already
-        // shown in search results, so reuse it as the primary backdrop/poster candidate.
-        val episodePoster = extractSeriesPoster(epDoc, url, epDoc.selectFirst("h1, h2")?.text()?.trim() ?: "")
+        // If no series/web-series link is found, treat the media as a standalone movie/short film
+        if (seriesUrl == null) {
+            return newMovieLoadResponse(clickedTitle, url, TvType.Movie, url) {
+                this.posterUrl = clickedPoster
+                this.backgroundPosterUrl = clickedPoster
+                this.plot = "" // explicitly disabling plot/description
+            }
+        }
 
-        // 2. Fetch the actual series page.
         val seriesDoc = app.get(seriesUrl).document
-        val title = seriesDoc.selectFirst("h1, h2")?.text()?.trim() ?: "Unknown Series"
-        val seriesPoster = extractSeriesPoster(seriesDoc, seriesUrl, title)
-        val poster = episodePoster ?: seriesPoster
+        val seriesTitle = seriesDoc.selectFirst("h1, h2")?.text()?.trim() ?: clickedTitle
+        val seriesPoster = extractSeriesPoster(seriesDoc, seriesUrl, seriesTitle)
+        val poster = clickedPoster ?: seriesPoster
 
-        // 3. Extract episodes using the same per-site card extractor as search/mainPage.
         val episodesList = mutableListOf<Episode>()
         val seenEpTitles = mutableSetOf<String>()
 
@@ -292,21 +292,28 @@ class XmaalProvider : MainAPI() {
 
             val epSlug = epUrl.trimEnd('/').substringAfterLast("/")
             episodesList.add(
-                newEpisode(epSlug) { // data = slug (see loadLinks - re-extracts the last
-                    // path segment defensively in case the framework resolves this
-                    // against mainUrl before loadLinks receives it)
+                newEpisode(epSlug) { 
                     this.name = epTitle
                     this.posterUrl = fixImageUrl(posterRaw, seriesUrl)
                 }
             )
         }
 
-        // Season-aware sort: all of "Episode 1,2,3.." first, then "2 Episode 1,2,3..", etc.
+        // If it looks like a series but extracting episodes completely failed, fallback to standalone movie
+        if (episodesList.isEmpty()) {
+            return newMovieLoadResponse(clickedTitle, url, TvType.Movie, url) {
+                this.posterUrl = poster
+                this.backgroundPosterUrl = poster
+                this.plot = "" // explicitly disabling plot/description
+            }
+        }
+
         val sortedEpisodes = episodesList.sortedWith(SeasonAwareComparator())
 
-        return newTvSeriesLoadResponse(title, url, TvType.TvSeries, sortedEpisodes) {
+        return newTvSeriesLoadResponse(seriesTitle, url, TvType.TvSeries, sortedEpisodes) {
             this.posterUrl = poster
             this.backgroundPosterUrl = poster
+            this.plot = "" // explicitly disabling plot/description
         }
     }
 
@@ -316,6 +323,8 @@ class XmaalProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        // By handling the URL this way, data strings containing the full raw URL 
+        // fallback (for standalone shortfilms) will be safely destructured into just the slug.
         val slug = data.trimEnd('/').substringAfterLast("/")
 
         val mirrorUrls = mirrors.associateWith { site ->
@@ -329,12 +338,6 @@ class XmaalProvider : MainAPI() {
                         val html = app.get(mirrorUrl).text
                         val sourceName = domainOf(site).removePrefix("https://").removePrefix("http://")
 
-                        // Some mirrors embed the same video url 2-3 times on one page
-                        // (<video><source>, then again in JSON-LD "embedUrl"/"contentUrl");
-                        // others may expose a handful of genuinely different urls (quality
-                        // variants, alternate signed copies). Since every link is labeled
-                        // Unknown quality, showing more than one per mirror is indistinguishable
-                        // from a plain duplicate - only the first working url is surfaced here.
                         val videoUrl = streamPattern.findAll(html)
                             .map { Parser.unescapeEntities(it.groupValues[1], false) }
                             .firstOrNull()
@@ -350,8 +353,6 @@ class XmaalProvider : MainAPI() {
                                     type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                 ) {
                                     this.referer = mirrorUrl
-                                    // Unknown rather than a guessed resolution - we never actually
-                                    // verified the real quality, so don't show a false number.
                                     this.quality = Qualities.Unknown.value
                                 }
                             )
