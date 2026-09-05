@@ -16,13 +16,6 @@ import java.net.URLDecoder
 
 class XmaalProvider : MainAPI() {
 
-    /**
-     * EVERY domain used anywhere in this provider is defined here ONCE. If any
-     * mirror changes its domain, update it in this one place - nothing else
-     * in the file needs to change (mirrors list, mainPage categories, and all
-     * dispatch logic in extractCards()/fixImageUrl() reference these constants
-     * rather than hardcoded strings).
-     */
     private object Domains {
         const val OTTDUDE = "https://ottdude.com"
         const val MAALVDO = "https://maalvdo.net"
@@ -38,9 +31,6 @@ class XmaalProvider : MainAPI() {
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.NSFW)
 
-    /** All 5 mirrors are treated as equal fallback sources for both search
-     * results and streams. loadLinks() labels each ExtractorLink by its own
-     * domain name (confirmed against real search-page HTML from every site). */
     private val mirrors = listOf(
         Domains.OTTDUDE,
         Domains.MAALVDO,
@@ -58,12 +48,25 @@ class XmaalProvider : MainAPI() {
 
     private val styleUrlRegex = Regex("url\\((['\"]?)(.*?)\\1\\)")
 
-    // Any quoted string ending in mp4/m3u8 - deliberately NOT anchored to a
-    // preceding src=/file=/source= keyword, since different mirrors embed the
-    // video url under different JS variable names (url:, embedUrl", etc.).
     private val streamPattern = Regex("[\"'](https?://[^\"']+\\.(?:mp4|m3u8)[^\"']*)[\"']")
 
     private val episodeRegex = Regex("^(.*?)(?:\\s+(\\d+))?\\s+Episode\\s+(\\d+)\\s*$", RegexOption.IGNORE_CASE)
+
+    // Only matches "Episode {num}" along with optional preceding delimiters (-, :, etc)
+    private val titleTrimRegex = Regex(
+        """(?i)(?:[-:|–—]\s*)?\bEpisode\s*\d+\b"""
+    )
+
+    private fun cleanTitle(title: String): String {
+        val cleaned = title
+            .replace(titleTrimRegex, "")
+            .replace(Regex("""\(\s*\)|\[\s*]"""), "") // Removes empty remaining brackets
+            .replace(Regex("""[\s\-_:|–—]+$"""), "")  // Trims trailing hyphens, colons, spaces
+            .replace(Regex("""^[\s\-_:|–—]+"""), "")  // Trims leading hyphens, colons, spaces
+            .replace(Regex("""\s+"""), " ")
+            .trim()
+        return if (cleaned.isBlank()) title.trim() else cleaned
+    }
 
     private fun normalizeTitle(title: String): String =
         title.lowercase().replace(Regex("[^a-z0-9]"), "")
@@ -73,15 +76,6 @@ class XmaalProvider : MainAPI() {
         return url.substring(0, protocolEnd) + url.substring(protocolEnd).substringBefore("/")
     }
 
-    /**
-     * Resolves any image reference to a real, directly-loadable url:
-     *  - Next.js `/_next/image?url=...` proxy paths (xmaza2.net) are decoded
-     *    straight to the upstream CDN url rather than depending on the
-     *    mirror's own resize proxy having a full host attached.
-     *  - protocol-relative ("//") and root-relative ("/") paths are resolved
-     *    against the page's own domain.
-     *  - inline base64 placeholders ("data:") are dropped entirely.
-     */
     private fun fixImageUrl(raw: String?, pageUrl: String): String? {
         if (raw.isNullOrBlank()) return null
         val url = raw.trim()
@@ -201,9 +195,10 @@ class XmaalProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val document = app.get(request.data).document
         val home = extractCards(document, request.data).mapNotNull { (title, hrefRaw, posterRaw) ->
+            val clean = cleanTitle(title)
             val href = resolveHref(hrefRaw, request.data)
-            if (title.isBlank() || href.isBlank()) return@mapNotNull null
-            newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
+            if (clean.isBlank() || href.isBlank()) return@mapNotNull null
+            newTvSeriesSearchResponse(clean, href, TvType.TvSeries) {
                 this.posterUrl = fixImageUrl(posterRaw, request.data)
             }
         }
@@ -224,13 +219,14 @@ class XmaalProvider : MainAPI() {
                         val doc = app.get(searchUrl).document
 
                         extractCards(doc, site).forEach { (title, hrefRaw, posterRaw) ->
-                            val key = normalizeTitle(title)
+                            val clean = cleanTitle(title)
+                            val key = normalizeTitle(clean)
                             val href = resolveHref(hrefRaw, site)
                             if (key.isBlank() || href.isBlank()) return@forEach
 
                             mutex.withLock {
                                 if (!results.containsKey(key)) {
-                                    results[key] = newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
+                                    results[key] = newTvSeriesSearchResponse(clean, href, TvType.TvSeries) {
                                         this.posterUrl = fixImageUrl(posterRaw, site)
                                     }
                                 }
@@ -249,6 +245,10 @@ class XmaalProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse? {
         val epDoc = app.get(url).document
 
+        // Use the title from the clicked episode page and clean episode labels
+        val rawClickedTitle = epDoc.selectFirst("h1, .entry-title, h2")?.text()?.trim() ?: "Unknown Title"
+        val mediaTitle = cleanTitle(rawClickedTitle)
+
         var seriesUrl: String? = null
         for (a in epDoc.select("a")) {
             val href = a.attr("href")
@@ -262,21 +262,19 @@ class XmaalProvider : MainAPI() {
             }
         }
 
-        val clickedTitle = epDoc.selectFirst("h1, h2")?.text()?.trim() ?: "Unknown Title"
-        val clickedPoster = extractSeriesPoster(epDoc, url, clickedTitle)
+        val clickedPoster = extractSeriesPoster(epDoc, url, rawClickedTitle)
 
-        // If no series/web-series link is found, treat the media as a standalone movie/short film
+        // Fallback for short films or standalone single media
         if (seriesUrl == null) {
-            return newMovieLoadResponse(clickedTitle, url, TvType.Movie, url) {
+            return newMovieLoadResponse(mediaTitle, url, TvType.Movie, url) {
                 this.posterUrl = clickedPoster
                 this.backgroundPosterUrl = clickedPoster
-                this.plot = "" // explicitly disabling plot/description
+                this.plot = mediaTitle // Set to trimmed title
             }
         }
 
         val seriesDoc = app.get(seriesUrl).document
-        val seriesTitle = seriesDoc.selectFirst("h1, h2")?.text()?.trim() ?: clickedTitle
-        val seriesPoster = extractSeriesPoster(seriesDoc, seriesUrl, seriesTitle)
+        val seriesPoster = extractSeriesPoster(seriesDoc, seriesUrl, rawClickedTitle)
         val poster = clickedPoster ?: seriesPoster
 
         val episodesList = mutableListOf<Episode>()
@@ -292,28 +290,27 @@ class XmaalProvider : MainAPI() {
 
             val epSlug = epUrl.trimEnd('/').substringAfterLast("/")
             episodesList.add(
-                newEpisode(epSlug) { 
+                newEpisode(epSlug) {
                     this.name = epTitle
                     this.posterUrl = fixImageUrl(posterRaw, seriesUrl)
                 }
             )
         }
 
-        // If it looks like a series but extracting episodes completely failed, fallback to standalone movie
         if (episodesList.isEmpty()) {
-            return newMovieLoadResponse(clickedTitle, url, TvType.Movie, url) {
+            return newMovieLoadResponse(mediaTitle, url, TvType.Movie, url) {
                 this.posterUrl = poster
                 this.backgroundPosterUrl = poster
-                this.plot = "" // explicitly disabling plot/description
+                this.plot = mediaTitle // Set to trimmed title
             }
         }
 
         val sortedEpisodes = episodesList.sortedWith(SeasonAwareComparator())
 
-        return newTvSeriesLoadResponse(seriesTitle, url, TvType.TvSeries, sortedEpisodes) {
+        return newTvSeriesLoadResponse(mediaTitle, url, TvType.TvSeries, sortedEpisodes) {
             this.posterUrl = poster
             this.backgroundPosterUrl = poster
-            this.plot = "" // explicitly disabling plot/description
+            this.plot = mediaTitle // Set to trimmed title
         }
     }
 
@@ -323,8 +320,6 @@ class XmaalProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // By handling the URL this way, data strings containing the full raw URL 
-        // fallback (for standalone shortfilms) will be safely destructured into just the slug.
         val slug = data.trimEnd('/').substringAfterLast("/")
 
         val mirrorUrls = mirrors.associateWith { site ->
