@@ -195,10 +195,10 @@ class XmaalProvider : MainAPI() {
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val document = app.get(request.data).document
         val home = extractCards(document, request.data).mapNotNull { (title, hrefRaw, posterRaw) ->
-            val clean = cleanTitle(title)
             val href = resolveHref(hrefRaw, request.data)
-            if (clean.isBlank() || href.isBlank()) return@mapNotNull null
-            newTvSeriesSearchResponse(clean, href, TvType.TvSeries) {
+            if (title.isBlank() || href.isBlank()) return@mapNotNull null
+            // Use the raw, untrimmed title for the main page
+            newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
                 this.posterUrl = fixImageUrl(posterRaw, request.data)
             }
         }
@@ -219,14 +219,14 @@ class XmaalProvider : MainAPI() {
                         val doc = app.get(searchUrl).document
 
                         extractCards(doc, site).forEach { (title, hrefRaw, posterRaw) ->
-                            val clean = cleanTitle(title)
-                            val key = normalizeTitle(clean)
+                            val key = normalizeTitle(title)
                             val href = resolveHref(hrefRaw, site)
                             if (key.isBlank() || href.isBlank()) return@forEach
 
                             mutex.withLock {
                                 if (!results.containsKey(key)) {
-                                    results[key] = newTvSeriesSearchResponse(clean, href, TvType.TvSeries) {
+                                    // Use the raw, untrimmed title for search results
+                                    results[key] = newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
                                         this.posterUrl = fixImageUrl(posterRaw, site)
                                     }
                                 }
@@ -245,7 +245,7 @@ class XmaalProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse? {
         val epDoc = app.get(url).document
 
-        // Use the title from the clicked episode page and clean episode labels
+        // Extract the title and clean it specifically for the load response page
         val rawClickedTitle = epDoc.selectFirst("h1, .entry-title, h2")?.text()?.trim() ?: "Unknown Title"
         val mediaTitle = cleanTitle(rawClickedTitle)
 
