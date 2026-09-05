@@ -286,43 +286,46 @@ class IsaidubProvider : MainAPI() {
 
             log("Found ${candidates.size} movie candidates")
 
-            val deferreds = candidates.map { a ->
-                async {
-                    try {
-                        val rawTitle = a.text().trim().ifBlank { a.attr("title").trim() }
-                        val link = resolveUrl(activeMainUrl, a.attr("href"))
-                        val cleanTitle = cleanTitle(rawTitle)
-                        val extractedYear = Regex("""\b(19|20)\d{2}\b""").find(rawTitle)?.value ?: ""
+            val results = coroutineScope {
+                candidates.map { a ->
+                    async {
+                        try {
+                            val rawTitle = a.text().trim().ifBlank { a.attr("title").trim() }
+                            val link = resolveUrl(activeMainUrl, a.attr("href"))
+                            val cleanTitle = cleanTitle(rawTitle)
+                            val extractedYear = Regex("""\b(19|20)\d{2}\b""").find(rawTitle)?.value ?: ""
 
-                        log("Processing candidate: $rawTitle -> $cleanTitle ($extractedYear)")
+                            log("Processing candidate: $rawTitle -> $cleanTitle ($extractedYear)")
 
-                        val (tmdb, resolvedYear) = fetchTmdbTitle(cleanTitle, extractedYear)
-                        if (tmdb == null) {
-                            log("TMDB lookup failed for $cleanTitle")
-                            return@async null
+                            val (tmdb, resolvedYear) = fetchTmdbTitle(cleanTitle, extractedYear)
+                            if (tmdb == null) {
+                                log("TMDB lookup failed for $cleanTitle")
+                                return@async null
+                            }
+
+                            val posterUrl = "https://image.tmdb.org/t/p/w500${tmdb.posterPath}"
+
+                            val t = URLEncoder.encode(tmdb.title, "UTF-8")
+                            val y = URLEncoder.encode(resolvedYear, "UTF-8")
+                            val p = URLEncoder.encode(posterUrl, "UTF-8")
+                            val s = URLEncoder.encode(tmdb.overview, "UTF-8")
+                            val u = URLEncoder.encode(link, "UTF-8")
+
+                            val syntheticData = "$activeMainUrl/synthetic_meta?t=$t&y=$y&p=$p&url=$u&s=$s"
+
+                            newMovieSearchResponse(tmdb.title, syntheticData) {
+                                this.posterUrl = posterUrl
+                                this.year = resolvedYear.toIntOrNull()
+                            }
+                        } catch (e: Exception) {
+                            log("Error in async candidate: ${e.message}")
+                            null
                         }
-
-                        val posterUrl = "https://image.tmdb.org/t/p/w500${tmdb.posterPath}"
-
-                        val t = URLEncoder.encode(tmdb.title, "UTF-8")
-                        val y = URLEncoder.encode(resolvedYear, "UTF-8")
-                        val p = URLEncoder.encode(posterUrl, "UTF-8")
-                        val s = URLEncoder.encode(tmdb.overview, "UTF-8")
-                        val u = URLEncoder.encode(link, "UTF-8")
-
-                        val syntheticData = "$activeMainUrl/synthetic_meta?t=$t&y=$y&p=$p&url=$u&s=$s"
-
-                        newMovieSearchResponse(tmdb.title, syntheticData) {
-                            this.posterUrl = posterUrl
-                            this.year = resolvedYear.toIntOrNull()
-                        }
-                    } catch (e: Exception) {
-                        log("Error in async candidate: ${e.message}")
-                        null
                     }
-                }
+                }.awaitAll()
             }
-            deferreds.awaitAll().filterNotNull().forEach { collected.add(it) }
+
+            results.filterNotNull().forEach { collected.add(it) }
             log("Collected ${collected.size} items from section")
         } catch (e: Exception) {
             log("Error fetching homepage section: ${e.message}")
