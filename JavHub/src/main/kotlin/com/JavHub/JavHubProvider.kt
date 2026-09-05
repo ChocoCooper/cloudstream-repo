@@ -232,7 +232,7 @@ class JavHubProvider : MainAPI() {
 
         val plotText = fetchedDescription?.ifBlank { null } ?: rawTitle
 
-        return newMovieLoadResponse(title, url, TvType.NSFW, url) {
+        return newMovieLoadResponse(title, url, TvType.Movie, url) {
             this.posterUrl = verticalPoster
             this.posterHeaders = mapOf("User-Agent" to browserHeaders["User-Agent"]!!)
             this.backgroundPosterUrl = horizontalPoster
