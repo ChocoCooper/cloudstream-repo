@@ -9,7 +9,6 @@ import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils.parseJson
 import com.lagradost.cloudstream3.utils.AppUtils.toJson
-import com.lagradost.cloudstream3.network.CloudflareKiller
 import com.fasterxml.jackson.annotation.JsonProperty
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -20,16 +19,16 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 private fun String.decodeHtmlEntities(): String = Parser.unescapeEntities(this, false)
 
-// Helps convert individual resolution m3u8 files to the master playlist for quality selection
+// Converts direct video streams to master playlists if needed
 private fun String.toPlaylistM3u8(): String {
     val perResolutionSegment = Regex("""/(?:\d{3,5}x\d{3,5}|\d{3,4}p)/[^/]+\.m3u8""")
-    var res = this
-    if (perResolutionSegment.containsMatchIn(res)) {
-        res = perResolutionSegment.replace(res, "/playlist.m3u8")
+    return when {
+        perResolutionSegment.containsMatchIn(this) ->
+            perResolutionSegment.replace(this, "/playlist.m3u8")
+        this.contains("/video.m3u8") ->
+            this.replace(Regex("""/video\.m3u8(\?.*)?$"""), "/playlist.m3u8$1")
+        else -> this
     }
-    // Fixed: Account for Wowstream URLs containing query parameters like "?v=a2"
-    res = res.replace(Regex("""/video\.m3u8(?=\?|$)"""), "/playlist.m3u8")
-    return res
 }
 
 data class LoadData(
@@ -164,14 +163,16 @@ class JavHubProvider : MainAPI() {
             imgEl?.attr("src")?.ifBlank { null } ?: imgEl?.attr("data-src")
         )
 
-        // Fix: Do not pass JSON into the url field for search. Use href for stable "Continue Watching" tracking.
-        return newMovieSearchResponse(title, href, TvType.NSFW) {
+        // FIX: url must be a static static string (href) for Cloudstream's Continue Watching (Watch Sync) to work. 
+        // DO NOT pass the JSON string here.
+        return newMovieSearchResponse(title, href, TvType.Movie) {
             this.posterUrl = posterUrl
-            this.posterHeaders = mapOf("Referer" to "$mainUrl/")
+            this.posterHeaders = mapOf("Referer" to "https://javhd.today/")
         }
     }
 
     override suspend fun load(url: String): LoadResponse {
+        // If url is somehow still JSON from an older cache, safely fall back
         val loadData = runCatching { parseJson<LoadData>(url) }.getOrNull()
         var videoUrl = loadData?.url ?: url
 
@@ -200,7 +201,7 @@ class JavHubProvider : MainAPI() {
         val code = extractCode(freshTitle) ?: loadData?.code ?: extractCode(videoUrl)
         val cleanCode = code?.lowercase()
 
-        val verticalPoster = loadData?.poster
+        val verticalPoster = loadData?.poster ?: document.selectFirst("div.video-player img")?.attr("src")?.ifBlank { null }
         val horizontalPoster = cleanCode?.let { "https://fourhoi.com/$it/cover-n.jpg" }
 
         var fetchedDescription: String? = null
@@ -229,14 +230,14 @@ class JavHubProvider : MainAPI() {
         }
 
         val plotText = fetchedDescription?.ifBlank { null } ?: rawTitle
+        
+        // FIX: The JSON payload is purely assigned to `dataUrl` so `loadLinks` can use it without breaking Watch Sync.
+        val loadDataJson = LoadData(videoUrl, verticalPoster, code).toJson()
 
-        // Fix: Keep url clean. Pass JSON to dataUrl solely for loadLinks. 
-        val dataUrl = LoadData(videoUrl, verticalPoster, code).toJson()
-
-        return newMovieLoadResponse(title, videoUrl, TvType.NSFW, dataUrl) {
+        return newMovieLoadResponse(title, videoUrl, TvType.Movie, loadDataJson) {
             this.posterUrl = verticalPoster
             this.posterHeaders = mapOf("User-Agent" to browserHeaders["User-Agent"]!!)
-            this.backgroundPosterUrl = horizontalPoster ?: verticalPoster
+            this.backgroundPosterUrl = horizontalPoster
             this.plot = plotText
         }
     }
@@ -264,7 +265,7 @@ class JavHubProvider : MainAPI() {
 
         coroutineScope {
 
-            // 1. MISSAV
+            // 1. MISSAV (Primary Extractor)
             val variantsMissAv = listOf(
                 cleanCode to "MissAV",
                 "$cleanCode-uncensored-leak" to "MissAV [Uncensored]",
@@ -308,7 +309,6 @@ class JavHubProvider : MainAPI() {
                                         ExtractorLinkType.M3U8
                                     ) {
                                         this.referer = "https://missav.ws/"
-                                        this.headers = browserHeaders + mapOf("Origin" to "https://missav.ws")
                                         this.quality = Qualities.Unknown.value
                                     }
                                 )
@@ -319,75 +319,7 @@ class JavHubProvider : MainAPI() {
                 }
             }
 
-            // 2. 123AV
-            val variants123av = listOf(
-                cleanCode to "123AV",
-                "$cleanCode-uncensored-leaked" to "123AV [Uncensored]"
-            )
-
-            variants123av.forEach { (vCode, sourceName) ->
-                launch {
-                    try {
-                        val url123av = "https://123av.com/en/v/$vCode"
-                        val doc123 = app.get(url123av, timeout = 15, headers = browserHeaders).document
-
-                        val xData = doc123.selectFirst("div.watch-main > div.watch__main")?.attr("x-data").orEmpty()
-                        val embedIdMatch = Regex("""javplayer\.cc[\\/]+e[\\/]+([a-zA-Z0-9]+)""").find(xData)
-                        val embedId = embedIdMatch?.groupValues?.get(1)
-
-                        if (!embedId.isNullOrBlank()) {
-                            val embedUrl = "https://javplayer.cc/e/$embedId"
-                            val apiUrl = "https://javplayer.cc/stream?id=$embedId"
-
-                            val apiRes = app.get(
-                                apiUrl,
-                                headers = mapOf(
-                                    "Referer" to "https://123av.com",
-                                    "X-Requested-With" to "XMLHttpRequest",
-                                    "User-Agent" to browserHeaders["User-Agent"]!!
-                                ),
-                                interceptor = CloudflareKiller()
-                            ).text
-
-                            var m3u8Url = Regex("""https?://[^"'\s]+?\.m3u8[^"'\s]*""").find(apiRes.replace("\\/", "/"))?.value
-
-                            if (m3u8Url.isNullOrBlank()) {
-                                val embedHtml = app.get(embedUrl, referer = "https://123av.com", interceptor = CloudflareKiller()).text
-                                val unpackedHtml = runCatching { getAndUnpack(embedHtml) }.getOrDefault(embedHtml)
-
-                                val fallbackRegex = Regex("""(?:file|src|url|source)\s*[:=]\s*['"](https?://[^'"]+\.m3u8[^'"]*)['"]""")
-                                m3u8Url = fallbackRegex.find(unpackedHtml)?.groupValues?.get(1)
-                                    ?: fallbackRegex.find(embedHtml)?.groupValues?.get(1)
-
-                                if (m3u8Url.isNullOrBlank()) {
-                                    m3u8Url = Regex("""https?://[^"'\s]+?\.m3u8[^"'\s]*""").find(unpackedHtml.replace("\\/", "/"))?.value
-                                        ?: Regex("""https?://[^"'\s]+?\.m3u8[^"'\s]*""").find(embedHtml.replace("\\/", "/"))?.value
-                                }
-                            }
-
-                            if (!m3u8Url.isNullOrBlank()) {
-                                callback.invoke(
-                                    newExtractorLink(
-                                        sourceName,
-                                        sourceName,
-                                        m3u8Url.toPlaylistM3u8(),
-                                        ExtractorLinkType.M3U8
-                                    ) {
-                                        this.referer = "https://javplayer.cc/"
-                                        this.headers = browserHeaders + mapOf("Origin" to "https://javplayer.cc")
-                                        this.quality = Qualities.Unknown.value
-                                    }
-                                )
-                                foundStream.set(true)
-                            }
-                        }
-                    } catch (e: Exception) {
-                        e.printStackTrace()
-                    }
-                }
-            }
-
-            // 3. JABLE
+            // 2. JABLE (Secondary Extractor)
             launch {
                 runCatching {
                     val urlJable = "https://jable.tv/videos/$cleanCode/?lang=en"
@@ -405,7 +337,6 @@ class JavHubProvider : MainAPI() {
                                 ExtractorLinkType.M3U8
                             ) {
                                 this.referer = "https://jable.tv/"
-                                this.headers = browserHeaders + mapOf("Origin" to "https://jable.tv")
                                 this.quality = Qualities.Unknown.value
                             }
                         )
@@ -414,7 +345,7 @@ class JavHubProvider : MainAPI() {
                 }
             }
 
-            // SUBTITLES
+            // 3. SUBTITLES
             launch {
                 runCatching {
                     val searchDoc = app.get("$subtitleCatUrl/index.php?search=$code", timeout = 15, headers = browserHeaders).document
