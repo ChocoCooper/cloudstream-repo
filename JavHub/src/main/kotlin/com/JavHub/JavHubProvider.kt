@@ -167,7 +167,7 @@ class JavHubProvider : MainAPI() {
 
         val loadUrl = LoadData(href, posterUrl, code).toJson()
 
-        return newMovieSearchResponse(title, loadUrl, TvType.NSFW) {
+        return newMovieSearchResponse(title, loadUrl, TvType.Movie) {
             this.posterUrl = posterUrl
             this.posterHeaders = mapOf("Referer" to "https://javhd.today/")
         }
