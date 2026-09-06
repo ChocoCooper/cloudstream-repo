@@ -20,15 +20,16 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 private fun String.decodeHtmlEntities(): String = Parser.unescapeEntities(this, false)
 
+// Helps convert individual resolution m3u8 files to the master playlist for quality selection
 private fun String.toPlaylistM3u8(): String {
     val perResolutionSegment = Regex("""/(?:\d{3,5}x\d{3,5}|\d{3,4}p)/[^/]+\.m3u8""")
-    return when {
-        perResolutionSegment.containsMatchIn(this) ->
-            perResolutionSegment.replace(this, "/playlist.m3u8")
-        this.endsWith("/video.m3u8") ->
-            this.replace(Regex("""/video\.m3u8$"""), "/playlist.m3u8")
-        else -> this
+    var res = this
+    if (perResolutionSegment.containsMatchIn(res)) {
+        res = perResolutionSegment.replace(res, "/playlist.m3u8")
     }
+    // Fixed: Account for Wowstream URLs containing query parameters like "?v=a2"
+    res = res.replace(Regex("""/video\.m3u8(?=\?|$)"""), "/playlist.m3u8")
+    return res
 }
 
 data class LoadData(
@@ -120,8 +121,6 @@ class JavHubProvider : MainAPI() {
         ) + browserHeaders
 
         return coroutineScope {
-            // Fetch pages 1 and 2 concurrently.
-            // If page 2 fails or doesn't exist, runCatching will return an empty list and it will be safely ignored.
             (1..2).map { page ->
                 async {
                     runCatching {
@@ -165,11 +164,10 @@ class JavHubProvider : MainAPI() {
             imgEl?.attr("src")?.ifBlank { null } ?: imgEl?.attr("data-src")
         )
 
-        val loadUrl = LoadData(href, posterUrl, code).toJson()
-
-        return newMovieSearchResponse(title, loadUrl, TvType.Movie) {
+        // Fix: Do not pass JSON into the url field for search. Use href for stable "Continue Watching" tracking.
+        return newMovieSearchResponse(title, href, TvType.NSFW) {
             this.posterUrl = posterUrl
-            this.posterHeaders = mapOf("Referer" to "https://javhd.today/")
+            this.posterHeaders = mapOf("Referer" to "$mainUrl/")
         }
     }
 
@@ -232,10 +230,13 @@ class JavHubProvider : MainAPI() {
 
         val plotText = fetchedDescription?.ifBlank { null } ?: rawTitle
 
-        return newMovieLoadResponse(title, url, TvType.Movie, url) {
+        // Fix: Keep url clean. Pass JSON to dataUrl solely for loadLinks. 
+        val dataUrl = LoadData(videoUrl, verticalPoster, code).toJson()
+
+        return newMovieLoadResponse(title, videoUrl, TvType.NSFW, dataUrl) {
             this.posterUrl = verticalPoster
             this.posterHeaders = mapOf("User-Agent" to browserHeaders["User-Agent"]!!)
-            this.backgroundPosterUrl = horizontalPoster
+            this.backgroundPosterUrl = horizontalPoster ?: verticalPoster
             this.plot = plotText
         }
     }
@@ -306,7 +307,8 @@ class JavHubProvider : MainAPI() {
                                         finalLink.toPlaylistM3u8(),
                                         ExtractorLinkType.M3U8
                                     ) {
-                                        this.referer = "https://missav.ws"
+                                        this.referer = "https://missav.ws/"
+                                        this.headers = browserHeaders + mapOf("Origin" to "https://missav.ws")
                                         this.quality = Qualities.Unknown.value
                                     }
                                 )
@@ -371,7 +373,8 @@ class JavHubProvider : MainAPI() {
                                         m3u8Url.toPlaylistM3u8(),
                                         ExtractorLinkType.M3U8
                                     ) {
-                                        this.referer = "https://123av.com/"
+                                        this.referer = "https://javplayer.cc/"
+                                        this.headers = browserHeaders + mapOf("Origin" to "https://javplayer.cc")
                                         this.quality = Qualities.Unknown.value
                                     }
                                 )
@@ -401,7 +404,8 @@ class JavHubProvider : MainAPI() {
                                 hlsUrl.toPlaylistM3u8(),
                                 ExtractorLinkType.M3U8
                             ) {
-                                this.referer = "https://jable.tv"
+                                this.referer = "https://jable.tv/"
+                                this.headers = browserHeaders + mapOf("Origin" to "https://jable.tv")
                                 this.quality = Qualities.Unknown.value
                             }
                         )
