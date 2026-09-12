@@ -49,7 +49,10 @@ class XmaalProvider : MainAPI() {
     override val mainPage = mainPageOf(
         "${Domains.OTTDUDE}/ott/ullu/"      to "ULLU",
         "${Domains.OTTDUDE}/ott/atrangii/"  to "Atrangii",
-        "${Domains.OTTDUDE}/ott/jugnu/" to "PrimePlay",
+        "${Domains.OTTDUDE}/ott/kooku/"  to "Kooku",
+        "${Domains.OTTDUDE}/ott/moovi/"  to "Moovi",
+        "${Domains.OTTDUDE}/ott/look-entertainment/"  to "Look Entertainment",
+        "${Domains.OTTDUDE}/ott/jugnu/" to "Jugnu",
         "${Domains.OTTDUDE}/ott/voovi/"     to "Voovi"
     )
 
