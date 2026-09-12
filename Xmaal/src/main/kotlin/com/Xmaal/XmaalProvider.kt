@@ -46,7 +46,7 @@ class XmaalProvider : MainAPI() {
     private val pageSize: Int   = 100
 
     // ─────────────────────────────────────────────────────────────────────
-    // Regexes
+    // Regexes — only where no JSON alternative exists
     // ─────────────────────────────────────────────────────────────────────
     private val rscChunkRe: Regex = Regex(
         "self\\.__next_f\\.push\\(\\s*\\[\\s*\\d+\\s*,\\s*(\".*?\")\\s*\\]\\s*\\)",
@@ -81,7 +81,7 @@ class XmaalProvider : MainAPI() {
     // Provider metadata
     // ─────────────────────────────────────────────────────────────────────
     override var mainUrl: String = "https://xmaza.xxx"
-    override var name: String    = "Xmaza"
+    override var name: String    = "Xmaal"
     override val hasMainPage: Boolean = true
     override var lang: String = "hi"
     override val hasDownloadSupport: Boolean = true
@@ -95,6 +95,17 @@ class XmaalProvider : MainAPI() {
         "https://xmaza.xxx/category/boom-movies/"  to "Boom Movies",
         "https://xmaza.xxx/category/besharams/"    to "Besharams"
     )
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Data holders
+    // ─────────────────────────────────────────────────────────────────────
+    private data class SearchResult(
+        val title: String,
+        val url: String,
+        val poster: String?,
+    )
+
+    private data class ParsedEpisode(val season: Int, val episode: Int)
 
     // ─────────────────────────────────────────────────────────────────────
     // Small helpers
@@ -325,16 +336,27 @@ class XmaalProvider : MainAPI() {
     // ─────────────────────────────────────────────────────────────────────
     // Search
     // ─────────────────────────────────────────────────────────────────────
-    private suspend fun searchWordPress(site: String, q: String): List<Triple<String, String, String?>> {
-        val txt = fetch("$site/wp-json/wp/v2/search?search=${encode(q)}&per_page=20") ?: return emptyList()
+
+    /**
+     * WordPress search via /wp-json/wp/v2/posts?search=Q&_embed=1
+     * Returns full post objects (with featured image embedded) — no separate
+     * media fetch needed.
+     */
+    private suspend fun searchWordPress(site: String, q: String): List<SearchResult> {
+        val url = "$site/wp-json/wp/v2/posts?search=${encode(q)}&per_page=20&_embed=1"
+        val txt = fetch(url) ?: return emptyList()
         return try {
             val arr = JSONArray(txt)
-            val out = mutableListOf<Triple<String, String, String?>>()
+            val out = mutableListOf<SearchResult>()
             for (i in 0 until arr.length()) {
                 val o = arr.optJSONObject(i) ?: continue
-                val t = o.optString("title").trim()
-                val u = o.optString("url").trim()
-                if (t.isNotBlank() && u.isNotBlank()) out.add(Triple(t, u, null))
+                val title = titleOf(o)
+                val link = o.optString("link").trim().ifBlank {
+                    val slug = o.optString("slug")
+                    if (slug.isBlank()) "" else "$site/$slug/"
+                }
+                if (title.isBlank() || link.isBlank()) continue
+                out.add(SearchResult(title, link, featuredMedia(o)))
             }
             out
         } catch (e: Exception) {
@@ -342,15 +364,32 @@ class XmaalProvider : MainAPI() {
         }
     }
 
-    private suspend fun searchNextJs(site: String, q: String): List<Triple<String, String, String?>> {
+    /**
+     * Next.js RSC search: /search/Q. The RSC blob contains both /watch/{slug}
+     * links and the corresponding .webp images, so we pair them by matching
+     * the slug (or base-series folder) inside each image URL.
+     */
+    private suspend fun searchNextJs(site: String, q: String): List<SearchResult> {
         val html = fetch("$site/search/${encode(q)}") ?: return emptyList()
-        val slugs = watchSlugRe.findAll(extractRscBlob(html)).map { it.groupValues[1] }.distinct()
-        val out = mutableListOf<Triple<String, String, String?>>()
+        val blob = extractRscBlob(html)
+
+        val slugs = watchSlugRe.findAll(blob).map { it.groupValues[1] }.distinct().toList()
+        val images = rscImageRe.findAll(blob).map { it.value }.distinct().toList()
+
+        val out = mutableListOf<SearchResult>()
         for (slug in slugs) {
-            val t = slug.split("-").joinToString(" ") { w ->
+            val title = slug.split("-").joinToString(" ") { w ->
                 w.replaceFirstChar { c -> c.uppercase() }
             }
-            out.add(Triple(t, "$site/watch/$slug", null))
+            val poster = images.firstOrNull { img ->
+                img.contains("/$slug.", true) ||
+                img.contains("/$slug-", true) ||
+                img.contains("/$slug/", true)
+            } ?: images.firstOrNull { img ->
+                val base = seriesBaseRe.find(slug)?.groupValues?.get(1)
+                base != null && img.contains("/$base/", true)
+            }
+            out.add(SearchResult(title, "$site/watch/$slug", poster))
         }
         return out
     }
@@ -362,19 +401,22 @@ class XmaalProvider : MainAPI() {
         coroutineScope {
             val tasks = allMirrors.map { site ->
                 async {
-                    val cards: List<Triple<String, String, String?>> = try {
+                    val items: List<SearchResult> = try {
                         if (site in rscMirrors) searchNextJs(site, query)
                         else searchWordPress(site, query)
                     } catch (e: Exception) {
                         emptyList()
                     }
-                    for (card in cards) {
-                        val (title, url, _) = card
-                        val key = normalizeTitle(title)
-                        if (key.isBlank() || url.isBlank()) continue
+                    for (item in items) {
+                        val key = normalizeTitle(item.title)
+                        if (key.isBlank() || item.url.isBlank()) continue
                         mutex.withLock {
                             if (!results.containsKey(key)) {
-                                results[key] = newTvSeriesSearchResponse(title, url, TvType.TvSeries)
+                                results[key] = newTvSeriesSearchResponse(
+                                    item.title, item.url, TvType.TvSeries
+                                ) {
+                                    this.posterUrl = item.poster
+                                }
                             }
                         }
                     }
@@ -386,7 +428,7 @@ class XmaalProvider : MainAPI() {
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // WordPress load
+    // WordPress load helpers
     // ─────────────────────────────────────────────────────────────────────
     private fun featuredMedia(p: JSONObject): String? {
         val embedded = p.optJSONObject("_embedded") ?: return null
@@ -417,8 +459,6 @@ class XmaalProvider : MainAPI() {
         return t.optString("rendered", "").trim()
     }
 
-    private data class ParsedEpisode(val season: Int, val episode: Int)
-
     private fun parseEpisodeTitle(rawTitle: String): ParsedEpisode {
         val m = episodeTitleRe.matchEntire(rawTitle.trim())
         if (m != null) {
@@ -429,6 +469,9 @@ class XmaalProvider : MainAPI() {
         return ParsedEpisode(1, 0)
     }
 
+    // ─────────────────────────────────────────────────────────────────────
+    // WordPress load
+    // ─────────────────────────────────────────────────────────────────────
     private suspend fun loadWordPress(url: String): LoadResponse? {
         val site = domainOf(url)
         val slug = url.trimEnd('/').substringAfterLast("/")
@@ -549,7 +592,7 @@ class XmaalProvider : MainAPI() {
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // Load links
+    // Load links — source name = site's domain, quality = Unknown
     // ─────────────────────────────────────────────────────────────────────
     override suspend fun loadLinks(
         data: String,
@@ -560,7 +603,7 @@ class XmaalProvider : MainAPI() {
         val slug = data.trimEnd('/').substringAfterLast("/")
         if (slug.isBlank()) return false
 
-        val collected = linkedMapOf<String, String>()
+        val collected = linkedMapOf<String, String>()   // url → sourceName
         val mutex = Mutex()
 
         coroutineScope {
