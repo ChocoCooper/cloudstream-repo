@@ -46,7 +46,7 @@ class XmaalProvider : MainAPI() {
     private val pageSize: Int   = 100
 
     // ─────────────────────────────────────────────────────────────────────
-    // Regexes — only where no JSON alternative exists
+    // Regexes
     // ─────────────────────────────────────────────────────────────────────
     private val rscChunkRe: Regex = Regex(
         "self\\.__next_f\\.push\\(\\s*\\[\\s*\\d+\\s*,\\s*(\".*?\")\\s*\\]\\s*\\)",
@@ -87,7 +87,7 @@ class XmaalProvider : MainAPI() {
     override val hasDownloadSupport: Boolean = true
     override val supportedTypes: Set<TvType> = setOf(TvType.NSFW)
 
-    override val mainPage: HomePageList = mainPageOf(
+    override val mainPage = mainPageOf(
         "https://xmaza.xxx/category/ullu/"         to "ULLU",
         "https://xmaza.xxx/category/atrangii/"     to "Atrangii",
         "https://xmaza.xxx/category/altt/"         to "ALTT",
@@ -549,7 +549,7 @@ class XmaalProvider : MainAPI() {
     }
 
     // ─────────────────────────────────────────────────────────────────────
-    // Load links — source name = site's domain, quality = Unknown
+    // Load links
     // ─────────────────────────────────────────────────────────────────────
     override suspend fun loadLinks(
         data: String,
@@ -560,7 +560,7 @@ class XmaalProvider : MainAPI() {
         val slug = data.trimEnd('/').substringAfterLast("/")
         if (slug.isBlank()) return false
 
-        val collected = linkedMapOf<String, String>()   // url → sourceName
+        val collected = linkedMapOf<String, String>()
         val mutex = Mutex()
 
         coroutineScope {
