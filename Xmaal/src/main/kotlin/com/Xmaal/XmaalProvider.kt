@@ -29,7 +29,7 @@ class XmaalProvider : MainAPI() {
     }
 
     override var mainUrl = Domains.XMAZA
-    override var name = "Xmaza"
+    override var name = "Xmaal"
     override val hasMainPage = true
     override var lang = "hi"
     override val hasDownloadSupport = true
@@ -49,7 +49,7 @@ class XmaalProvider : MainAPI() {
     override val mainPage = mainPageOf(
         "${Domains.OTTDUDE}/ott/ullu/"      to "ULLU",
         "${Domains.OTTDUDE}/ott/atrangii/"  to "Atrangii",
-        "${Domains.OTTDUDE}/ott/primeplay/" to "PrimePlay",
+        "${Domains.OTTDUDE}/ott/jugnu/" to "PrimePlay",
         "${Domains.OTTDUDE}/ott/voovi/"     to "Voovi"
     )
 
