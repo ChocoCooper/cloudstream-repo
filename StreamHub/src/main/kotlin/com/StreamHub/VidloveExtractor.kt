@@ -3,7 +3,6 @@ package com.StreamHub
 import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.app
 import org.json.JSONObject
 import java.net.InetAddress
 import java.net.ServerSocket
@@ -19,7 +18,70 @@ object VidloveExtractor {
     private const val TARGET_SOURCE = "vidapi"
     private const val ORIGIN_URL = "https://player.vidlove.cc"
 
+    /**
+     * Entry point. Accepts a **Simkl ID** and resolves the TMDB ID via Simkl.
+     *
+     * @param simklId   Simkl numeric ID
+     * @param type      "movies" | "tv" | "anime"
+     * @param season    Season number (null for movies)
+     * @param episode   Episode number (null for movies)
+     * @param tmdbHint  Optional pre-resolved TMDB ID (skips the Simkl call)
+     */
     suspend fun getStreams(
+        simklId: String,
+        type: String,
+        season: Int?,
+        episode: Int?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit,
+        tmdbHint: String? = null
+    ): Boolean {
+        val tmdbId = tmdbHint ?: resolveTmdbIdFromSimkl(simklId, type) ?: run {
+            Log.w(TAG, "Could not resolve TMDB ID from Simkl for simklId=$simklId type=$type")
+            return false
+        }
+        Log.d(TAG, "Resolved Simkl $simklId -> TMDB $tmdbId")
+
+        val isMovie = type == "movies"
+        return fetchFromShowsSt(
+            tmdbId = tmdbId,
+            isMovie = isMovie,
+            season = season,
+            episode = episode,
+            subtitleCallback = subtitleCallback,
+            callback = callback
+        )
+    }
+
+    /**
+     * Resolves TMDB from Simkl using the shared Simkl config.
+     */
+    private suspend fun resolveTmdbIdFromSimkl(simklId: String, type: String): String? {
+        val endpoint = when (type) {
+            "movies" -> "movies"
+            "anime"  -> "anime"
+            else     -> "tv"
+        }
+
+        return try {
+            val url = StreamHubProvider.simklUrl("$endpoint/$simklId")
+            val response = app.get(
+                url,
+                timeout = 15L,
+                headers = StreamHubProvider.simklHeaders()
+            ).text
+            if (response.isBlank()) return null
+
+            val json = JSONObject(response)
+            val ids  = json.optJSONObject("ids") ?: return null
+            ids.optString("tmdb").takeIf { it.isNotBlank() && it != "null" }
+        } catch (e: Exception) {
+            Log.e(TAG, "Simkl TMDB resolution error: ${e.message}", e)
+            null
+        }
+    }
+
+    private suspend fun fetchFromShowsSt(
         tmdbId: String,
         isMovie: Boolean,
         season: Int?,
@@ -27,9 +89,8 @@ object VidloveExtractor {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        Log.d(TAG, "getStreams called: tmdbId=$tmdbId, isMovie=$isMovie, season=$season, episode=$episode")
+        Log.d(TAG, "fetchFromShowsSt: tmdbId=$tmdbId, isMovie=$isMovie, season=$season, episode=$episode")
 
-        // Build the direct API endpoint with hardcoded vidapi source
         val apiUrl = if (isMovie) {
             "https://api.shows.st/movie?id=$tmdbId&mode=json&sources=$TARGET_SOURCE"
         } else {
@@ -43,13 +104,13 @@ object VidloveExtractor {
         }
 
         val headers = mapOf(
-            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept" to "application/json, text/plain, */*",
-            "Origin" to ORIGIN_URL,
-            "Referer" to refererUrl,
-            "Sec-Fetch-Dest" to "empty",
-            "Sec-Fetch-Mode" to "cors",
-            "Sec-Fetch-Site" to "cross-site"
+            "User-Agent"      to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept"          to "application/json, text/plain, */*",
+            "Origin"          to ORIGIN_URL,
+            "Referer"         to refererUrl,
+            "Sec-Fetch-Dest"  to "empty",
+            "Sec-Fetch-Mode"  to "cors",
+            "Sec-Fetch-Site"  to "cross-site"
         )
 
         return try {
@@ -68,9 +129,7 @@ object VidloveExtractor {
             }
 
             val added = emitSingleLink(manifest, refererUrl, callback)
-            if (added) {
-                addShowsStSubtitles(json, subtitleCallback)
-            }
+            if (added) addShowsStSubtitles(json, subtitleCallback)
             added
         } catch (e: Exception) {
             Log.e(TAG, "Error fetching from api.shows.st: ${e.message}", e)
@@ -78,9 +137,6 @@ object VidloveExtractor {
         }
     }
 
-    /**
-     * Locates the HLS manifest text within the JSON response.
-     */
     private fun findManifest(json: JSONObject): String? {
         json.optJSONObject("source")?.optString("manifest")?.takeIf { it.isNotBlank() }?.let { return it }
 
@@ -117,9 +173,9 @@ object VidloveExtractor {
         callback(
             newExtractorLink(
                 source = DISPLAY_NAME,
-                name = DISPLAY_NAME,
-                url = localUrl,
-                type = ExtractorLinkType.M3U8
+                name   = DISPLAY_NAME,
+                url    = localUrl,
+                type   = ExtractorLinkType.M3U8
             ) {
                 this.referer = referer
             }
@@ -137,19 +193,18 @@ object VidloveExtractor {
         for (i in 0 until subtitlesArray.length()) {
             val subObj = subtitlesArray.optJSONObject(i) ?: continue
             val subUrl = subObj.optString("file")
-            val label = subObj.optString("label")
+            val label  = subObj.optString("label")
             if (subUrl.isNotBlank() && label.contains("English", ignoreCase = true)) {
-                val lang = "English"
-                if (addedSubtitles.add(lang)) {
-                    subtitleCallback.invoke(SubtitleFile(lang, subUrl))
+                if (addedSubtitles.add("English")) {
+                    subtitleCallback.invoke(SubtitleFile("English", subUrl))
                 }
             }
         }
     }
 
-    /**
-     * Local loopback HTTP server to serve the manifest in-memory to ExoPlayer.
-     */
+    // ------------------------------------------------------------
+    //  Local loopback manifest server
+    // ------------------------------------------------------------
     private object LocalManifestServer {
         private const val TTL_MS = 30 * 60 * 1000L
 
@@ -178,9 +233,7 @@ object VidloveExtractor {
                                 handleClient(client)
                             }
                         } catch (e: Exception) {
-                            if (!ss.isClosed) {
-                                Log.e(TAG, "LocalManifestServer accept error: $e")
-                            }
+                            if (!ss.isClosed) Log.e(TAG, "LocalManifestServer accept error: $e")
                         }
                     }
                 }
