@@ -45,8 +45,9 @@ object ZokoAnimeExtractor {
                         "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
                     )
                 )
-                if (response.code == 200 && extractStreamFromHtml(response.text, url, track)) {
-                    return true
+                if (response.code == 200) {
+                    val found = extractStreamFromHtml(response.text, url, track, callback)
+                    if (found) return true
                 }
             } catch (_: Exception) {
                 // Try next track
@@ -57,8 +58,14 @@ object ZokoAnimeExtractor {
 
     /**
      * Parses the ZokoAnime embed HTML page to find the actual video source URL.
+     * Must be suspend because newExtractorLink is a suspend function.
      */
-    private fun extractStreamFromHtml(html: String, referer: String, track: String): Boolean {
+    private suspend fun extractStreamFromHtml(
+        html: String,
+        referer: String,
+        track: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
         var found = false
 
         // 1. Direct <source> or <video> tags
@@ -69,7 +76,7 @@ object ZokoAnimeExtractor {
         sourceRegex.findAll(html).forEach { match ->
             val src = match.groupValues[1]
             if (src.isNotBlank() && (src.startsWith("http") || src.startsWith("//"))) {
-                emitLink(src, referer, track)
+                emitLink(src, referer, track, callback)
                 found = true
             }
         }
@@ -82,7 +89,7 @@ object ZokoAnimeExtractor {
         jsonRegex.findAll(html).forEach { match ->
             val src = match.groupValues[1]
             if (src.isNotBlank()) {
-                emitLink(src, referer, track)
+                emitLink(src, referer, track, callback)
                 found = true
             }
         }
@@ -98,7 +105,7 @@ object ZokoAnimeExtractor {
                     """["'](?:file|src|url)["']\s*:\s*["']([^"']+\.(?:m3u8|mp4)[^"']*)["']"""
                 )
                 innerRegex.findAll(decoded).forEach { inner ->
-                    emitLink(inner.groupValues[1], referer, track)
+                    emitLink(inner.groupValues[1], referer, track, callback)
                     found = true
                 }
             } catch (_: Exception) {}
@@ -107,17 +114,26 @@ object ZokoAnimeExtractor {
         return found
     }
 
-    private fun emitLink(url: String, referer: String, track: String) {
+    /**
+     * Emits a single ExtractorLink. Suspend because newExtractorLink is suspend.
+     */
+    private suspend fun emitLink(
+        url: String,
+        referer: String,
+        track: String,
+        callback: (ExtractorLink) -> Unit
+    ) {
         val linkType = if (url.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
         val qualityLabel = if (track == "dub") "Dub" else "Sub"
 
-        newExtractorLink(
+        val link = newExtractorLink(
             source = "ZokoAnime",
             name   = "ZokoAnime $qualityLabel",
             url    = url,
             type   = linkType
         ) {
             this.referer = referer
-        }.also { callback(it) }
+        }
+        callback(link)
     }
 }
