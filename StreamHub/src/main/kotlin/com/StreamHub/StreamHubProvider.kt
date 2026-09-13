@@ -7,166 +7,270 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
 import java.net.URLEncoder
 
 class StreamHubProvider : MainAPI() {
-    override var mainUrl = "https://streamhub.app"
-    override var name = "StreamHub"
-    override val hasMainPage = true
-    override var lang = "ta"
-    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries, TvType.Anime, TvType.AsianDrama)
 
-    private val tmdbApiKeys = listOf(
-        "fb7bb23f03b6994dafc674c074d01761", "e55425032d3d0f371fc776f302e7c09b",
-        "8301a21598f8b45668d5711a814f01f6", "8cf43ad9c085135b9479ad5cf6bbcbda",
-        "da63548086e399ffc910fbc08526df05", "13e53ff644a8bd4ba37b3e1044ad24f3",
-        "269890f657dddf4635473cf4cf456576", "a2f888b27315e62e471b2d587048f32e",
-        "8476a7ab80ad76f0936744df0430e67c", "5622cafbfe8f8cfe358a29c53e19bba0",
-        "ae4bd1b6fce2a5648671bfc171d15ba4", "257654f35e3dff105574f97fb4b97035",
-        "2f4038e83265214a0dcd6ec2eb3276f5", "9e43f45f94705cc8e1d5a0400d19a7b7",
-        "af6887753365e14160254ac7f4345dd2", "06f10fc8741a672af455421c239a1ffc",
-        "09ad8ace66eec34302943272db0e8d2c", "ea118e768e75a1fe3b53dc99c9e4de09"
-    )
+    companion object {
+        // ============================================================
+        //  SIMKL CONFIG — SINGLE SOURCE OF TRUTH FOR THE WHOLE PLUGIN
+        // ============================================================
+        const val SIMKL_CLIENT_ID    = "06c50bb7a74b59fb0d1630bf528671feaa8b982e1dac505ad819445fb5effda6"
+        const val SIMKL_APP_NAME     = "cloudstream"
+        const val SIMKL_APP_VERSION  = "1.0"
+        const val SIMKL_BASE         = "https://api.simkl.com"
 
-    private val tmdbBase    = "https://api.tmdb.org/3"
-    private val imageBase   = "https://image.tmdb.org/t/p/w500"
-    private val backdropBase = "https://image.tmdb.org/t/p/original"
+        // Shared header used by every Simkl call in the plugin
+        fun simklHeaders(): Map<String, String> =
+            mapOf("User-Agent" to "$SIMKL_APP_NAME/$SIMKL_APP_VERSION")
 
-    private val iso639Map = mapOf(
-        "eng" to "English",
-        "en" to "English"
-    )
-
-    private fun expandLang(code: String): String = iso639Map[code.lowercase()] ?: code
-
-    // ------------------- TMDB Data Classes -------------------
-    private data class TmdbSearchResponse(@JsonProperty("results") val results: List<TmdbResult>?)
-    private data class TmdbResult(@JsonProperty("id") val id: Int?, @JsonProperty("title") val title: String?, @JsonProperty("name") val name: String?, @JsonProperty("poster_path") val posterPath: String?, @JsonProperty("media_type") val mediaType: String?)
-    private data class TmdbExternalIds(@JsonProperty("imdb_id") val imdbId: String?)
-    private data class TmdbDetails(@JsonProperty("id") val id: Int?, @JsonProperty("title") val title: String?, @JsonProperty("name") val name: String?, @JsonProperty("overview") val overview: String?, @JsonProperty("poster_path") val posterPath: String?, @JsonProperty("backdrop_path") val backdropPath: String?, @JsonProperty("release_date") val releaseDate: String?, @JsonProperty("first_air_date") val firstAirDate: String?, @JsonProperty("genres") val genres: List<TmdbGenre>?, @JsonProperty("seasons") val seasons: List<TmdbSeason>?, @JsonProperty("images") val images: TmdbImages?, @JsonProperty("external_ids") val externalIds: TmdbExternalIds?)
-    private data class TmdbGenre(@JsonProperty("name") val name: String?)
-    private data class TmdbImages(@JsonProperty("logos") val logos: List<TmdbImage>?)
-    private data class TmdbImage(@JsonProperty("file_path") val filePath: String?, @JsonProperty("iso_639_1") val lang: String?)
-    private data class TmdbSeason(@JsonProperty("season_number") val seasonNumber: Int?, @JsonProperty("episode_count") val episodeCount: Int?)
-
-    // ------------------- TMDB Fetch Helper -------------------
-    private suspend inline fun <reified T : Any> fetchTmdb(url: String): T? {
-        val keysToTry = tmdbApiKeys.shuffled().take(3)
-        for (key in keysToTry) {
-            try {
-                val finalUrl = url.replace("{API_KEY}", key)
-                val responseText = app.get(finalUrl, timeout = 15L).text
-                val response = AppUtils.tryParseJson<T>(responseText)
-                if (response != null) return response
-            } catch (e: Exception) { continue }
+        // Builds a fully-qualified Simkl URL with required query params
+        fun simklUrl(endpoint: String, extra: String = ""): String {
+            val base = "$SIMKL_BASE/$endpoint"
+            val sep = if (endpoint.contains("?")) "&" else "?"
+            val tail = if (extra.isBlank()) "" else "&$extra"
+            return "$base${sep}client_id=$SIMKL_CLIENT_ID" +
+                "&app-name=$SIMKL_APP_NAME" +
+                "&app-version=$SIMKL_APP_VERSION" +
+                tail
         }
-        return null
+
+        // Image proxy helpers (Simkl poster / fanart paths)
+        const val SIMKL_POSTER_BASE = "https://wsrv.nl/?url=https://simkl.in/posters/"
+        const val SIMKL_FANART_BASE = "https://wsrv.nl/?url=https://simkl.in/fanart/"
+
+        fun simklPoster(path: String?): String? =
+            path?.takeIf { it.isNotBlank() }?.let { "${SIMKL_POSTER_BASE}${it}_w.webp&q=90" }
+
+        fun simklFanart(path: String?): String? =
+            path?.takeIf { it.isNotBlank() }?.let { "${SIMKL_FANART_BASE}${it}_w.webp&q=90" }
+
+        fun simklEpisodeImage(path: String?): String? =
+            path?.takeIf { it.isNotBlank() }?.let { "${SIMKL_POSTER_BASE}${it}_w.webp&q=90" }
     }
 
-    // ------------------- Main Page -------------------
+    // ============================================================
+    //  MAIN PROVIDER INFO
+    // ============================================================
+    override var mainUrl      = "https://streamhub.app"
+    override var name         = "StreamHub"
+    override val hasMainPage  = true
+    override var lang         = "ta"
+    override val supportedTypes = setOf(
+        TvType.Movie,
+        TvType.TvSeries,
+        TvType.Anime,
+        TvType.AsianDrama
+    )
+
+    // ============================================================
+    //  SIMKL DATA MODELS
+    // ============================================================
+    private data class SimklSearchResult(
+        @JsonProperty("type")   val type: String?   = null,
+        @JsonProperty("title")  val title: String?  = null,
+        @JsonProperty("poster") val poster: String? = null,
+        @JsonProperty("year")   val year: Int?      = null,
+        @JsonProperty("ids")    val ids: SimklIds?  = null
+    )
+
+    private data class SimklIds(
+        @JsonProperty("simkl")   val simkl: Int?   = null,
+        @JsonProperty("slug")    val slug: String? = null,
+        @JsonProperty("tmdb")    val tmdb: String? = null,
+        @JsonProperty("mal")     val mal: Any?     = null,
+        @JsonProperty("anilist") val anilist: Any? = null,
+        @JsonProperty("imdb")    val imdb: String? = null
+    )
+
+    private data class SimklDetail(
+        @JsonProperty("title")          val title: String?         = null,
+        @JsonProperty("year")           val year: Int?             = null,
+        @JsonProperty("overview")       val overview: String?      = null,
+        @JsonProperty("genres")         val genres: List<String>?  = null,
+        @JsonProperty("poster")         val poster: String?        = null,
+        @JsonProperty("fanart")         val fanart: String?        = null,
+        @JsonProperty("ids")            val ids: SimklIds?         = null,
+        @JsonProperty("runtime")        val runtime: Int?          = null,
+        @JsonProperty("total_episodes") val totalEpisodes: Int?    = null,
+        @JsonProperty("seasons")        val seasons: List<SimklSeason>? = null
+    )
+
+    private data class SimklSeason(
+        @JsonProperty("number")   val number: Int?               = null,
+        @JsonProperty("episodes") val episodes: List<SimklEpisode>? = null
+    )
+
+    private data class SimklEpisode(
+        @JsonProperty("number") val number: Int?    = null,
+        @JsonProperty("title")  val title: String?  = null,
+        @JsonProperty("img")    val img: String?    = null
+    )
+
+    // ============================================================
+    //  SIMKL API CALLS
+    // ============================================================
+    private suspend fun fetchSimklDetail(type: String, id: String): SimklDetail? {
+        return try {
+            val url = simklUrl("$type/$id")
+            val text = app.get(url, timeout = 15L, headers = simklHeaders()).text
+            AppUtils.tryParseJson<SimklDetail>(text)
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private suspend fun searchSimklRaw(query: String): List<SimklSearchResult> {
+        return try {
+            val encoded = URLEncoder.encode(query, "UTF-8")
+            val url = simklUrl("search/movie", "q=$encoded&extended=full")
+            val text = app.get(url, timeout = 15L, headers = simklHeaders()).text
+            AppUtils.tryParseJson<List<SimklSearchResult>>(text) ?: emptyList()
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    // ============================================================
+    //  ID EXTRACTION HELPERS
+    // ============================================================
+    private fun extractId(value: Any?): String? = when (value) {
+        is Int    -> value.toString()
+        is Long   -> value.toString()
+        is String -> value
+        is Map<*, *> -> (value["id"] as? Number)?.toInt()?.toString()
+            ?: (value["ids"] as? Map<*, *>)?.get("id")?.let { it as? Number }?.toInt()?.toString()
+        else -> null
+    }
+
+    // ============================================================
+    //  MAIN PAGE
+    // ============================================================
     override val mainPage = mainPageOf(
-        "$tmdbBase/trending/movie/week?api_key={API_KEY}" to "Trending Movies",
-        "$tmdbBase/trending/tv/week?api_key={API_KEY}" to "Trending Shows",
-        "$tmdbBase/discover/tv?api_key={API_KEY}&with_genres=16&sort_by=first_air_date.desc&with_original_language=ja&vote_average.gte=6&vote_count.gte=10&without_keywords=10121,9706,264386,280003,158718,281741" to "Trending Anime",
-        "$tmdbBase/discover/tv?api_key={API_KEY}&with_original_language=ko&sort_by=first_air_date.desc&vote_average.gte=5&vote_count.gte=5&without_keywords=289844,291807,5832" to "Trending K-Drama",
-        "$tmdbBase/discover/tv?api_key={API_KEY}&with_original_language=zh&sort_by=first_air_date.desc&vote_average.gte=4&vote_count.gte=2&without_genres=16,10759,10765,10768&with_keywords=9840|4265&without_keywords=289844,280003" to "Trending C-Drama",
-        "$tmdbBase/discover/tv?api_key={API_KEY}&with_original_language=th&sort_by=first_air_date.desc&vote_average.gte=1&vote_count.gte=1&without_keywords=289844,291807,280003,158718&with_keywords=9840" to "Trending Thai Drama",
-        "$tmdbBase/discover/movie?api_key={API_KEY}&with_original_language=ja&sort_by=release_date.desc&vote_average.gte=5&vote_count.gte=5&without_keywords=225273,289844,158718&with_genres=16" to "Trending Anime Movies",
-        "$tmdbBase/discover/movie?api_key={API_KEY}&with_original_language=ko|zh|th|ja&sort_by=release_date.desc&vote_average.gte=5&vote_count.gte=5&without_keywords=225273,289844,158718&with_genres=10749&without_genres=16" to "Trending Asian Movies"
+        simklUrl("discover/trending/movies_today.json") to "Trending Movies",
+        simklUrl("discover/trending/tv_today.json")     to "Trending Shows",
+        simklUrl("discover/trending/anime_today.json")  to "Trending Anime",
+        simklUrl("calendar/tv.json")                    to "Airing Today",
+        simklUrl("calendar/anime.json")                 to "Airing Anime"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
-        val url = request.data + "&page=$page"
-        val response = fetchTmdb<TmdbSearchResponse>(url) ?: return null
-        val items = response.results?.mapNotNull { result ->
-            mapTmdbResultToSearchResponse(result, request.name.contains("Movie"))
-        } ?: emptyList()
-        return newHomePageResponse(request.name, items)
+        return try {
+            val text = app.get(request.data, timeout = 15L, headers = simklHeaders()).text
+            val results = AppUtils.tryParseJson<List<SimklSearchResult>>(text) ?: return null
+            val items = results.mapNotNull { mapSimklResultToSearchResponse(it) }
+            newHomePageResponse(request.name, items)
+        } catch (_: Exception) {
+            null
+        }
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        val encodedQuery = URLEncoder.encode(query, "UTF-8")
-        val url = "$tmdbBase/search/multi?api_key={API_KEY}&query=$encodedQuery"
-        val response = fetchTmdb<TmdbSearchResponse>(url)
-        return response?.results?.mapNotNull { result ->
-            mapTmdbResultToSearchResponse(result, result.mediaType == "movie" || result.title != null)
-        } ?: emptyList()
+        return searchSimklRaw(query).mapNotNull { mapSimklResultToSearchResponse(it) }
     }
 
-    // Helper to convert a TmdbResult to SearchResponse
-    private fun mapTmdbResultToSearchResponse(result: TmdbResult, isMovie: Boolean): SearchResponse? {
-        val title = result.title ?: result.name ?: return null
-        val id = result.id ?: return null
-        val poster = result.posterPath?.let { "$imageBase$it" }
-        val urlPath = if (isMovie) "movie/$id" else "tv/$id"
-        return newMovieSearchResponse(title, "$mainUrl/$urlPath", if (isMovie) TvType.Movie else TvType.TvSeries) {
+    private fun mapSimklResultToSearchResponse(result: SimklSearchResult): SearchResponse? {
+        val title   = result.title ?: return null
+        val simklId = result.ids?.simkl ?: return null
+        val type    = result.type ?: "movie"
+        val isMovie = type == "movie"
+        val isAnime = type == "anime"
+        val poster  = simklPoster(result.poster)
+
+        val urlPath = "$type/$simklId"
+        val tvType = when {
+            isMovie -> TvType.Movie
+            isAnime -> TvType.Anime
+            else    -> TvType.TvSeries
+        }
+
+        return newMovieSearchResponse(title, "$mainUrl/$urlPath", tvType) {
             this.posterUrl = poster
         }
     }
 
-    // ------------------- Load Details -------------------
+    // ============================================================
+    //  LOAD DETAILS
+    // ============================================================
     override suspend fun load(url: String): LoadResponse? {
         val cleanUrl = url.substringBefore("?")
-        val isMovie  = cleanUrl.contains("/movie/")
-        val tmdbId   = cleanUrl.substringAfterLast("/")
-        val endpoint = if (isMovie) "movie" else "tv"
-        val detailsUrl = "$tmdbBase/$endpoint/$tmdbId?api_key={API_KEY}&append_to_response=images,external_ids&include_image_language=en,null"
+        val isMovie  = cleanUrl.contains("/movie/") || cleanUrl.startsWith("/movie")
+        val isAnime  = cleanUrl.contains("/anime/")
+        val simklId  = cleanUrl.substringAfterLast("/")
 
-        val details = fetchTmdb<TmdbDetails>(detailsUrl) ?: return null
-        return buildLoadResponse(details, isMovie, tmdbId)
+        val type = when {
+            isMovie -> "movies"
+            isAnime -> "anime"
+            else    -> "tv"
+        }
+
+        val details = fetchSimklDetail(type, simklId) ?: return null
+        return buildLoadResponse(details, type, simklId)
     }
 
-    // Helper to build LoadResponse (movie or TV)
-    private suspend fun buildLoadResponse(details: TmdbDetails, isMovie: Boolean, tmdbId: String): LoadResponse? {
-        val title       = details.title ?: details.name ?: return null
-        val poster      = details.posterPath?.let { "$imageBase$it" }
-        val backdrop    = details.backdropPath?.let { "$backdropBase$it" }
-        val imdbId      = details.externalIds?.imdbId ?: "null"
-        val parsedYear  = (details.releaseDate ?: details.firstAirDate)?.split("-")?.firstOrNull()?.toIntOrNull()
-        val parsedTags  = details.genres?.mapNotNull { it.name } ?: emptyList()
-        val logoPath    = details.images?.logos?.firstOrNull { it.lang == "en" }?.filePath
-        val parsedLogo  = logoPath?.let { "$backdropBase$it" }
+    private suspend fun buildLoadResponse(
+        details: SimklDetail,
+        type: String,
+        simklId: String
+    ): LoadResponse? {
+        val title     = details.title ?: return null
+        val poster    = simklPoster(details.poster)
+        val fanart    = simklFanart(details.fanart)
+        val tmdbId    = details.ids?.tmdb
+        val imdbId    = details.ids?.imdb
+        val malId     = extractId(details.ids?.mal)
+        val anilistId = extractId(details.ids?.anilist)
+        val year      = details.year
+        val tags      = details.genres ?: emptyList()
 
-        return if (isMovie) {
-            val dataUrl = "$mainUrl/movie/$tmdbId?imdb=$imdbId"
+        val idQuery = buildString {
+            append("simkl=").append(simklId)
+            tmdbId?.let    { append("&tmdb=").append(it) }
+            imdbId?.let    { append("&imdb=").append(it) }
+            malId?.let     { append("&mal=").append(it) }
+            anilistId?.let { append("&anilist=").append(it) }
+        }
+
+        return if (type == "movies") {
+            val dataUrl = "$mainUrl/movie/$simklId?$idQuery"
             newMovieLoadResponse(title, dataUrl, TvType.Movie, dataUrl) {
-                this.posterUrl          = poster
-                this.backgroundPosterUrl = backdrop
-                this.plot               = details.overview
-                this.year               = parsedYear
-                this.tags               = parsedTags
-                this.logoUrl            = parsedLogo
+                this.posterUrl           = poster
+                this.backgroundPosterUrl = fanart
+                this.plot                = details.overview
+                this.year                = year
+                this.tags                = tags
             }
         } else {
-            val validSeasons = details.seasons?.filter { (it.seasonNumber ?: 0) > 0 } ?: emptyList()
-            val episodes     = mutableListOf<Episode>()
-            validSeasons.forEach { season ->
-                val sNum    = season.seasonNumber ?: return@forEach
-                val epCount = season.episodeCount ?: 0
-                for (epNum in 1..epCount) {
-                    val epUrl = "$mainUrl/tv/$tmdbId/$sNum/$epNum?imdb=$imdbId"
+            val episodes = mutableListOf<Episode>()
+            details.seasons?.forEach { season ->
+                val sNum = season.number ?: return@forEach
+                season.episodes?.forEach { ep ->
+                    val epNum = ep.number ?: return@forEach
+                    val epUrl = "$mainUrl/$type/$simklId/$sNum/$epNum?$idQuery"
                     episodes.add(newEpisode(epUrl) {
-                        this.name    = "Episode $epNum"
+                        this.name    = ep.title ?: "Episode $epNum"
                         this.season  = sNum
                         this.episode = epNum
+                        this.posterUrl = simklEpisodeImage(ep.img)
                     })
                 }
             }
-            val dataUrl = "$mainUrl/tv/$tmdbId?imdb=$imdbId"
-            newTvSeriesLoadResponse(title, dataUrl, TvType.TvSeries, episodes) {
-                this.posterUrl          = poster
-                this.backgroundPosterUrl = backdrop
-                this.plot               = details.overview
-                this.year               = parsedYear
-                this.tags               = parsedTags
-                this.logoUrl            = parsedLogo
+            val tvType = if (type == "anime") TvType.Anime else TvType.TvSeries
+            val dataUrl = "$mainUrl/$type/$simklId?$idQuery"
+            newTvSeriesLoadResponse(title, dataUrl, tvType, episodes) {
+                this.posterUrl           = poster
+                this.backgroundPosterUrl = fanart
+                this.plot                = details.overview
+                this.year                = year
+                this.tags                = tags
             }
         }
     }
 
-    // ------------------- Load Links -------------------
+    // ============================================================
+    //  LOAD LINKS
+    // ============================================================
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -174,65 +278,77 @@ class StreamHubProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val cleanData = data.substringBefore("?")
-        val isMovie   = cleanData.contains("/movie/")
-        val tmdbId    = Regex("""/(?:movie|tv)/(\d+)""").find(cleanData)?.groupValues?.get(1) ?: return false
-        val season    = if (!isMovie) Regex("""/tv/\d+/(\d+)""").find(cleanData)?.groupValues?.get(1)?.toIntOrNull() else null
-        val episode   = if (!isMovie) Regex("""/tv/\d+/\d+/(\d+)""").find(cleanData)?.groupValues?.get(1)?.toIntOrNull() else null
+        val parts = cleanData.split("/").filter { it.isNotBlank() }
+        if (parts.size < 2) return false
+
+        val type      = parts[0]                                  // movie | tv | anime
+        val simklId   = parts[1]
+        val season    = if (parts.size >= 3) parts[2].toIntOrNull() else null
+        val episode   = if (parts.size >= 4) parts[3].toIntOrNull() else null
+        val isMovie   = type == "movies"
+
+        val tmdbId    = data.substringAfter("tmdb=", "").substringBefore("&").takeIf { it.isNotBlank() && it != "null" }
         val imdbId    = data.substringAfter("imdb=", "").substringBefore("&").takeIf { it.isNotBlank() && it != "null" }
-        val metaUrl = if (isMovie) "$tmdbBase/movie/$tmdbId?api_key={API_KEY}" else "$tmdbBase/tv/$tmdbId?api_key={API_KEY}"
-        val details = fetchTmdb<TmdbDetails>(metaUrl) ?: return false
-        val cleanTitle = details.title ?: details.name ?: return false
-        val year = (details.releaseDate ?: details.firstAirDate)?.substringBefore("-")
-        val mappedSubCallback = { sub: SubtitleFile ->
-            val expandedLang = expandLang(sub.lang)
-            if (expandedLang.equals("English", ignoreCase = true)) {
-                subtitleCallback.invoke(SubtitleFile(expandedLang, sub.url))
-            }
-        }
+        val malId     = data.substringAfter("mal=", "").substringBefore("&").takeIf { it.isNotBlank() && it != "null" }
+        val anilistId = data.substringAfter("anilist=", "").substringBefore("&").takeIf { it.isNotBlank() && it != "null" }
 
         return coroutineScope {
-            val extractorJobs = mutableListOf<Deferred<Boolean>>()
+            val jobs = mutableListOf<Deferred<Boolean>>()
 
-            extractorJobs.add(async {
-                VidloveExtractor.getStreams(
-                    tmdbId = tmdbId,
-                    isMovie = isMovie,
-                    season = season,
-                    episode = episode,
-                    subtitleCallback = subtitleCallback,
-                    callback = callback
-                )
-            })
+            // --- Vidlove (movies + tv) ---
+            if (type == "movies" || type == "tv") {
+                jobs.add(async {
+                    VidloveExtractor.getStreams(
+                        simklId = simklId,
+                        type = type,
+                        season = season,
+                        episode = episode,
+                        subtitleCallback = subtitleCallback,
+                        callback = callback,
+                        tmdbHint = tmdbId
+                    )
+                })
+            }
 
-            // OpenSubtitles (parallel)
-            val subJobs = listOf(
-                async {
-                    if (imdbId != null) {
-                        try {
-                            val osUrl = if (isMovie) {
-                                "https://opensubtitles-v3.strem.io/subtitles/movie/$imdbId.json"
-                            } else {
-                                "https://opensubtitles-v3.strem.io/subtitles/series/$imdbId:$season:$episode.json"
-                            }
-                            val subs = JSONObject(app.get(osUrl, timeout = 8L).text).optJSONArray("subtitles")
-                            if (subs != null) {
-                                for (i in 0 until subs.length()) {
-                                    val sub = subs.getJSONObject(i)
-                                    val url = sub.optString("url")
-                                    val lang = expandLang(sub.optString("lang"))
-                                    if (url.isNotBlank() && lang.equals("English", ignoreCase = true)) {
-                                        subtitleCallback.invoke(SubtitleFile(lang, url))
-                                    }
+            // --- ZokoAnime (anime only) ---
+            if (type == "anime" && episode != null && (malId != null || anilistId != null)) {
+                jobs.add(async {
+                    ZokoAnimeExtractor.getStreams(
+                        malId = malId,
+                        anilistId = anilistId,
+                        episode = episode,
+                        callback = callback
+                    )
+                })
+            }
+
+            // --- OpenSubtitles (parallel) ---
+            if (imdbId != null) {
+                jobs.add(async {
+                    try {
+                        val osUrl = if (isMovie) {
+                            "https://opensubtitles-v3.strem.io/subtitles/movie/$imdbId.json"
+                        } else {
+                            "https://opensubtitles-v3.strem.io/subtitles/series/$imdbId:$season:$episode.json"
+                        }
+                        val subs = JSONObject(app.get(osUrl, timeout = 8L).text).optJSONArray("subtitles")
+                        if (subs != null) {
+                            for (i in 0 until subs.length()) {
+                                val sub = subs.getJSONObject(i)
+                                val subUrl  = sub.optString("url")
+                                val subLang = sub.optString("lang")
+                                if (subUrl.isNotBlank() && subLang.equals("English", ignoreCase = true)) {
+                                    subtitleCallback.invoke(SubtitleFile(subLang, subUrl))
                                 }
                             }
-                        } catch (e: Exception) {}
-                    }
-                }
-            )
+                        }
+                    } catch (_: Exception) {}
+                    false
+                })
+            }
 
-            val results = extractorJobs.awaitAll()
-            withTimeoutOrNull(15000) { subJobs.awaitAll() }
-            return@coroutineScope results.any { it }
+            val results = jobs.awaitAll()
+            results.any { it }
         }
     }
 }
