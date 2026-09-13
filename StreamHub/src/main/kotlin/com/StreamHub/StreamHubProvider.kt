@@ -20,12 +20,11 @@ class StreamHubProvider : MainAPI() {
         const val SIMKL_APP_NAME     = "cloudstream"
         const val SIMKL_APP_VERSION  = "1.0"
         const val SIMKL_BASE         = "https://api.simkl.com"
+        const val SIMKL_CDN_BASE     = "https://data.simkl.in"
 
-        // Shared header used by every Simkl call in the plugin
         fun simklHeaders(): Map<String, String> =
             mapOf("User-Agent" to "$SIMKL_APP_NAME/$SIMKL_APP_VERSION")
 
-        // Builds a fully-qualified Simkl URL with required query params
         fun simklUrl(endpoint: String, extra: String = ""): String {
             val base = "$SIMKL_BASE/$endpoint"
             val sep = if (endpoint.contains("?")) "&" else "?"
@@ -36,23 +35,21 @@ class StreamHubProvider : MainAPI() {
                 tail
         }
 
-        // Image proxy helpers (Simkl poster / fanart paths)
+        fun simklCdnUrl(path: String): String =
+            "$SIMKL_CDN_BASE/$path?client_id=$SIMKL_CLIENT_ID" +
+                "&app-name=$SIMKL_APP_NAME" +
+                "&app-version=$SIMKL_APP_VERSION"
+
         const val SIMKL_POSTER_BASE = "https://wsrv.nl/?url=https://simkl.in/posters/"
         const val SIMKL_FANART_BASE = "https://wsrv.nl/?url=https://simkl.in/fanart/"
 
         fun simklPoster(path: String?): String? =
-            path?.takeIf { it.isNotBlank() }?.let { "${SIMKL_POSTER_BASE}${it}_w.webp&q=90" }
+            path?.takeIf { it.isNotBlank() }?.let { "${SIMKL_POSTER_BASE}${it}_m.webp&q=90" }
 
         fun simklFanart(path: String?): String? =
-            path?.takeIf { it.isNotBlank() }?.let { "${SIMKL_FANART_BASE}${it}_w.webp&q=90" }
-
-        fun simklEpisodeImage(path: String?): String? =
-            path?.takeIf { it.isNotBlank() }?.let { "${SIMKL_POSTER_BASE}${it}_w.webp&q=90" }
+            path?.takeIf { it.isNotBlank() }?.let { "${SIMKL_FANART_BASE}${it}_m.webp&q=90" }
     }
 
-    // ============================================================
-    //  MAIN PROVIDER INFO
-    // ============================================================
     override var mainUrl      = "https://streamhub.app"
     override var name         = "StreamHub"
     override val hasMainPage  = true
@@ -67,53 +64,80 @@ class StreamHubProvider : MainAPI() {
     // ============================================================
     //  SIMKL DATA MODELS
     // ============================================================
+
+    /** Matches the search response item shape from /search/{type}. */
     private data class SimklSearchResult(
-        @JsonProperty("type")   val type: String?   = null,
-        @JsonProperty("title")  val title: String?  = null,
-        @JsonProperty("poster") val poster: String? = null,
-        @JsonProperty("year")   val year: Int?      = null,
-        @JsonProperty("ids")    val ids: SimklIds?  = null
+        @JsonProperty("title")         val title: String?       = null,
+        @JsonProperty("year")          val year: Int?           = null,
+        @JsonProperty("poster")        val poster: String?      = null,
+        @JsonProperty("fanart")        val fanart: String?      = null,
+        @JsonProperty("overview")      val overview: String?    = null,
+        @JsonProperty("genres")        val genres: List<String>? = null,
+        @JsonProperty("endpoint_type") val endpointType: String? = null,
+        @JsonProperty("ids")           val ids: SimklIds?       = null
     )
 
+    /** IDs as returned by Simkl. Note: search/trending use `simkl_id`. */
     private data class SimklIds(
-        @JsonProperty("simkl")   val simkl: Int?   = null,
-        @JsonProperty("slug")    val slug: String? = null,
-        @JsonProperty("tmdb")    val tmdb: String? = null,
-        @JsonProperty("mal")     val mal: Any?     = null,
-        @JsonProperty("anilist") val anilist: Any? = null,
-        @JsonProperty("imdb")    val imdb: String? = null
+        @JsonProperty("simkl_id") val simklId: Int?   = null,
+        @JsonProperty("simkl")    val simkl: Int?     = null, // detail endpoint variant
+        @JsonProperty("slug")     val slug: String?   = null,
+        @JsonProperty("tmdb")     val tmdb: String?   = null,
+        @JsonProperty("mal")      val mal: Any?       = null,
+        @JsonProperty("anilist")  val anilist: Any?   = null,
+        @JsonProperty("imdb")     val imdb: String?   = null
     )
 
+    /** Detail endpoint response (movies/{id}, tv/{id}, anime/{id}). */
     private data class SimklDetail(
-        @JsonProperty("title")          val title: String?         = null,
-        @JsonProperty("year")           val year: Int?             = null,
-        @JsonProperty("overview")       val overview: String?      = null,
-        @JsonProperty("genres")         val genres: List<String>?  = null,
-        @JsonProperty("poster")         val poster: String?        = null,
-        @JsonProperty("fanart")         val fanart: String?        = null,
-        @JsonProperty("ids")            val ids: SimklIds?         = null,
-        @JsonProperty("runtime")        val runtime: Int?          = null,
-        @JsonProperty("total_episodes") val totalEpisodes: Int?    = null,
+        @JsonProperty("title")          val title: String?             = null,
+        @JsonProperty("year")           val year: Int?                 = null,
+        @JsonProperty("overview")       val overview: String?          = null,
+        @JsonProperty("genres")         val genres: List<String>?      = null,
+        @JsonProperty("poster")         val poster: String?            = null,
+        @JsonProperty("fanart")         val fanart: String?            = null,
+        @JsonProperty("ids")            val ids: SimklIds?             = null,
+        @JsonProperty("runtime")        val runtime: Int?              = null,
+        @JsonProperty("total_episodes") val totalEpisodes: Int?        = null,
         @JsonProperty("seasons")        val seasons: List<SimklSeason>? = null
     )
 
     private data class SimklSeason(
-        @JsonProperty("number")   val number: Int?               = null,
+        @JsonProperty("number")   val number: Int?                  = null,
         @JsonProperty("episodes") val episodes: List<SimklEpisode>? = null
     )
 
     private data class SimklEpisode(
-        @JsonProperty("number") val number: Int?    = null,
-        @JsonProperty("title")  val title: String?  = null,
-        @JsonProperty("img")    val img: String?    = null
+        @JsonProperty("number") val number: Int?   = null,
+        @JsonProperty("title")  val title: String? = null,
+        @JsonProperty("img")    val img: String?   = null
+    )
+
+    /** Trending CDN file wrapper: { "tv": [...], "movies": [...], "anime": [...] } */
+    private data class SimklTrendingWrapper(
+        @JsonProperty("tv")     val tv: List<SimklTrendingItem>?     = null,
+        @JsonProperty("movies") val movies: List<SimklTrendingItem>? = null,
+        @JsonProperty("anime")  val anime: List<SimklTrendingItem>?  = null
+    )
+
+    private data class SimklTrendingItem(
+        @JsonProperty("title")   val title: String?          = null,
+        @JsonProperty("poster")  val poster: String?         = null,
+        @JsonProperty("fanart")  val fanart: String?         = null,
+        @JsonProperty("overview") val overview: String?      = null,
+        @JsonProperty("genres")  val genres: List<String>?   = null,
+        @JsonProperty("year")    val year: Int?              = null,
+        @JsonProperty("ids")     val ids: SimklIds?          = null,
+        @JsonProperty("url")     val url: String?            = null
     )
 
     // ============================================================
     //  SIMKL API CALLS
     // ============================================================
+
     private suspend fun fetchSimklDetail(type: String, id: String): SimklDetail? {
         return try {
-            val url = simklUrl("$type/$id")
+            val url = simklUrl("$type/$id", "extended=full")
             val text = app.get(url, timeout = 15L, headers = simklHeaders()).text
             AppUtils.tryParseJson<SimklDetail>(text)
         } catch (_: Exception) {
@@ -122,19 +146,27 @@ class StreamHubProvider : MainAPI() {
     }
 
     private suspend fun searchSimklRaw(query: String): List<SimklSearchResult> {
-        return try {
-            val encoded = URLEncoder.encode(query, "UTF-8")
-            val url = simklUrl("search/movie", "q=$encoded&extended=full")
-            val text = app.get(url, timeout = 15L, headers = simklHeaders()).text
-            AppUtils.tryParseJson<List<SimklSearchResult>>(text) ?: emptyList()
-        } catch (_: Exception) {
-            emptyList()
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        val types = listOf("movie", "tv", "anime")
+        val allResults = mutableListOf<SimklSearchResult>()
+
+        for (type in types) {
+            try {
+                val url = simklUrl("search/$type", "q=$encoded&extended=full")
+                val text = app.get(url, timeout = 15L, headers = simklHeaders()).text
+                val results = AppUtils.tryParseJson<List<SimklSearchResult>>(text) ?: continue
+                allResults.addAll(results)
+            } catch (_: Exception) {
+                // Skip this type on failure, continue with others
+            }
         }
+        return allResults
     }
 
     // ============================================================
     //  ID EXTRACTION HELPERS
     // ============================================================
+
     private fun extractId(value: Any?): String? = when (value) {
         is Int    -> value.toString()
         is Long   -> value.toString()
@@ -144,26 +176,55 @@ class StreamHubProvider : MainAPI() {
         else -> null
     }
 
+    private fun getSimklId(ids: SimklIds?): String? {
+        return ids?.simklId?.toString() ?: ids?.simkl?.toString()
+    }
+
     // ============================================================
     //  MAIN PAGE
     // ============================================================
+
     override val mainPage = mainPageOf(
-        simklUrl("discover/trending/movies_today.json") to "Trending Movies",
-        simklUrl("discover/trending/tv_today.json")     to "Trending Shows",
-        simklUrl("discover/trending/anime_today.json")  to "Trending Anime",
-        simklUrl("calendar/tv.json")                    to "Airing Today",
-        simklUrl("calendar/anime.json")                 to "Airing Anime"
+        simklCdnUrl("discover/trending/today_100.json") to "Simkl Trending Today",
+        simklCdnUrl("discover/trending/movies_today_100.json") to "Simkl Trending Movies",
+        simklCdnUrl("discover/trending/tv_today_100.json") to "Simkl Trending TV Shows",
+        simklCdnUrl("discover/trending/anime_today_100.json") to "Simkl Trending Anime",
+        simklCdnUrl("calendar/v2/tv.json") to "Airing Today",
+        simklCdnUrl("calendar/v2/anime.json") to "Airing Anime"
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse? {
         return try {
             val text = app.get(request.data, timeout = 15L, headers = simklHeaders()).text
-            val results = AppUtils.tryParseJson<List<SimklSearchResult>>(text) ?: return null
-            val items = results.mapNotNull { mapSimklResultToSearchResponse(it) }
+            val items = parseHomepageData(text, request.name)
+            if (items.isEmpty()) return null
             newHomePageResponse(request.name, items)
-        } catch (_: Exception) {
+        } catch (e: Exception) {
+            println("StreamHub getMainPage error: ${e.message}")
             null
         }
+    }
+
+    private fun parseHomepageData(text: String, sectionName: String): List<SearchResponse> {
+        // Try wrapper shape first (trending files)
+        val wrapper = AppUtils.tryParseJson<SimklTrendingWrapper>(text)
+        if (wrapper != null) {
+            val list = when {
+                sectionName.contains("Movies", true) -> wrapper.movies
+                sectionName.contains("TV", true)     -> wrapper.tv
+                sectionName.contains("Anime", true)  -> wrapper.anime
+                else -> (wrapper.movies ?: emptyList()) + (wrapper.tv ?: emptyList()) + (wrapper.anime ?: emptyList())
+            }
+            return list?.mapNotNull { mapTrendingItemToSearchResponse(it) } ?: emptyList()
+        }
+
+        // Try flat list shape (calendar files)
+        val flat = AppUtils.tryParseJson<List<SimklSearchResult>>(text)
+        if (flat != null) {
+            return flat.mapNotNull { mapSimklResultToSearchResponse(it) }
+        }
+
+        return emptyList()
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
@@ -172,30 +233,45 @@ class StreamHubProvider : MainAPI() {
 
     private fun mapSimklResultToSearchResponse(result: SimklSearchResult): SearchResponse? {
         val title   = result.title ?: return null
-        val simklId = result.ids?.simkl ?: return null
-        val type    = result.type ?: "movie"
-        val isMovie = type == "movie"
-        val isAnime = type == "anime"
-        val poster  = simklPoster(result.poster)
+        val simklId = getSimklId(result.ids) ?: return null
+        val type    = result.endpointType ?: "movie"
 
-        val urlPath = "$type/$simklId"
-        val tvType = when {
-            isMovie -> TvType.Movie
-            isAnime -> TvType.Anime
-            else    -> TvType.TvSeries
+        val (urlPath, tvType) = when (type) {
+            "movies" -> "movie/$simklId" to TvType.Movie
+            "anime"  -> "anime/$simklId" to TvType.Anime
+            else     -> "tv/$simklId"    to TvType.TvSeries
         }
 
         return newMovieSearchResponse(title, "$mainUrl/$urlPath", tvType) {
-            this.posterUrl = poster
+            this.posterUrl = simklPoster(result.poster)
+        }
+    }
+
+    private fun mapTrendingItemToSearchResponse(item: SimklTrendingItem): SearchResponse? {
+        val title   = item.title ?: return null
+        val simklId = getSimklId(item.ids) ?: return null
+
+        // Determine type from url path: "/tv/..." or "/anime/..." or "/movies/..."
+        val urlPath = item.url ?: return null
+        val (path, tvType) = when {
+            urlPath.contains("/anime/")  -> "anime/$simklId" to TvType.Anime
+            urlPath.contains("/movies/") -> "movie/$simklId" to TvType.Movie
+            urlPath.contains("/tv/")     -> "tv/$simklId"    to TvType.TvSeries
+            else -> "movie/$simklId" to TvType.Movie
+        }
+
+        return newMovieSearchResponse(title, "$mainUrl/$path", tvType) {
+            this.posterUrl = simklPoster(item.poster)
         }
     }
 
     // ============================================================
     //  LOAD DETAILS
     // ============================================================
+
     override suspend fun load(url: String): LoadResponse? {
         val cleanUrl = url.substringBefore("?")
-        val isMovie  = cleanUrl.contains("/movie/") || cleanUrl.startsWith("/movie")
+        val isMovie  = cleanUrl.contains("/movie/") || cleanUrl.contains("/movies/")
         val isAnime  = cleanUrl.contains("/anime/")
         val simklId  = cleanUrl.substringAfterLast("/")
 
@@ -252,7 +328,7 @@ class StreamHubProvider : MainAPI() {
                         this.name    = ep.title ?: "Episode $epNum"
                         this.season  = sNum
                         this.episode = epNum
-                        this.posterUrl = simklEpisodeImage(ep.img)
+                        this.posterUrl = ep.img?.let { "${SIMKL_POSTER_BASE}${it}_m.webp&q=90" }
                     })
                 }
             }
@@ -271,6 +347,7 @@ class StreamHubProvider : MainAPI() {
     // ============================================================
     //  LOAD LINKS
     // ============================================================
+
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -281,11 +358,11 @@ class StreamHubProvider : MainAPI() {
         val parts = cleanData.split("/").filter { it.isNotBlank() }
         if (parts.size < 2) return false
 
-        val type      = parts[0]                                  // movie | tv | anime
+        val type      = parts[0]
         val simklId   = parts[1]
         val season    = if (parts.size >= 3) parts[2].toIntOrNull() else null
         val episode   = if (parts.size >= 4) parts[3].toIntOrNull() else null
-        val isMovie   = type == "movies"
+        val isMovie   = type == "movies" || type == "movie"
 
         val tmdbId    = data.substringAfter("tmdb=", "").substringBefore("&").takeIf { it.isNotBlank() && it != "null" }
         val imdbId    = data.substringAfter("imdb=", "").substringBefore("&").takeIf { it.isNotBlank() && it != "null" }
@@ -296,11 +373,11 @@ class StreamHubProvider : MainAPI() {
             val jobs = mutableListOf<Deferred<Boolean>>()
 
             // --- Vidlove (movies + tv) ---
-            if (type == "movies" || type == "tv") {
+            if (type == "movies" || type == "movie" || type == "tv") {
                 jobs.add(async {
                     VidloveExtractor.getStreams(
                         simklId = simklId,
-                        type = type,
+                        type = if (type == "movie") "movies" else type,
                         season = season,
                         episode = episode,
                         subtitleCallback = subtitleCallback,
