@@ -16,73 +16,55 @@ import java.net.URLDecoder
 
 class XmaalProvider : MainAPI() {
 
-    // ────────────────────────────────────────────────────────────────────
-    // Domains (canonical — every redirect resolved)
-    // ────────────────────────────────────────────────────────────────────
     private object Domains {
         const val OTTDUDE   = "https://ottdude.com"
-        const val MAALVDO   = "https://maalvdo.co"
-        const val XMAZA     = "https://xmaza.xxx"
+        const val MAALVDO   = "https://maalvdo.co"          // was .net (redirects)
+        const val XMAZA     = "https://xmaza.xxx"           // was .gg (redirects)
         const val ZMAAL     = "https://zmaal.net"
-        const val UNCUTMAZA = "https://uncutmaza.movie"
+        const val UNCUTMAZA = "https://uncutmaza.movie"     // added
         const val XMAZA2    = "https://xmaza2.net"
     }
 
-    override var mainUrl = Domains.XMAZA
-    override var name = "Xmaal"
+    override var mainUrl = Domains.XMAZA2
+    override var name = "Xmaza"
     override val hasMainPage = true
     override var lang = "hi"
     override val hasDownloadSupport = true
     override val supportedTypes = setOf(TvType.NSFW)
 
-    // Order matters: unsigned-CDN mirrors first (fast + no expiry),
-    // signed-CDN mirrors after. XMAZA2 is RSC-only.
     private val mirrors = listOf(
-        Domains.XMAZA,
-        Domains.UNCUTMAZA,
         Domains.OTTDUDE,
         Domains.MAALVDO,
+        Domains.XMAZA,
         Domains.ZMAAL,
+        Domains.UNCUTMAZA,
         Domains.XMAZA2
     )
 
     override val mainPage = mainPageOf(
-        "${Domains.OTTDUDE}/ott/ullu/"      to "ULLU",
-        "${Domains.OTTDUDE}/ott/atrangii/"  to "Atrangii",
-        "${Domains.OTTDUDE}/ott/kooku/"  to "Kooku",
-        "${Domains.OTTDUDE}/ott/moovi/"  to "Moovi",
-        "${Domains.OTTDUDE}/ott/look-entertainment/"  to "Look Entertainment",
-        "${Domains.OTTDUDE}/ott/jugnu/" to "Jugnu",
-        "${Domains.OTTDUDE}/ott/voovi/"     to "Voovi"
+        "${Domains.OTTDUDE}/ott/ullu/" to "ULLU",
+        "${Domains.OTTDUDE}/ott/atrangii/" to "Atrangii",
+        "${Domains.OTTDUDE}/ott/primeplay/" to "PrimePlay",
+        "${Domains.OTTDUDE}/ott/voovi/" to "Voovi"
     )
 
-    // ────────────────────────────────────────────────────────────────────
-    // Regexes
-    // ────────────────────────────────────────────────────────────────────
     private val styleUrlRegex = Regex("url\\((['\"]?)(.*?)\\1\\)")
 
-    // Excludes backslash from the URL char class — RSC payloads contain
-    // escaped URLs like "...mp4\"" that would otherwise capture the "\".
-    private val streamPattern = Regex(
-        """["'](https?://[^"'\\]+\.(?:mp4|m3u8)[^"'\\]*)["']"""
+    private val streamPattern = Regex("[\"'](https?://[^\"']+\\.(?:mp4|m3u8)[^\"']*)[\"']")
+
+    private val episodeRegex = Regex("^(.*?)(?:\\s+(\\d+))?\\s+Episode\\s+(\\d+)\\s*$", RegexOption.IGNORE_CASE)
+
+    // Only matches "Episode {num}" along with optional preceding delimiters (-, :, etc)
+    private val titleTrimRegex = Regex(
+        """(?i)(?:[-:|–—]\s*)?\bEpisode\s*\d+\b"""
     )
 
-    private val episodeRegex = Regex(
-        "^(.*?)(?:\\s+(\\d+))?\\s+Episode\\s+(\\d+)\\s*$",
-        RegexOption.IGNORE_CASE
-    )
-
-    private val titleTrimRegex = Regex("""(?i)(?:[-:|–—]\s*)?\bEpisode\s*\d+\b""")
-
-    // ────────────────────────────────────────────────────────────────────
-    // General helpers
-    // ────────────────────────────────────────────────────────────────────
     private fun cleanTitle(title: String): String {
         val cleaned = title
             .replace(titleTrimRegex, "")
-            .replace(Regex("""\(\s*\)|\[\s*]"""), "")
-            .replace(Regex("""[\s\-_:|–—]+$"""), "")
-            .replace(Regex("""^[\s\-_:|–—]+"""), "")
+            .replace(Regex("""\(\s*\)|\[\s*]"""), "") // Removes empty remaining brackets
+            .replace(Regex("""[\s\-_:|–—]+$"""), "")  // Trims trailing hyphens, colons, spaces
+            .replace(Regex("""^[\s\-_:|–—]+"""), "")  // Trims leading hyphens, colons, spaces
             .replace(Regex("""\s+"""), " ")
             .trim()
         return if (cleaned.isBlank()) title.trim() else cleaned
@@ -93,29 +75,12 @@ class XmaalProvider : MainAPI() {
 
     private fun domainOf(url: String): String {
         val protocolEnd = url.indexOf("//") + 2
-        if (protocolEnd < 2) return url
-        return url.substring(0, protocolEnd) +
-                url.substring(protocolEnd).substringBefore("/")
-    }
-
-    /**
-     * Clean a URL extracted from HTML/RSC:
-     *  - JSON-escaped slash `\/` → `/`
-     *  - strip stray backslashes
-     *  - decode the HTML entity `&amp;` / `&#038;` in query strings
-     */
-    private fun sanitizeUrl(raw: String): String {
-        var s = raw
-        s = s.replace("\\/", "/")
-        s = s.replace("\\", "")
-        s = s.replace("&amp;", "&")
-        s = s.replace("&#038;", "&")
-        return s.trim()
+        return url.substring(0, protocolEnd) + url.substring(protocolEnd).substringBefore("/")
     }
 
     private fun fixImageUrl(raw: String?, pageUrl: String): String? {
         if (raw.isNullOrBlank()) return null
-        var url = sanitizeUrl(raw)
+        val url = raw.trim()
         if (url.startsWith("data:")) return null
 
         val root = domainOf(pageUrl)
@@ -132,20 +97,16 @@ class XmaalProvider : MainAPI() {
             } else full
         }
 
-        url = when {
+        return when {
             url.startsWith("//") -> "https:$url"
-            url.startsWith("/")  -> root + url
-            else                 -> url
+            url.startsWith("/") -> root + url
+            else -> url
         }
-        return url
     }
 
     private fun resolveHref(hrefRaw: String, site: String): String =
         if (hrefRaw.startsWith("/")) domainOf(site) + hrefRaw else hrefRaw
 
-    // ────────────────────────────────────────────────────────────────────
-    // Card extraction — the single scraper reused everywhere
-    // ────────────────────────────────────────────────────────────────────
     private fun extractCards(doc: Document, site: String): List<Triple<String, String, String?>> {
         val results = mutableListOf<Triple<String, String, String?>>()
 
@@ -155,35 +116,30 @@ class XmaalProvider : MainAPI() {
                     val title = a.selectFirst("h4")?.text()?.trim() ?: a.attr("title")
                     val href = a.attr("href")
                     val raw = a.selectFirst("img")?.attr("src")
-                    if (title.isNotBlank() && href.isNotBlank())
-                        results.add(Triple(title, href, raw))
+                    if (title.isNotBlank() && href.isNotBlank()) results.add(Triple(title, href, raw))
                 }
             }
 
             site.contains(Domains.ZMAAL) -> {
                 doc.select("article").forEach { article ->
                     val a = article.selectFirst("a.link") ?: return@forEach
-                    val title = a.attr("title").ifBlank { a.attr("aria-label") }
-                        .ifBlank { a.text() }
+                    val title = a.attr("title").ifBlank { a.attr("aria-label") }.ifBlank { a.text() }
                     val href = a.attr("href")
                     val img = article.selectFirst("img")
                     val raw = img?.attr("data-src")?.ifBlank { img.attr("src") }
-                    if (title.isNotBlank() && href.isNotBlank())
-                        results.add(Triple(title, href, raw))
+                    if (title.isNotBlank() && href.isNotBlank()) results.add(Triple(title, href, raw))
                 }
             }
 
             else -> {
                 doc.select("a.video").forEach { a ->
-                    val title = a.selectFirst("h2.vtitle")?.text()?.trim()
-                        ?: a.attr("title")
+                    val title = a.selectFirst("h2.vtitle")?.text()?.trim() ?: a.attr("title")
                     val href = a.attr("href")
                     val dataBg = a.attr("data-bg")
                     val raw = dataBg.ifBlank {
                         styleUrlRegex.find(a.attr("style"))?.groupValues?.get(2)
                     }
-                    if (title.isNotBlank() && href.isNotBlank())
-                        results.add(Triple(title, href, raw))
+                    if (title.isNotBlank() && href.isNotBlank()) results.add(Triple(title, href, raw))
                 }
             }
         }
@@ -191,9 +147,6 @@ class XmaalProvider : MainAPI() {
         return results
     }
 
-    // ────────────────────────────────────────────────────────────────────
-    // Series poster picker (used by load())
-    // ────────────────────────────────────────────────────────────────────
     private fun extractSeriesPoster(doc: Document, pageUrl: String, title: String): String? {
         val candidates = mutableListOf<String>()
 
@@ -226,12 +179,10 @@ class XmaalProvider : MainAPI() {
             val overlap = fileTokens.intersect(titleTokens).size
 
             var score = overlap * 10
-            val isBranding = fileTokens.isNotEmpty() &&
-                    fileTokens.all { it in siteTokens || it in brandingWords }
+            val isBranding = fileTokens.isNotEmpty() && fileTokens.all { it in siteTokens || it in brandingWords }
             if (isBranding) score -= 50
             val fnLower = filename.lowercase()
-            if (fnLower.contains("logo") || fnLower.contains("icon") ||
-                fnLower.contains("default")) score -= 50
+            if (fnLower.contains("logo") || fnLower.contains("icon") || fnLower.contains("default")) score -= 50
 
             if (score > bestScore) {
                 bestScore = score
@@ -243,14 +194,12 @@ class XmaalProvider : MainAPI() {
         return fixImageUrl(bestRaw, pageUrl)
     }
 
-    // ────────────────────────────────────────────────────────────────────
-    // Homepage
-    // ────────────────────────────────────────────────────────────────────
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val document = app.get(request.data).document
         val home = extractCards(document, request.data).mapNotNull { (title, hrefRaw, posterRaw) ->
             val href = resolveHref(hrefRaw, request.data)
             if (title.isBlank() || href.isBlank()) return@mapNotNull null
+            // Use the raw, untrimmed title for the main page
             newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
                 this.posterUrl = fixImageUrl(posterRaw, request.data)
             }
@@ -260,9 +209,6 @@ class XmaalProvider : MainAPI() {
         )
     }
 
-    // ────────────────────────────────────────────────────────────────────
-    // Search — HTML scrape on every mirror, dedupe by title
-    // ────────────────────────────────────────────────────────────────────
     override suspend fun search(query: String): List<SearchResponse> {
         val results = mutableMapOf<String, SearchResponse>()
         val mutex = Mutex()
@@ -271,11 +217,7 @@ class XmaalProvider : MainAPI() {
             mirrors.map { site ->
                 async {
                     try {
-                        val searchUrl = if (site.contains(Domains.XMAZA2)) {
-                            "$site/search/$query"
-                        } else {
-                            "$site/?s=$query"
-                        }
+                        val searchUrl = if (site.contains(Domains.XMAZA2)) "$site/search/$query" else "$site/?s=$query"
                         val doc = app.get(searchUrl).document
 
                         extractCards(doc, site).forEach { (title, hrefRaw, posterRaw) ->
@@ -285,9 +227,8 @@ class XmaalProvider : MainAPI() {
 
                             mutex.withLock {
                                 if (!results.containsKey(key)) {
-                                    results[key] = newTvSeriesSearchResponse(
-                                        title, href, TvType.TvSeries
-                                    ) {
+                                    // Use the raw, untrimmed title for search results
+                                    results[key] = newTvSeriesSearchResponse(title, href, TvType.TvSeries) {
                                         this.posterUrl = fixImageUrl(posterRaw, site)
                                     }
                                 }
@@ -303,27 +244,21 @@ class XmaalProvider : MainAPI() {
         return results.values.toList()
     }
 
-    // ────────────────────────────────────────────────────────────────────
-    // Load — episode list
-    // ────────────────────────────────────────────────────────────────────
     override suspend fun load(url: String): LoadResponse? {
         val epDoc = app.get(url).document
 
-        val rawClickedTitle = epDoc.selectFirst("h1, .entry-title, h2")
-            ?.text()?.trim() ?: "Unknown Title"
+        // Extract the title and clean it specifically for the load response page
+        val rawClickedTitle = epDoc.selectFirst("h1, .entry-title, h2")?.text()?.trim() ?: "Unknown Title"
         val mediaTitle = cleanTitle(rawClickedTitle)
 
-        // Find the series page (WP sites link to /series/ or /web-series/)
         var seriesUrl: String? = null
         for (a in epDoc.select("a")) {
             val href = a.attr("href")
             if (href.isBlank()) continue
             val full = if (href.startsWith("http")) href else domainOf(url) + href
-            val pathParts = full.substringAfter("://").substringAfter("/")
-                .split("/").filter { it.isNotBlank() }
+            val pathParts = full.substringAfter("://").substringAfter("/").split("/").filter { it.isNotBlank() }
 
-            if ((pathParts.contains("series") || pathParts.contains("web-series")) &&
-                pathParts.size > 1) {
+            if ((pathParts.contains("series") || pathParts.contains("web-series")) && pathParts.size > 1) {
                 seriesUrl = full
                 break
             }
@@ -331,12 +266,12 @@ class XmaalProvider : MainAPI() {
 
         val clickedPoster = extractSeriesPoster(epDoc, url, rawClickedTitle)
 
-        // Standalone movie / single video
+        // Fallback for short films or standalone single media
         if (seriesUrl == null) {
             return newMovieLoadResponse(mediaTitle, url, TvType.Movie, url) {
                 this.posterUrl = clickedPoster
                 this.backgroundPosterUrl = clickedPoster
-                this.plot = mediaTitle
+                this.plot = mediaTitle // Set to trimmed title
             }
         }
 
@@ -368,7 +303,7 @@ class XmaalProvider : MainAPI() {
             return newMovieLoadResponse(mediaTitle, url, TvType.Movie, url) {
                 this.posterUrl = poster
                 this.backgroundPosterUrl = poster
-                this.plot = mediaTitle
+                this.plot = mediaTitle // Set to trimmed title
             }
         }
 
@@ -377,13 +312,10 @@ class XmaalProvider : MainAPI() {
         return newTvSeriesLoadResponse(mediaTitle, url, TvType.TvSeries, sortedEpisodes) {
             this.posterUrl = poster
             this.backgroundPosterUrl = poster
-            this.plot = mediaTitle
+            this.plot = mediaTitle // Set to trimmed title
         }
     }
 
-    // ────────────────────────────────────────────────────────────────────
-    // LoadLinks — query every mirror, sanitize, dedupe, emit
-    // ────────────────────────────────────────────────────────────────────
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -391,39 +323,36 @@ class XmaalProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val slug = data.trimEnd('/').substringAfterLast("/")
-        if (slug.isBlank()) return false
 
-        // url → sourceName, keyed by CLEAN url so escaped duplicates collapse.
-        val byUrl = linkedMapOf<String, String>()
-        val mutex = Mutex()
+        val mirrorUrls = mirrors.associateWith { site ->
+            if (site.contains(Domains.XMAZA2)) "$site/watch/$slug" else "$site/$slug/"
+        }
 
         coroutineScope {
-            mirrors.map { site ->
+            mirrorUrls.map { (site, mirrorUrl) ->
                 async {
                     try {
-                        val mirrorUrl = if (site.contains(Domains.XMAZA2)) {
-                            "$site/watch/$slug"
-                        } else {
-                            "$site/$slug/"
-                        }
                         val html = app.get(mirrorUrl).text
-                        val sourceName = domainOf(site)
-                            .removePrefix("https://")
-                            .removePrefix("http://")
+                        val sourceName = domainOf(site).removePrefix("https://").removePrefix("http://")
 
-                        val urls = streamPattern.findAll(html)
+                        val videoUrl = streamPattern.findAll(html)
                             .map { Parser.unescapeEntities(it.groupValues[1], false) }
-                            .map { sanitizeUrl(it) }
-                            .filter { it.startsWith("http") }
-                            .distinct()
-                            .toList()
+                            .firstOrNull()
 
-                        if (urls.isNotEmpty()) {
-                            mutex.withLock {
-                                for (u in urls) {
-                                    if (!byUrl.containsKey(u)) byUrl[u] = sourceName
+                        if (videoUrl != null) {
+                            val isM3u8 = videoUrl.contains(".m3u8")
+
+                            callback.invoke(
+                                newExtractorLink(
+                                    source = sourceName,
+                                    name = sourceName,
+                                    url = videoUrl,
+                                    type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                ) {
+                                    this.referer = mirrorUrl
+                                    this.quality = Qualities.Unknown.value
                                 }
-                            }
+                            )
                         }
                     } catch (e: Exception) {
                         e.printStackTrace()
@@ -432,42 +361,9 @@ class XmaalProvider : MainAPI() {
             }.awaitAll()
         }
 
-        for ((videoUrl, sourceName) in byUrl) {
-            val isM3u8 = videoUrl.contains(".m3u8")
-            val referer = refererFor(sourceName, slug)
-            callback.invoke(
-                newExtractorLink(
-                    source = sourceName,
-                    name = sourceName,
-                    url = videoUrl,
-                    type = if (isM3u8) ExtractorLinkType.M3U8
-                           else ExtractorLinkType.VIDEO
-                ) {
-                    this.referer = referer
-                    this.quality = Qualities.Unknown.value
-                }
-            )
-        }
-
-        return byUrl.isNotEmpty()
+        return true
     }
 
-    /** Build the referer page URL for a mirror hostname + slug. */
-    private fun refererFor(sourceName: String, slug: String): String {
-        return when {
-            sourceName.contains("xmaza2.net")   -> "https://xmaza2.net/watch/$slug"
-            sourceName.contains("xmaza.xxx")    -> "https://xmaza.xxx/$slug/"
-            sourceName.contains("uncutmaza")    -> "https://uncutmaza.movie/$slug/"
-            sourceName.contains("ottdude")      -> "https://ottdude.com/$slug/"
-            sourceName.contains("maalvdo")      -> "https://maalvdo.co/$slug/"
-            sourceName.contains("zmaal")        -> "https://zmaal.net/$slug/"
-            else -> ""
-        }
-    }
-
-    // ────────────────────────────────────────────────────────────────────
-    // Episode sorting
-    // ────────────────────────────────────────────────────────────────────
     private inner class SeasonAwareComparator : Comparator<Episode> {
         override fun compare(s1: Episode, s2: Episode): Int {
             val (base1, season1, ep1) = parseKey(s1.name ?: "")
@@ -478,8 +374,7 @@ class XmaalProvider : MainAPI() {
         }
 
         private fun parseKey(title: String): Triple<String, Int, Int> {
-            val m = episodeRegex.matchEntire(title.trim())
-                ?: return Triple(normalizeTitle(title), 0, 0)
+            val m = episodeRegex.matchEntire(title.trim()) ?: return Triple(normalizeTitle(title), 0, 0)
             val base = normalizeTitle(m.groupValues[1])
             val season = m.groupValues[2].toIntOrNull() ?: 1
             val ep = m.groupValues[3].toIntOrNull() ?: 0
