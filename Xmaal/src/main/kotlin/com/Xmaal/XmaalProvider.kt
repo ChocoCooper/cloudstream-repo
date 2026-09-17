@@ -268,7 +268,7 @@ class XmaalProvider : MainAPI() {
 
         // Fallback for short films or standalone single media
         if (seriesUrl == null) {
-            return newMovieLoadResponse(mediaTitle, url, TvType.Movie, url) {
+            return newMovieLoadResponse(mediaTitle, url, TvType.NSFW, url) {
                 this.posterUrl = clickedPoster
                 this.backgroundPosterUrl = clickedPoster
                 this.plot = mediaTitle // Set to trimmed title
@@ -300,7 +300,7 @@ class XmaalProvider : MainAPI() {
         }
 
         if (episodesList.isEmpty()) {
-            return newMovieLoadResponse(mediaTitle, url, TvType.Movie, url) {
+            return newMovieLoadResponse(mediaTitle, url, TvType.NSFW, url) {
                 this.posterUrl = poster
                 this.backgroundPosterUrl = poster
                 this.plot = mediaTitle // Set to trimmed title
@@ -309,7 +309,7 @@ class XmaalProvider : MainAPI() {
 
         val sortedEpisodes = episodesList.sortedWith(SeasonAwareComparator())
 
-        return newTvSeriesLoadResponse(mediaTitle, url, TvType.TvSeries, sortedEpisodes) {
+        return newTvSeriesLoadResponse(mediaTitle, url, TvType.NSFW, sortedEpisodes) {
             this.posterUrl = poster
             this.backgroundPosterUrl = poster
             this.plot = mediaTitle // Set to trimmed title
