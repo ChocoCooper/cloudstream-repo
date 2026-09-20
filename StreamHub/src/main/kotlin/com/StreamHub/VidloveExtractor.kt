@@ -18,70 +18,7 @@ object VidloveExtractor {
     private const val TARGET_SOURCE = "vidapi"
     private const val ORIGIN_URL = "https://player.vidlove.cc"
 
-    /**
-     * Entry point. Accepts a **Simkl ID** and resolves the TMDB ID via Simkl.
-     *
-     * @param simklId   Simkl numeric ID
-     * @param type      "movies" | "tv" | "anime"
-     * @param season    Season number (null for movies)
-     * @param episode   Episode number (null for movies)
-     * @param tmdbHint  Optional pre-resolved TMDB ID (skips the Simkl call)
-     */
     suspend fun getStreams(
-        simklId: String,
-        type: String,
-        season: Int?,
-        episode: Int?,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit,
-        tmdbHint: String? = null
-    ): Boolean {
-        val tmdbId = tmdbHint ?: resolveTmdbIdFromSimkl(simklId, type) ?: run {
-            Log.w(TAG, "Could not resolve TMDB ID from Simkl for simklId=$simklId type=$type")
-            return false
-        }
-        Log.d(TAG, "Resolved Simkl $simklId -> TMDB $tmdbId")
-
-        val isMovie = type == "movies"
-        return fetchFromShowsSt(
-            tmdbId = tmdbId,
-            isMovie = isMovie,
-            season = season,
-            episode = episode,
-            subtitleCallback = subtitleCallback,
-            callback = callback
-        )
-    }
-
-    /**
-     * Resolves TMDB from Simkl using the shared Simkl config.
-     */
-    private suspend fun resolveTmdbIdFromSimkl(simklId: String, type: String): String? {
-        val endpoint = when (type) {
-            "movies" -> "movies"
-            "anime"  -> "anime"
-            else     -> "tv"
-        }
-
-        return try {
-            val url = StreamHubProvider.simklUrl("$endpoint/$simklId")
-            val response = app.get(
-                url,
-                timeout = 15L,
-                headers = StreamHubProvider.simklHeaders()
-            ).text
-            if (response.isBlank()) return null
-
-            val json = JSONObject(response)
-            val ids  = json.optJSONObject("ids") ?: return null
-            ids.optString("tmdb").takeIf { it.isNotBlank() && it != "null" }
-        } catch (e: Exception) {
-            Log.e(TAG, "Simkl TMDB resolution error: ${e.message}", e)
-            null
-        }
-    }
-
-    private suspend fun fetchFromShowsSt(
         tmdbId: String,
         isMovie: Boolean,
         season: Int?,
@@ -89,7 +26,7 @@ object VidloveExtractor {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        Log.d(TAG, "fetchFromShowsSt: tmdbId=$tmdbId, isMovie=$isMovie, season=$season, episode=$episode")
+        Log.d(TAG, "getStreams called: tmdbId=$tmdbId, isMovie=$isMovie, season=$season, episode=$episode")
 
         val apiUrl = if (isMovie) {
             "https://api.shows.st/movie?id=$tmdbId&mode=json&sources=$TARGET_SOURCE"
@@ -104,13 +41,10 @@ object VidloveExtractor {
         }
 
         val headers = mapOf(
-            "User-Agent"      to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept"          to "application/json, text/plain, */*",
-            "Origin"          to ORIGIN_URL,
-            "Referer"         to refererUrl,
-            "Sec-Fetch-Dest"  to "empty",
-            "Sec-Fetch-Mode"  to "cors",
-            "Sec-Fetch-Site"  to "cross-site"
+            "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept" to "application/json, text/plain, */*",
+            "Origin" to ORIGIN_URL,
+            "Referer" to refererUrl
         )
 
         return try {
@@ -139,28 +73,18 @@ object VidloveExtractor {
 
     private fun findManifest(json: JSONObject): String? {
         json.optJSONObject("source")?.optString("manifest")?.takeIf { it.isNotBlank() }?.let { return it }
-
         json.optJSONArray("sources")?.let { arr ->
             for (i in 0 until arr.length()) {
                 val m = arr.optJSONObject(i)?.optString("manifest")
                 if (!m.isNullOrBlank()) return m
             }
         }
-
-        json.optJSONObject("data")?.optJSONObject("source")?.optString("manifest")
-            ?.takeIf { it.isNotBlank() }?.let { return it }
-
+        json.optJSONObject("data")?.optJSONObject("source")?.optString("manifest")?.takeIf { it.isNotBlank() }?.let { return it }
         json.optString("manifest").takeIf { it.isNotBlank() }?.let { return it }
-        json.optJSONObject("stream")?.optString("manifest")?.takeIf { it.isNotBlank() }?.let { return it }
-
         return null
     }
 
-    private suspend fun emitSingleLink(
-        manifest: String,
-        referer: String,
-        callback: (ExtractorLink) -> Unit
-    ): Boolean {
+    private suspend fun emitSingleLink(manifest: String, referer: String, callback: (ExtractorLink) -> Unit): Boolean {
         val hasVariant = manifest.lines().any { it.trim().startsWith("http") }
         if (!hasVariant) {
             Log.w(TAG, "Manifest has no variant stream URLs, skipping")
@@ -171,29 +95,21 @@ object VidloveExtractor {
         Log.d(TAG, "Emitting combined-quality link ($DISPLAY_NAME) via $localUrl")
 
         callback(
-            newExtractorLink(
-                source = DISPLAY_NAME,
-                name   = DISPLAY_NAME,
-                url    = localUrl,
-                type   = ExtractorLinkType.M3U8
-            ) {
+            newExtractorLink(source = DISPLAY_NAME, name = DISPLAY_NAME, url = localUrl, type = ExtractorLinkType.M3U8) {
                 this.referer = referer
             }
         )
         return true
     }
 
-    private fun addShowsStSubtitles(
-        json: JSONObject,
-        subtitleCallback: (SubtitleFile) -> Unit
-    ) {
+    private fun addShowsStSubtitles(json: JSONObject, subtitleCallback: (SubtitleFile) -> Unit) {
         val subtitlesArray = json.optJSONArray("subtitles") ?: return
         val addedSubtitles = mutableSetOf<String>()
 
         for (i in 0 until subtitlesArray.length()) {
             val subObj = subtitlesArray.optJSONObject(i) ?: continue
             val subUrl = subObj.optString("file")
-            val label  = subObj.optString("label")
+            val label = subObj.optString("label")
             if (subUrl.isNotBlank() && label.contains("English", ignoreCase = true)) {
                 if (addedSubtitles.add("English")) {
                     subtitleCallback.invoke(SubtitleFile("English", subUrl))
@@ -202,14 +118,9 @@ object VidloveExtractor {
         }
     }
 
-    // ------------------------------------------------------------
-    //  Local loopback manifest server
-    // ------------------------------------------------------------
     private object LocalManifestServer {
         private const val TTL_MS = 30 * 60 * 1000L
-
         private data class Entry(val bytes: ByteArray, val createdAt: Long)
-
         private val lock = Any()
         private var serverSocket: ServerSocket? = null
         private var port: Int = -1
@@ -229,9 +140,7 @@ object VidloveExtractor {
                     while (!ss.isClosed) {
                         try {
                             val client = ss.accept()
-                            thread(isDaemon = true, name = "VidloveManifestClient") {
-                                handleClient(client)
-                            }
+                            thread(isDaemon = true, name = "VidloveManifestClient") { handleClient(client) }
                         } catch (e: Exception) {
                             if (!ss.isClosed) Log.e(TAG, "LocalManifestServer accept error: $e")
                         }
@@ -259,19 +168,11 @@ object VidloveExtractor {
 
                     if (entry == null) {
                         val body = "not found".toByteArray()
-                        val header = "HTTP/1.1 404 Not Found\r\n" +
-                            "Content-Type: text/plain\r\n" +
-                            "Content-Length: ${body.size}\r\n" +
-                            "Connection: close\r\n\r\n"
+                        val header = "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: ${body.size}\r\nConnection: close\r\n\r\n"
                         output.write(header.toByteArray(Charsets.US_ASCII))
                         output.write(body)
                     } else {
-                        val header = "HTTP/1.1 200 OK\r\n" +
-                            "Content-Type: application/vnd.apple.mpegurl\r\n" +
-                            "Content-Length: ${entry.bytes.size}\r\n" +
-                            "Access-Control-Allow-Origin: *\r\n" +
-                            "Cache-Control: no-cache\r\n" +
-                            "Connection: close\r\n\r\n"
+                        val header = "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: ${entry.bytes.size}\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n"
                         output.write(header.toByteArray(Charsets.US_ASCII))
                         output.write(entry.bytes)
                     }
