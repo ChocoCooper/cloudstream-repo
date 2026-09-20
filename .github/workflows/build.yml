@@ -29,8 +29,11 @@ jobs:
         with:
           distribution: "adopt"
           java-version: 17
+      # ---- CHANGED: v3.2.2 → v4, and explicit packages to avoid legacy deps ----
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
       - name: Build Plugins
         id: build
         run: |
