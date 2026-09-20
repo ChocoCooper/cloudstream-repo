@@ -2,6 +2,7 @@ package com.StreamHub
 
 import com.lagradost.cloudstream3.app
 import org.json.JSONObject
+import java.net.URLEncoder
 
 object AniListApi {
 
@@ -9,10 +10,10 @@ object AniListApi {
 
     /**
      * Searches AniList by title and optional year, returning the best matching AniList ID.
-     * Uses the public GraphQL API, so no authentication is required.
+     * Uses AniList's GET endpoint, which accepts GraphQL queries via URL params —
+     * this avoids Cloudstream's `app.post` which only supports Map<String, String> bodies.
      */
     suspend fun getAnilistIdByTitle(title: String, year: String?): String? {
-        // Use a conservative search query. The first result is usually the best match.
         val query = """
             query (${'$'}search: String) {
               Media(search: ${'$'}search, type: ANIME, sort: POPULARITY_DESC) {
@@ -25,29 +26,20 @@ object AniListApi {
 
         val variables = JSONObject().apply { put("search", title) }
 
-        val requestBody = JSONObject().apply {
-            put("query", query)
-            put("variables", variables)
-        }
+        val encodedQuery = URLEncoder.encode(query, "UTF-8")
+        val encodedVars  = URLEncoder.encode(variables.toString(), "UTF-8")
+        val url = "$ANILIST_GRAPHQL_URL?query=$encodedQuery&variables=$encodedVars"
 
         return try {
-            val response = app.post(
-                ANILIST_GRAPHQL_URL,
-                headers = mapOf(
-                    "Content-Type" to "application/json",
-                    "Accept" to "application/json"
-                ),
-                data = requestBody.toString()
+            val response = app.get(
+                url,
+                headers = mapOf("Accept" to "application/json"),
+                timeout = 15L
             ).text
 
             val json = JSONObject(response)
-            val mediaArray = json.optJSONObject("data")?.optJSONArray("Media")
-            // The response for a single Media object is under "data.Media", not an array.
-            // Let's handle both cases for safety.
-            val media = if (mediaArray != null) mediaArray.optJSONObject(0) else json.optJSONObject("data")?.optJSONObject("Media")
-
-            val id = media?.optInt("id")?.takeIf { it > 0 }?.toString()
-            id
+            val media = json.optJSONObject("data")?.optJSONObject("Media")
+            media?.optInt("id")?.takeIf { it > 0 }?.toString()
         } catch (_: Exception) {
             null
         }
