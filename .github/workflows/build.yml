@@ -25,11 +25,10 @@ jobs:
       - name: Clean old builds
         run: rm -rf $GITHUB_WORKSPACE/builds/*.cs3
       - name: Setup JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
-          distribution: "adopt"
+          distribution: "temurin"
           java-version: 17
-      # ---- CHANGED: v3.2.2 → v4, and explicit packages to avoid legacy deps ----
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
         with:
