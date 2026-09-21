@@ -14,13 +14,6 @@ import org.jsoup.nodes.Element
 import java.net.URLDecoder
 import java.net.URLEncoder
 
-/**
- * SkyBap provider
- *
- * The real content domain rotates constantly, so every request first resolves
- * the "live" domain from https://skybap.site/  ( body > a  ->  href = live domain ).
- * That resolved domain is cached for the lifetime of the provider instance.
- */
 class SkyBapProvider : MainAPI() {
 
     private val resolverUrl = "https://skybap.site"
@@ -30,30 +23,20 @@ class SkyBapProvider : MainAPI() {
     override val hasMainPage = true
     override var lang = "ta"
     override val hasDownloadSupport = true
-    override val supportedTypes = setOf(
-        TvType.Movie,
-        TvType.TvSeries,
-    )
-
-    // ---------------------------------------------------------------------
-    // Dynamic URL resolution
-    // ---------------------------------------------------------------------
+    override val supportedTypes = setOf(TvType.Movie, TvType.TvSeries)
 
     private var resolvedBaseUrl: String? = null
 
     private suspend fun getActiveBaseUrl(): String {
         resolvedBaseUrl?.let { return it }
-
         val doc = app.get(resolverUrl, timeout = 15).document
         val href = doc.selectFirst("body > a")?.attr("href")
             ?: doc.selectFirst("a[href^=http]")?.attr("href")
             ?: throw ErrorLoadingException("SkyBap resolver page did not return a live URL")
-
         val normalized = when {
             href.startsWith("http://") || href.startsWith("https://") -> href
             else -> "https://$href"
         }.trimEnd('/')
-
         resolvedBaseUrl = normalized
         return normalized
     }
@@ -70,8 +53,8 @@ class SkyBapProvider : MainAPI() {
     private val titleMarker = "__sbTitle="
 
     private fun withEmbeddedTitle(href: String, title: String): String {
-        val separator = if (href.contains("?")) "&" else "?"
-        return "$href$separator$titleMarker${URLEncoder.encode(title, "UTF-8")}"
+        val sep = if (href.contains("?")) "&" else "?"
+        return "$href$sep$titleMarker${URLEncoder.encode(title, "UTF-8")}"
     }
 
     private fun splitEmbeddedTitle(url: String): Pair<String, String?> {
@@ -92,32 +75,23 @@ class SkyBapProvider : MainAPI() {
     }
 
     private data class DetailProbe(val reachable: Boolean, val poster: String?)
-
     private val detailProbeCache = HashMap<String, DetailProbe>()
 
     private suspend fun probeDetailPage(detailUrl: String): DetailProbe {
         detailProbeCache[detailUrl]?.let { return it }
-
         val probe = try {
             val response = app.get(detailUrl, timeout = 8)
             if (response.code !in 200..299) {
-                DetailProbe(reachable = false, poster = null)
+                DetailProbe(false, null)
             } else {
                 val base = getActiveBaseUrl()
                 val src = response.document.selectFirst("div.movielist img")?.attr("src")?.trim()
-                DetailProbe(reachable = true, poster = absolute(base, src))
+                DetailProbe(true, absolute(base, src))
             }
-        } catch (_: Exception) {
-            DetailProbe(reachable = false, poster = null)
-        }
-
+        } catch (_: Exception) { DetailProbe(false, null) }
         detailProbeCache[detailUrl] = probe
         return probe
     }
-
-    // ---------------------------------------------------------------------
-    // Home page
-    // ---------------------------------------------------------------------
 
     override val mainPage = mainPageOf(
         "category/Bollywood-Movies.html" to "Bollywood Movies",
@@ -128,83 +102,55 @@ class SkyBapProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val base = getActiveBaseUrl()
-
-        val url = if (page <= 1) {
-            "$base/${request.data}"
-        } else {
+        val url = if (page <= 1) "$base/${request.data}"
+        else {
             val slug = request.data.removePrefix("category/").removeSuffix(".html")
             "$base/category/$slug/$page.html"
         }
-
         val doc = app.get(url, timeout = 15).document
         val items = parseFolderListing(doc, base)
-
         val totalPages = Regex("Page\\s+\\d+\\s+of\\s+(\\d+)")
             .find(doc.text())?.groupValues?.get(1)?.toIntOrNull()
-
         val hasNext = if (totalPages != null) page < totalPages else items.isNotEmpty()
-
-        return newHomePageResponse(
-            list = HomePageList(request.name, items),
-            hasNext = hasNext
-        )
+        return newHomePageResponse(HomePageList(request.name, items), hasNext)
     }
 
     private suspend fun parseFolderListing(doc: Document, base: String): List<SearchResponse> {
-        val anchors = doc.select("div.L b a[href]")
-            .ifEmpty { doc.select("div.L a[href]") }
-
-        return anchors.mapConcurrent(concurrency = 8) { it.toSearchResult(base) }
-            .filterNotNull()
+        val anchors = doc.select("div.L b a[href]").ifEmpty { doc.select("div.L a[href]") }
+        return anchors.mapConcurrent(8) { it.toSearchResult(base) }.filterNotNull()
     }
 
     private suspend fun Element.toSearchResult(base: String): SearchResponse? {
         val href = absolute(base, sanitizeHeaderValue(this.attr("href"))) ?: return null
         val title = this.text().trim().ifBlank { return null }
-
         val probe = probeDetailPage(href)
         if (!probe.reachable) return null
-
         val type = when {
-            title.contains("Web Series", ignoreCase = true) -> TvType.TvSeries
-            title.contains("Short Film", ignoreCase = true) -> TvType.NSFW
+            title.contains("Web Series", true) -> TvType.TvSeries
+            title.contains("Short Film", true) -> TvType.NSFW
             else -> TvType.Movie
         }
-
         return newMovieSearchResponse(title, withEmbeddedTitle(href, title), type) {
             this.posterUrl = probe.poster
         }
     }
 
-    // ---------------------------------------------------------------------
-    // Search
-    // ---------------------------------------------------------------------
-
     override suspend fun search(query: String): List<SearchResponse> {
         val base = getActiveBaseUrl()
         val url = "$base/search.php?search=${query.replace(" ", "+")}&cat=All"
-        val doc = app.get(url, timeout = 15).document
-        return parseFolderListing(doc, base)
+        return parseFolderListing(app.get(url, timeout = 15).document, base)
     }
-
-    // ---------------------------------------------------------------------
-    // Load (detail page)
-    // ---------------------------------------------------------------------
 
     override suspend fun load(url: String): LoadResponse {
         val (cleanUrl, embeddedTitle) = splitEmbeddedTitle(url)
         val base = getActiveBaseUrl()
         val doc = app.get(cleanUrl, timeout = 15).document
-
         val title = embeddedTitle ?: extractTitle(doc)
-        val poster = doc.selectFirst("div.movielist img")
-            ?.let { absolute(base, it.attr("src").trim()) }
+        val poster = doc.selectFirst("div.movielist img")?.let { absolute(base, it.attr("src").trim()) }
         val description = extractStory(doc)
         val tags = extractTags(doc)
         val videoLinks = extractRawLinks(doc)
-
         val data = videoLinks.joinToString("||")
-
         return newMovieLoadResponse(title, url, TvType.Movie, data) {
             this.posterUrl = poster
             this.plot = description
@@ -214,7 +160,6 @@ class SkyBapProvider : MainAPI() {
 
     private fun extractTitle(doc: Document): String {
         doc.selectFirst("div.Robiul b")?.text()?.trim()?.let { if (it.isNotBlank()) return it }
-
         val titleTag = doc.selectFirst("title")?.text()?.trim()
         if (!titleTag.isNullOrBlank()) {
             val stripped = titleTag
@@ -222,22 +167,20 @@ class SkyBapProvider : MainAPI() {
                 .trim()
             return stripped.ifBlank { titleTag }
         }
-
         return doc.select("div b").firstOrNull { b ->
             val t = b.text().trim()
             t.length > 8 &&
-                !t.contains("Story", ignoreCase = true) &&
-                !t.contains("Download", ignoreCase = true) &&
-                !t.contains("SkymoviesHD", ignoreCase = true) &&
-                !t.contains("Full Movies", ignoreCase = true)
+                !t.contains("Story", true) &&
+                !t.contains("Download", true) &&
+                !t.contains("SkymoviesHD", true) &&
+                !t.contains("Full Movies", true)
         }?.text()?.trim() ?: "Unknown title"
     }
 
     private fun extractStory(doc: Document): String? {
         val storyLabel = doc.select("b").firstOrNull {
-            it.text().trim().startsWith("Story", ignoreCase = true)
+            it.text().trim().startsWith("Story", true)
         } ?: return null
-
         val container = storyLabel.parent() ?: return null
         val fullText = container.text().trim()
         val idx = fullText.indexOf(":")
@@ -248,18 +191,11 @@ class SkyBapProvider : MainAPI() {
         val genreAnchor = doc.selectFirst("div.L span a[href*=search.php]")
             ?: doc.selectFirst("span a[href*=search.php]")
             ?: return emptyList()
-
-        return genreAnchor.text()
-            .split(",")
-            .map { it.trim() }
-            .filter { it.isNotEmpty() }
+        return genreAnchor.text().split(",").map { it.trim() }.filter { it.isNotEmpty() }
     }
 
     private fun extractRawLinks(doc: Document): List<String> {
-        val container = doc.selectFirst("div.Bolly")
-            ?: doc.selectFirst("center div")
-            ?: doc
-
+        val container = doc.selectFirst("div.Bolly") ?: doc.selectFirst("center div") ?: doc
         return container.select("a[href]")
             .map { sanitizeHeaderValue(it.attr("href")) }
             .filter { it.startsWith("http://") || it.startsWith("https://") }
@@ -267,9 +203,12 @@ class SkyBapProvider : MainAPI() {
     }
 
     // ---------------------------------------------------------------------
-    // Link resolution
+    // FIX: pass referer = null. Each extractor now decides its own referer
+    // (browser UA + panel Referer). Previously we passed `link` as both URL
+    // and referer, which caused Cloudstream's fallback to construct
+    // "https://howblogs.xyz/... HubCloud ..." as the source name AND left
+    // the CDN request without a Referer → 403.
     // ---------------------------------------------------------------------
-
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -287,19 +226,14 @@ class SkyBapProvider : MainAPI() {
 
         val outcomes = rawLinks.mapConcurrent(concurrency = 6) { link ->
             try {
-                loadExtractor(link, link, collectSubtitleCallback, collectCallback)
+                // referer = null → let each extractor supply its own
+                loadExtractor(link, null, collectSubtitleCallback, collectCallback)
                 true
-            } catch (_: Exception) {
-                false
-            }
+            } catch (_: Exception) { false }
         }
 
-        for (sub in collectedSubs) {
-            subtitleCallback(sanitizeSubtitle(sub))
-        }
-        for (link in collectedLinks) {
-            callback(sanitizeExtractorLink(link))
-        }
+        for (sub in collectedSubs) subtitleCallback(sanitizeSubtitle(sub))
+        for (link in collectedLinks) callback(sanitizeExtractorLink(link))
 
         return outcomes.any { it }
     }
@@ -310,18 +244,14 @@ class SkyBapProvider : MainAPI() {
     private suspend fun sanitizeExtractorLink(link: ExtractorLink): ExtractorLink {
         val cleanedUrl = sanitizeHeaderValue(link.url)
         val cleanedReferer = sanitizeHeaderValue(link.referer)
-
         if (cleanedUrl == link.url && cleanedReferer == link.referer) return link
-
         return try {
             newExtractorLink(link.source, link.name, cleanedUrl, link.type) {
                 this.quality = link.quality
                 this.headers = link.headers
                 this.referer = cleanedReferer
             }
-        } catch (_: Exception) {
-            link
-        }
+        } catch (_: Exception) { link }
     }
 
     private fun sanitizeSubtitle(sub: SubtitleFile): SubtitleFile {
