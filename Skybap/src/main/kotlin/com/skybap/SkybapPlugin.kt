@@ -10,14 +10,14 @@ class SkyBapPlugin : Plugin() {
         registerMainAPI(SkyBapProvider())
 
         // Direct-CDN extractors solved from live recon.
-        registerExtractorAPI(SkyBapPixeldrain())      // pixeldrain.com / pixeldrain.dev
+        registerExtractorAPI(SkyBapPixeldrain())      // pixeldrain.com AND pixeldrain.dev
         registerExtractorAPI(SkyBapPixelHubcloud())   // pixel.hubcloud.ist  (10 Gbps direct)
         registerExtractorAPI(SkyBapBusyCdn())         // instant.busycdn.xyz (signed direct)
         registerExtractorAPI(SkyBapGoflix())          // goflix.sbs  (mirror + /download-fast/…)
         registerExtractorAPI(SkyBapGamerxyt())        // gamerxyt.com/hubcloud.php generator
 
         // Panel / file-host extractors.
-        registerExtractorAPI(SkyBapHubCloud())        // https://hubcloud.*  (+ /drive/)
+        registerExtractorAPI(SkyBapHubCloud())        // https://hubcloud.*
         registerExtractorAPI(SkyBapVCloud())          // https://vcloud.*
         registerExtractorAPI(SkyBapGDFlix())          // https://gdflix.*
         registerExtractorAPI(SkyBapGDLink())          // https://gdlink.*
@@ -28,7 +28,8 @@ class SkyBapPlugin : Plugin() {
         registerExtractorAPI(SkyBapDriveleech())      // https://driveleech.*
         registerExtractorAPI(SkyBapDriveseed())       // https://driveseed.*
         registerExtractorAPI(SkyBapGofile())          // https://gofile.io
-        registerExtractorAPI(SkyBapHowblogs())        // https://howblogs.*  (+ *.howblogs.*)
+        registerExtractorAPI(SkyBapHowblogs())        // https://howblogs.*
+        registerExtractorAPI(SkyBapHowblogsSub())     // https://*.howblogs.*  (dynamic subdomains)
         registerExtractorAPI(SkyBapTpead())           // https://tpead.net
         registerExtractorAPI(SkyBapAdvtpe())          // https://advtpe.*
     }
