@@ -42,6 +42,24 @@ fun skybapGetIndexQuality(str: String?): Int {
     }
 }
 
+// FIX: shared browser header builder used by every CDN extractor below.
+// Cloudflare Workers (myfiles.directfile2.workers.dev), StreamTape
+// (tpead.net/get_video), and pixel.hubcloud.ist all require a browser
+// User-Agent and a Referer, otherwise they return HTML (which ExoPlayer
+// reports as UnrecognizedInputFormatException) or HTTP 403.
+private fun skybapBrowserHeaders(referer: String?): Map<String, String> {
+    val h = mutableMapOf(
+        "User-Agent" to SKYBAP_USER_AGENT,
+        "Accept" to "*/*",
+        "Accept-Language" to "en-US,en;q=0.9",
+        "Sec-Fetch-Dest" to "video",
+        "Sec-Fetch-Mode" to "no-cors",
+        "Sec-Fetch-Site" to "cross-site",
+    )
+    if (!referer.isNullOrBlank()) h["Referer"] = referer
+    return h
+}
+
 private fun skybapBase64Decode(str: String): String = try {
     String(android.util.Base64.decode(str, android.util.Base64.DEFAULT))
 } catch (_: Exception) {
@@ -49,11 +67,6 @@ private fun skybapBase64Decode(str: String): String = try {
     catch (_: Exception) { "" }
 }
 
-/**
- * Normalises ANY pixeldrain URL to the canonical API download URL.
- *   https://pixeldrain.dev/u/ABC123  ->  .../api/file/ABC123?download
- *   https://pixeldrain.com/u/ABC123  ->  .../api/file/ABC123?download
- */
 fun skybapNormalizePixeldrain(url: String): String? {
     if (!url.contains("pixeldra", ignoreCase = true)) return null
     if (url.contains("/api/file/") && url.contains("?download")) return url
@@ -68,9 +81,8 @@ suspend fun skybapResolveFinalUrl(startUrl: String): String? {
     while (loopCount < 7) {
         try {
             val res = app.get(currentUrl, allowRedirects = false, timeout = 2500L)
-            if (res.code in 200..399) {
-                currentUrl = res.headers["Location"] ?: break
-            } else return null
+            if (res.code in 200..399) currentUrl = res.headers["Location"] ?: break
+            else return null
             loopCount++
         } catch (_: Exception) { return null }
     }
@@ -90,12 +102,41 @@ suspend fun <A, B> Iterable<A>.skybapSafeAmap(
 }
 
 // =====================================================================
+// Generic Cloudflare Workers CDN — catches *.workers.dev
+// FIX: this is what was returning HTTP 403 in the log
+// (myfiles.directfile2.workers.dev). We now always send a Referer.
+// =====================================================================
+
+class SkyBapWorkersDev : ExtractorApi() {
+    override val name = "WorkersCDN"
+    override val mainUrl = "https://*.workers.dev"
+    override val requiresReferer = false
+
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        // Prefer the panel referer passed in; fall back to a plausible
+        // gdflix referer, which is what these Workers are provisioned for.
+        val ref = referer?.takeIf { it.isNotBlank() } ?: "https://gdflix.io/"
+        callback.invoke(
+            newExtractorLink(name, "[Workers CDN]", url, ExtractorLinkType.VIDEO) {
+                this.quality = Qualities.Unknown.value
+                this.referer = ref
+                this.headers = skybapBrowserHeaders(ref)
+            }
+        )
+    }
+}
+
+// =====================================================================
 // Pixeldrain — mainUrl uses wildcard so one extractor catches .com & .dev
 // =====================================================================
 
 class SkyBapPixeldrain : ExtractorApi() {
     override val name = "Pixeldrain"
-    // Wildcard TLD: matches pixeldrain.com AND pixeldrain.dev
     override val mainUrl = "https://pixeldrain.*"
     override val requiresReferer = false
 
@@ -109,13 +150,15 @@ class SkyBapPixeldrain : ExtractorApi() {
         callback.invoke(
             newExtractorLink(name, "[Pixeldrain] Direct", dl, ExtractorLinkType.VIDEO) {
                 this.quality = Qualities.Unknown.value
+                this.headers = skybapBrowserHeaders("https://pixeldrain.com/")
             }
         )
     }
 }
 
 // =====================================================================
-// pixel.hubcloud.ist — already a direct 10 Gbps download
+// pixel.hubcloud.ist — direct 10 Gbps download
+// FIX: set Referer + UA so the CDN accepts the request.
 // =====================================================================
 
 class SkyBapPixelHubcloud : ExtractorApi() {
@@ -129,16 +172,20 @@ class SkyBapPixelHubcloud : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
+        val ref = referer?.takeIf { it.isNotBlank() } ?: "https://hubcloud.ist/"
         callback.invoke(
             newExtractorLink(name, "[HubCloud 10Gbps]", url, ExtractorLinkType.VIDEO) {
                 this.quality = Qualities.Unknown.value
+                this.referer = ref
+                this.headers = skybapBrowserHeaders(ref)
             }
         )
     }
 }
 
 // =====================================================================
-// instant.busycdn.xyz — signed direct download (from GDFlix "Instant DL")
+// instant.busycdn.xyz — signed direct download
+// FIX: always send Referer + UA. Default referer points at gdflix.
 // =====================================================================
 
 class SkyBapBusyCdn : ExtractorApi() {
@@ -152,10 +199,12 @@ class SkyBapBusyCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
+        val ref = referer?.takeIf { it.isNotBlank() } ?: "https://gdflix.io/"
         callback.invoke(
             newExtractorLink(name, "[Instant DL]", url, ExtractorLinkType.VIDEO) {
                 this.quality = Qualities.Unknown.value
-                this.referer = referer ?: ""
+                this.referer = ref
+                this.headers = skybapBrowserHeaders(ref)
             }
         )
     }
@@ -176,20 +225,18 @@ class SkyBapGoflix : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        // Case 1: already a direct /download-fast/<hash>/<filename> link
         if (url.contains("/download-fast/")) {
             val filename = url.substringAfterLast("/")
             callback.invoke(
                 newExtractorLink(name, "[Goflix] $filename", url, ExtractorLinkType.VIDEO) {
                     this.quality = skybapGetIndexQuality(filename)
+                    this.referer = "https://goflix.sbs/"
+                    this.headers = skybapBrowserHeaders("https://goflix.sbs/")
                 }
             )
             return
         }
-
-        // Case 2: mirror page — scrape it for the download-fast link
         val doc = app.get(url, referer = referer ?: "https://goflix.sbs/").document
-
         doc.select("a[href]").skybapSafeAmap { a ->
             val href = a.attr("href")
             when {
@@ -198,20 +245,20 @@ class SkyBapGoflix : ExtractorApi() {
                     callback.invoke(
                         newExtractorLink(name, "[Goflix] $filename", href, ExtractorLinkType.VIDEO) {
                             this.quality = skybapGetIndexQuality(filename)
+                            this.referer = "https://goflix.sbs/"
+                            this.headers = skybapBrowserHeaders("https://goflix.sbs/")
                         }
                     )
                 }
-                href.contains("gofile.io/d/") ->
-                    loadExtractor(href, url, subtitleCallback, callback)
-
-                href.contains("pixeldra") ->
-                    skybapNormalizePixeldrain(href)?.let { dl ->
-                        callback.invoke(
-                            newExtractorLink(name, "[Goflix→Pixeldrain]", dl, ExtractorLinkType.VIDEO) {
-                                this.quality = Qualities.Unknown.value
-                            }
-                        )
-                    }
+                href.contains("gofile.io/d/") -> loadExtractor(href, url, subtitleCallback, callback)
+                href.contains("pixeldra") -> skybapNormalizePixeldrain(href)?.let { dl ->
+                    callback.invoke(
+                        newExtractorLink(name, "[Goflix→Pixeldrain]", dl, ExtractorLinkType.VIDEO) {
+                            this.quality = Qualities.Unknown.value
+                            this.headers = skybapBrowserHeaders("https://pixeldrain.com/")
+                        }
+                    )
+                }
                 else -> null
             }
         }
@@ -220,6 +267,8 @@ class SkyBapGoflix : ExtractorApi() {
 
 // =====================================================================
 // gamerxyt.com/hubcloud.php — generator page
+// FIX: emit links with proper referer + headers so downstream CDN
+// (myfiles.directfile2.workers.dev) accepts them.
 // =====================================================================
 
 class SkyBapGamerxyt : ExtractorApi() {
@@ -235,40 +284,59 @@ class SkyBapGamerxyt : ExtractorApi() {
     ) {
         val doc = app.get(url, referer = referer).document
         val pageHtml = doc.toString()
+        val originRef = url  // the gamerxyt page itself is the correct referer
 
-        // (a) pixeldrain.dev/u/<id>  →  api download
+        // (a) pixeldrain.dev/u/<id>
         Regex("""https?://pixeldrain\.(?:com|dev)/u/([A-Za-z0-9]+)""")
-            .findAll(pageHtml)
-            .forEach { m ->
+            .findAll(pageHtml).forEach { m ->
                 val dl = "https://pixeldrain.com/api/file/${m.groupValues[1]}?download"
                 callback.invoke(
                     newExtractorLink("Pixeldrain", "[Pixeldrain]", dl, ExtractorLinkType.VIDEO) {
                         this.quality = Qualities.Unknown.value
+                        this.headers = skybapBrowserHeaders("https://pixeldrain.com/")
                     }
                 )
             }
 
-        // (b) pixel.hubcloud.ist/?id=…::…  →  direct 10 Gbps
+        // (b) pixel.hubcloud.ist/?id=…
         Regex("""https?://pixel\.hubcloud\.ist/\?id=[^\s"'<>]+""")
-            .findAll(pageHtml)
-            .forEach { m ->
+            .findAll(pageHtml).forEach { m ->
+                val link = m.value.replace("&amp;", "&")
                 callback.invoke(
                     newExtractorLink("HubCloud", "[HubCloud 10Gbps]",
-                        m.value.replace("&amp;", "&"),
-                        ExtractorLinkType.VIDEO) {
+                        link, ExtractorLinkType.VIDEO) {
                         this.quality = Qualities.Unknown.value
+                        this.referer = originRef
+                        this.headers = skybapBrowserHeaders(originRef)
                     }
                 )
             }
 
-        // (c) any /download-fast/… links
+        // (c) /download-fast/… links
         doc.select("a[href*=download-fast]").skybapSafeAmap { a ->
+            val link = a.attr("href")
             callback.invoke(
-                newExtractorLink("Goflix", "[Goflix]", a.attr("href"), ExtractorLinkType.VIDEO) {
+                newExtractorLink("Goflix", "[Goflix]", link, ExtractorLinkType.VIDEO) {
                     this.quality = Qualities.Unknown.value
+                    this.referer = "https://goflix.sbs/"
+                    this.headers = skybapBrowserHeaders("https://goflix.sbs/")
                 }
             )
         }
+
+        // (d) Workers.dev links can also appear on the generator page directly
+        Regex("""https?://[^\s"'<>]+\.workers\.dev/[^\s"'<>]+""")
+            .findAll(pageHtml).forEach { m ->
+                val link = m.value
+                callback.invoke(
+                    newExtractorLink("WorkersCDN", "[Workers CDN]",
+                        link, ExtractorLinkType.VIDEO) {
+                        this.quality = Qualities.Unknown.value
+                        this.referer = originRef
+                        this.headers = skybapBrowserHeaders(originRef)
+                    }
+                )
+            }
     }
 }
 
@@ -295,7 +363,6 @@ open class SkyBapHubCloud : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        // ---- /drive/<id> — find the gamerxyt generator and hand off ----
         if (url.contains("/drive/")) {
             val doc = app.get(url, referer = referer).document
             val gen = doc.selectFirst("a[href*=gamerxyt.com/hubcloud.php]")?.attr("href")
@@ -305,7 +372,6 @@ open class SkyBapHubCloud : ExtractorApi() {
             }
         }
 
-        // ---- /video/ and generic /view pages ----
         val doc = app.get(url, referer = referer).document
         val scriptTag = doc.selectFirst("script:containsData(url)")?.toString() ?: ""
 
@@ -322,13 +388,18 @@ open class SkyBapHubCloud : ExtractorApi() {
 
         val sub = app.get(link, referer = url).document
         val header = sub.select("div.card-header").text()
-        val size   = sub.select("i#size").text()
+        val size = sub.select("i#size").text()
         val quality = skybapGetIndexQuality(header)
+        val originRef = url
 
         suspend fun cb(href: String, server: String = "") {
             callback.invoke(
                 newExtractorLink("$name$server", "$name$server $header[$size]",
-                    href, ExtractorLinkType.VIDEO) { this.quality = quality }
+                    href, ExtractorLinkType.VIDEO) {
+                    this.quality = quality
+                    this.referer = originRef
+                    this.headers = skybapBrowserHeaders(originRef)
+                }
             )
         }
 
@@ -336,8 +407,8 @@ open class SkyBapHubCloud : ExtractorApi() {
             val href = el.attr("href")
             val text = el.text()
             when {
-                text.contains("FSL Server")  -> cb(href, "[FSL Server]")
-                text.contains("FSLv2")       -> cb(href, "[FSLv2]")
+                text.contains("FSL Server") -> cb(href, "[FSL Server]")
+                text.contains("FSLv2") -> cb(href, "[FSLv2]")
                 text.contains("Mega Server") -> cb(href, "[Mega]")
                 text.contains("Download File") -> cb(href)
 
@@ -364,25 +435,13 @@ class SkyBapVCloud : SkyBapHubCloud() {
 }
 
 // =====================================================================
-// GDFlix family — one base class, all mirror subdomains inherit
+// GDFlix family
 // =====================================================================
 
-class SkyBapGDLink : SkyBapGDFlix() {
-    override var mainUrl = "https://gdlink.*"
-}
-
-class SkyBapGDFlixApp : SkyBapGDFlix() {
-    override var mainUrl = "https://new.gdflix.*"
-}
-
-class SkyBapGdFlix1 : SkyBapGDFlix() {
-    override var mainUrl = "https://new1.gdflix.*"
-}
-
-/** Catches any *.gdflix.* — new4, new15, new42, gdflix.dad, etc. */
-class SkyBapGdFlix2 : SkyBapGDFlix() {
-    override var mainUrl = "https://*.gdflix.*"
-}
+class SkyBapGDLink : SkyBapGDFlix() { override var mainUrl = "https://gdlink.*" }
+class SkyBapGDFlixApp : SkyBapGDFlix() { override var mainUrl = "https://new.gdflix.*" }
+class SkyBapGdFlix1 : SkyBapGDFlix() { override var mainUrl = "https://new1.gdflix.*" }
+class SkyBapGdFlix2 : SkyBapGDFlix() { override var mainUrl = "https://*.gdflix.*" }
 
 open class SkyBapGDFlix : ExtractorApi() {
     override val name = "GDFlix"
@@ -402,11 +461,16 @@ open class SkyBapGDFlix : ExtractorApi() {
             .substringAfter("Size : ")
         val quality = skybapGetIndexQuality(fileName)
         val baseUrl = skybapGetBaseUrl(url)
+        val originRef = url
 
         suspend fun cb(href: String, server: String = "") {
             callback.invoke(
                 newExtractorLink("$name$server", "$name$server $fileName[$fileSize]",
-                    href, ExtractorLinkType.VIDEO) { this.quality = quality }
+                    href, ExtractorLinkType.VIDEO) {
+                    this.quality = quality
+                    this.referer = originRef
+                    this.headers = skybapBrowserHeaders(originRef)
+                }
             )
         }
 
@@ -429,6 +493,9 @@ open class SkyBapGDFlix : ExtractorApi() {
 
                 href.contains("hubcloud.") ->
                     loadExtractor(href, url, subtitleCallback, callback)
+
+                // FIX: catch any Workers.dev direct link on the gdflix page
+                href.contains(".workers.dev") -> cb(href, "[Workers CDN]")
 
                 text.contains("FAST CLOUD", true) || text.contains("ZIPDISK", true) -> {
                     val cloudDoc = app.get("$baseUrl$href", referer = url).document
@@ -453,7 +520,7 @@ open class SkyBapGDFlix : ExtractorApi() {
 }
 
 // =====================================================================
-// HubDrive — click the ".btn-success1" mirror link (HubCloud passthrough)
+// HubDrive
 // =====================================================================
 
 open class SkyBapHubdrive : ExtractorApi() {
@@ -468,13 +535,11 @@ open class SkyBapHubdrive : ExtractorApi() {
         callback: (ExtractorLink) -> Unit
     ) {
         val doc = app.get(url, referer = referer).document
-
         val mirror = doc.selectFirst("a[href*=hubcloud.ist/drive]")?.attr("href")
         if (!mirror.isNullOrBlank()) {
             loadExtractor(mirror, url, subtitleCallback, callback)
             return
         }
-
         val href = doc.select(".btn.btn-primary.btn-user.btn-success1.m-1").attr("href")
         if (href.isNotBlank()) loadExtractor(href, url, subtitleCallback, callback)
     }
@@ -527,11 +592,16 @@ open class SkyBapDriveleech : ExtractorApi() {
         val fileSize = document.select("ul > li.list-group-item:contains(Size)").text()
             .substringAfter("Size : ")
         val quality = skybapGetIndexQuality(fileName)
+        val originRef = url
 
         suspend fun cb(link: String, server: String = "") {
             callback.invoke(
                 newExtractorLink("$name$server", "$name$server $fileName[$fileSize]",
-                    link, ExtractorLinkType.VIDEO) { this.quality = quality }
+                    link, ExtractorLinkType.VIDEO) {
+                    this.quality = quality
+                    this.referer = originRef
+                    this.headers = skybapBrowserHeaders(originRef)
+                }
             )
         }
 
@@ -542,12 +612,10 @@ open class SkyBapDriveleech : ExtractorApi() {
                 text.contains("Cloud Download") -> cb(href, "[Cloud]")
                 text.contains("Instant Download") && SkyBapSettings.allowDownloadLinks ->
                     instantLink(href)?.let { cb(it, "[Instant]") }
-                text.contains("Direct Links") ->
-                    cfType(baseUrl + href).forEach { cb(it, "[CF]") }
+                text.contains("Direct Links") -> cfType(baseUrl + href).forEach { cb(it, "[CF]") }
                 text.contains("Resume Cloud") ->
                     resumeCloudLink(baseUrl, href)?.let { cb(it, "[ResumeCloud]") }
-                text.contains("gofile", true) ->
-                    loadExtractor(href, url, subtitleCallback, callback)
+                text.contains("gofile", true) -> loadExtractor(href, url, subtitleCallback, callback)
                 else -> Log.d("SkyBapDriveleech", "No server matched: $text")
             }
         }
@@ -555,7 +623,7 @@ open class SkyBapDriveleech : ExtractorApi() {
 }
 
 // =====================================================================
-// Gofile — updated salt + X-Website-Token algorithm
+// Gofile
 // =====================================================================
 
 class SkyBapGofile : ExtractorApi() {
@@ -565,13 +633,6 @@ class SkyBapGofile : ExtractorApi() {
 
     private val mainApi = "https://api.gofile.io"
     private val browserLanguage = "en-US"
-
-    /**
-     * Rotating salt used in the X-Website-Token hash. GoFile changes this
-     * periodically; when downloads start failing with 401 error-notPremium,
-     * pull the current value from:
-     *   https://gofile.io/dist/js/wt.obf.js
-     */
     private val secret = "5d4f7g8sd45fsd"
 
     override suspend fun getUrl(
@@ -586,10 +647,7 @@ class SkyBapGofile : ExtractorApi() {
         val websiteToken = generateWebsiteToken(SKYBAP_USER_AGENT, "")
         val token = app.post(
             "$mainApi/accounts",
-            headers = mapOf(
-                "X-Website-Token" to websiteToken,
-                "X-BL" to browserLanguage
-            )
+            headers = mapOf("X-Website-Token" to websiteToken, "X-BL" to browserLanguage)
         ).parsedSafe<AccountResponse>()?.data?.token ?: return
 
         val hashedToken = generateWebsiteToken(SKYBAP_USER_AGENT, token)
@@ -618,7 +676,8 @@ class SkyBapGofile : ExtractorApi() {
                     ExtractorLinkType.VIDEO
                 ) {
                     this.quality = skybapGetIndexQuality(fileName)
-                    this.headers = mapOf("Cookie" to "accountToken=$token")
+                    this.headers = skybapBrowserHeaders("https://gofile.io/") +
+                        mapOf("Cookie" to "accountToken=$token")
                 }
             )
         }
@@ -652,8 +711,7 @@ class SkyBapGofile : ExtractorApi() {
 }
 
 // =====================================================================
-// Howblogs — intermediate link-wall, routes every child link
-// FIX: `open class` so SkyBapHowblogsSub can extend it.
+// Howblogs
 // =====================================================================
 
 open class SkyBapHowblogs : ExtractorApi() {
@@ -678,13 +736,12 @@ open class SkyBapHowblogs : ExtractorApi() {
     }
 }
 
-/** Variant that catches dynamic subdomains of howblogs. */
 class SkyBapHowblogsSub : SkyBapHowblogs() {
     override val mainUrl = "https://*.howblogs.*"
 }
 
 // =====================================================================
-// StreamTape aliases — same backend, different domain name
+// StreamTape aliases — FIX: always send Referer = mainUrl
 // =====================================================================
 
 class SkyBapTpead : SkyBapStreamTapeAlias() {
@@ -720,9 +777,19 @@ open class SkyBapStreamTapeAlias : ExtractorApi() {
         val fullPath = if (!second.isNullOrBlank()) first + second else first
         val finalUrl = if (fullPath.startsWith("http")) fullPath else "https:$fullPath"
 
+        // FIX: StreamTape's /get_video returns HTML when Referer is missing,
+        // which surfaces as UnrecognizedInputFormatException in ExoPlayer.
+        // Always send the page's own host as Referer.
+        val pageHost = try {
+            val u = URI(url)
+            "${u.scheme}://${u.host}"
+        } catch (_: Exception) { mainUrl }
+
         callback.invoke(
             newExtractorLink(name, name, finalUrl, ExtractorLinkType.VIDEO) {
                 this.quality = Qualities.Unknown.value
+                this.referer = pageHost
+                this.headers = skybapBrowserHeaders(pageHost)
             }
         )
     }
