@@ -1,70 +1,38 @@
 package com.skybap
 
+import com.fasterxml.jackson.annotation.JsonProperty
 import com.lagradost.api.Log
+import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.SubtitleFile
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
-import com.fasterxml.jackson.annotation.JsonProperty
 import java.net.URI
 import java.security.MessageDigest
 
-/**
- * These extractor classes are not part of Cloudstream's core extractor set,
- * so they're registered explicitly by SkyBapPlugin.load() via
- * registerExtractorAPI(...). Once registered, the ordinary loadExtractor()
- * call in SkyBapProvider will route to whichever of these matches a link's
- * domain automatically - no manual dispatch needed.
- */
+// =====================================================================
+// Shared constants + helpers
+// =====================================================================
 
-// Toggle for extra "instant download" style branches that resolve a
-// redirect chain rather than a normal stream/download page. Off by default
-// since they add extra requests; flip to true if you want them surfaced.
-// Local replacements for helpers that aren't guaranteed to be visible as
-// top-level symbols across Cloudstream builds - safer to define our own
-// than depend on an import path that may differ between app versions.
 private const val SKYBAP_USER_AGENT =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-
-private fun skybapBase64Decode(str: String): String {
-    return try {
-        String(android.util.Base64.decode(str, android.util.Base64.DEFAULT))
-    } catch (e: Exception) {
-        try {
-            String(java.util.Base64.getDecoder().decode(str))
-        } catch (e2: Exception) {
-            ""
-        }
-    }
-}
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
 object SkyBapSettings {
     var allowDownloadLinks = false
 }
 
-// ---------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------
-
-fun skybapGetBaseUrl(url: String): String {
-    return try {
-        URI(url).let { "${it.scheme}://${it.host}" }
-    } catch (e: Exception) {
-        url
-    }
-}
+fun skybapGetBaseUrl(url: String): String = try {
+    URI(url).let { "${it.scheme}://${it.host}" }
+} catch (_: Exception) { url }
 
 fun skybapGetIndexQuality(str: String?): Int {
     if (str.isNullOrBlank()) return Qualities.Unknown.value
-
-    Regex("""(\d{3,4})[pP]""").find(str).let {
-        it?.groupValues?.getOrNull(1)?.toIntOrNull()?.let { q -> return q }
-    }
-
+    Regex("""(\d{3,4})[pP]""").find(str)
+        ?.groupValues?.getOrNull(1)?.toIntOrNull()?.let { return it }
     val lower = str.lowercase()
     return when {
         lower.contains("8k") -> 4320
@@ -74,88 +42,63 @@ fun skybapGetIndexQuality(str: String?): Int {
     }
 }
 
+private fun skybapBase64Decode(str: String): String = try {
+    String(android.util.Base64.decode(str, android.util.Base64.DEFAULT))
+} catch (_: Exception) {
+    try { String(java.util.Base64.getDecoder().decode(str)) }
+    catch (_: Exception) { "" }
+}
+
 /**
- * Public domain-rotation registry maintained for common file-host mirrors
- * (hubcloud, gdflix, vcloud, etc). These hosts frequently change their
- * primary domain, so most scrapers - including this one - resolve the
- * current domain from this shared list rather than hardcoding one.
+ * Normalises ANY pixeldrain URL to the canonical API download URL.
+ *   https://pixeldrain.dev/u/ABC123          -> .../api/file/ABC123?download
+ *   https://pixeldrain.com/u/ABC123          -> .../api/file/ABC123?download
+ *   https://pixeldrain.com/api/file/ABC123?download -> unchanged
+ * Returns null when the input is not pixeldrain.
  */
-suspend fun skybapGetLatestBaseUrl(baseUrl: String, source: String): String {
-    return try {
-        val dynamicUrls = app.get(
-            "https://raw.githubusercontent.com/SaurabhKaperwan/Utils/refs/heads/main/urls.json"
-        ).parsedSafe<Map<String, String>>()
-        dynamicUrls?.get(source)?.takeIf { it.isNotBlank() } ?: baseUrl
-    } catch (e: Exception) {
-        baseUrl
-    }
+fun skybapNormalizePixeldrain(url: String): String? {
+    if (!url.contains("pixeldra", ignoreCase = true)) return null
+    if (url.contains("/api/file/") && url.contains("?download")) return url
+    val id = url.substringAfterLast("/").substringBefore("?").substringBefore("#")
+    if (id.isBlank() || !id.matches(Regex("[A-Za-z0-9]+"))) return null
+    return "https://pixeldrain.com/api/file/$id?download"
 }
 
 suspend fun skybapResolveFinalUrl(startUrl: String): String? {
     var currentUrl = startUrl
     var loopCount = 0
-    val maxRedirects = 7
-
-    while (loopCount < maxRedirects) {
+    while (loopCount < 7) {
         try {
             val res = app.get(currentUrl, allowRedirects = false, timeout = 2500L)
-            if (res.code == 200 || res.code in 300..399) {
-                val location = res.headers["Location"] ?: break
-                currentUrl = location
-            } else {
-                return null
-            }
+            if (res.code in 200..399) {
+                currentUrl = res.headers["Location"] ?: break
+            } else return null
             loopCount++
-        } catch (e: Exception) {
-            return null
-        }
+        } catch (_: Exception) { return null }
     }
     return currentUrl
 }
 
-/** Bounded-concurrency map that swallows per-item failures instead of failing the batch. */
 suspend fun <A, B> Iterable<A>.skybapSafeAmap(
     concurrency: Int = 6,
     f: suspend (A) -> B?
 ): List<B> = coroutineScope {
     val semaphore = Semaphore(concurrency)
-    map { item ->
-        async {
-            semaphore.withPermit {
-                try {
-                    f(item)
-                } catch (e: Exception) {
-                    Log.e("SkyBapExtractor", "Item failed: $item - ${e.message}")
-                    null
-                }
-            }
+    map { item -> async { semaphore.withPermit {
+        try { f(item) } catch (e: Exception) {
+            Log.e("SkyBapExtractor", "Item failed: $item - ${e.message}"); null
         }
-    }.awaitAll().filterNotNull()
+    }}}.awaitAll().filterNotNull()
 }
 
-// ---------------------------------------------------------------------
-// HubCloud / VCloud
-// ---------------------------------------------------------------------
+// =====================================================================
+// Pixeldrain — always convert to the API download URL
+// =====================================================================
 
-class SkyBapVCloud : SkyBapHubCloud() {
-    override val name: String = "V-Cloud"
-    override val mainUrl: String = "https://vcloud.*"
-}
-
-open class SkyBapHubCloud : ExtractorApi() {
-    override val name: String = "Hub-Cloud"
-    override val mainUrl: String = "https://hubcloud.*"
+class SkyBapPixeldrain : ExtractorApi() {
+    override val name = "Pixeldrain"
+    override val mainUrl = "https://pixeldrain.com"
     override val requiresReferer = false
-
-    private fun extractPxlUrl(html: String): String? {
-        val regex = Regex("""var\s+pxl\s*=\s*["']([^"']+)["']""")
-        return regex.find(html)?.groupValues?.get(1)
-    }
-
-    private fun extractDoubleAtob(html: String): String? {
-        val regex = Regex("""var\s+url\s*=\s*atob\s*\(\s*atob\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\)""")
-        return regex.find(html)?.groupValues?.get(1)?.let { skybapBase64Decode(skybapBase64Decode(it)) }
-    }
 
     override suspend fun getUrl(
         url: String,
@@ -163,84 +106,277 @@ open class SkyBapHubCloud : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        var baseUrl = skybapGetBaseUrl(url)
-        val latestBaseUrl = if (url.contains("hubcloud")) {
-            skybapGetLatestBaseUrl(baseUrl, "hubcloud")
-        } else {
-            skybapGetLatestBaseUrl(baseUrl, "vcloud")
-        }
-
-        var newUrl = url
-        if (baseUrl != latestBaseUrl) {
-            newUrl = url.replace(baseUrl, latestBaseUrl)
-            baseUrl = latestBaseUrl
-        }
-
-        val doc = app.get(newUrl).document
-
-        var link = if (newUrl.contains("/video/")) {
-            doc.selectFirst("div.vd > center > a")?.attr("href") ?: ""
-        } else {
-            val scriptTag = doc.selectFirst("script:containsData(url)")?.toString() ?: ""
-            if (newUrl.contains("vcloud")) {
-                extractDoubleAtob(scriptTag) ?: ""
-            } else {
-                Regex("var url = '([^']*)'").find(scriptTag)?.groupValues?.get(1) ?: ""
+        val dl = skybapNormalizePixeldrain(url) ?: return
+        callback.invoke(
+            newExtractorLink(name, "[Pixeldrain] Direct", dl, ExtractorLinkType.VIDEO) {
+                this.quality = Qualities.Unknown.value
             }
-        }
+        )
+    }
+}
 
-        if (!link.startsWith("https://")) link = baseUrl + link
-        if (link.isBlank()) return
+// Alias so pixeldrain.dev is also routed here.
+class SkyBapPixeldrainDev : SkyBapPixeldrain() {
+    override val mainUrl = "https://pixeldrain.dev"
+}
 
-        val document = app.get(link).document
-        val header = document.select("div.card-header").text()
-        val size = document.select("i#size").text()
-        val quality = skybapGetIndexQuality(header)
+// =====================================================================
+// pixel.hubcloud.ist — already a direct 10 Gbps download
+// =====================================================================
 
-        suspend fun myCallback(link: String, server: String = "") {
+class SkyBapPixelHubcloud : ExtractorApi() {
+    override val name = "PixelHubCloud"
+    override val mainUrl = "https://pixel.hubcloud.ist"
+    override val requiresReferer = false
+
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        // The URL *is* the download. No follow-up needed.
+        callback.invoke(
+            newExtractorLink(name, "[HubCloud 10Gbps]", url, ExtractorLinkType.VIDEO) {
+                this.quality = Qualities.Unknown.value
+            }
+        )
+    }
+}
+
+// =====================================================================
+// instant.busycdn.xyz — signed direct download (from GDFlix "Instant DL")
+// =====================================================================
+
+class SkyBapBusyCdn : ExtractorApi() {
+    override val name = "BusyCDN"
+    override val mainUrl = "https://instant.busycdn.xyz"
+    override val requiresReferer = false
+
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        // URL already contains the signature + ?bytes=… — it is final.
+        callback.invoke(
+            newExtractorLink(name, "[Instant DL]", url, ExtractorLinkType.VIDEO) {
+                this.quality = Qualities.Unknown.value
+                this.referer = referer ?: ""
+            }
+        )
+    }
+}
+
+// =====================================================================
+// goflix.sbs — mirror page and /download-fast/… are both handled
+// =====================================================================
+
+class SkyBapGoflix : ExtractorApi() {
+    override val name = "Goflix"
+    override val mainUrl = "https://goflix.sbs"
+    override val requiresReferer = false
+
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        // Case 1: already a direct /download-fast/<hash>/<filename> link
+        if (url.contains("/download-fast/")) {
+            val filename = url.substringAfterLast("/")
             callback.invoke(
-                newExtractorLink(
-                    "$name$server",
-                    "$name$server $header[$size]",
-                    link,
-                    ExtractorLinkType.VIDEO
-                ) {
-                    this.quality = quality
+                newExtractorLink(name, "[Goflix] $filename", url, ExtractorLinkType.VIDEO) {
+                    this.quality = skybapGetIndexQuality(filename)
                 }
             )
+            return
         }
 
-        document.select("h2 a.btn").skybapSafeAmap { el ->
-            val href = el.attr("href")
-            val text = el.text()
+        // Case 2: mirror page — scrape it for the download-fast link
+        val doc = app.get(url, referer = referer ?: "https://goflix.sbs/").document
 
+        doc.select("a[href]").skybapSafeAmap { a ->
+            val href = a.attr("href")
             when {
-                text.contains("FSL Server") -> myCallback(href, "[FSL Server]")
-                text.contains("FSLv2") -> myCallback(href, "[FSLv2 Server]")
-                text.contains("Mega Server") -> myCallback(href, "[Mega Server]")
-                text.contains("Download File") -> myCallback(href)
-                href.contains("pixeldra") -> {
-                    val pixelLink = extractPxlUrl(document.toString()) ?: return@skybapSafeAmap null
-                    val baseUrlLink = skybapGetBaseUrl(pixelLink)
-                    val finalURL = if (pixelLink.contains("download", true)) pixelLink
-                    else "$baseUrlLink/api/file/${pixelLink.substringAfterLast("/")}?download"
-                    myCallback(finalURL, "[Pixeldrain]")
+                href.contains("/download-fast/") -> {
+                    val filename = href.substringAfterLast("/")
+                    callback.invoke(
+                        newExtractorLink(name, "[Goflix] $filename", href, ExtractorLinkType.VIDEO) {
+                            this.quality = skybapGetIndexQuality(filename)
+                        }
+                    )
                 }
-                SkyBapSettings.allowDownloadLinks && text.contains("Server : 10Gbps") -> {
-                    var redirectUrl = skybapResolveFinalUrl(href) ?: return@skybapSafeAmap null
-                    if (redirectUrl.contains("link=")) redirectUrl = redirectUrl.substringAfter("link=")
-                    myCallback(redirectUrl, "[Download]")
+                href.contains("gofile.io/d/") -> {
+                    // Hand off to the gofile extractor.
+                    loadExtractor(href, url, subtitleCallback, callback)
                 }
-                text.contains("Gofile") -> loadExtractor(href, "", subtitleCallback, callback)
-                else -> Log.d("SkyBapHubCloud", "No server matched for: $text")
+                href.contains("pixeldrain") -> {
+                    skybapNormalizePixeldrain(href)?.let { dl ->
+                        callback.invoke(
+                            newExtractorLink(name, "[Goflix→Pixeldrain]", dl, ExtractorLinkType.VIDEO) {
+                                this.quality = Qualities.Unknown.value
+                            }
+                        )
+                    }
+                }
+                else -> null
             }
         }
     }
 }
 
-// ---------------------------------------------------------------------
-// GDFlix (+ mirror domains)
-// ---------------------------------------------------------------------
+// =====================================================================
+// gamerxyt.com/hubcloud.php — generator page
+// =====================================================================
+
+class SkyBapGamerxyt : ExtractorApi() {
+    override val name = "Gamerxyt"
+    override val mainUrl = "https://gamerxyt.com"
+    override val requiresReferer = false
+
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        val doc = app.get(url, referer = referer).document
+        val pageHtml = doc.toString()
+
+        // (a) pixeldrain.dev/u/<id>  →  api download
+        Regex("""https?://pixeldrain\.(?:com|dev)/u/([A-Za-z0-9]+)""")
+            .findAll(pageHtml)
+            .forEach { m ->
+                val dl = "https://pixeldrain.com/api/file/${m.groupValues[1]}?download"
+                callback.invoke(
+                    newExtractorLink("Pixeldrain", "[Pixeldrain]", dl, ExtractorLinkType.VIDEO) {
+                        this.quality = Qualities.Unknown.value
+                    }
+                )
+            }
+
+        // (b) pixel.hubcloud.ist/?id=…::…  →  direct 10 Gbps
+        Regex("""https?://pixel\.hubcloud\.ist/\?id=[^\s"'<>]+""")
+            .findAll(pageHtml)
+            .forEach { m ->
+                callback.invoke(
+                    newExtractorLink("HubCloud", "[HubCloud 10Gbps]",
+                        m.value.replace("&amp;", "&"),
+                        ExtractorLinkType.VIDEO) {
+                        this.quality = Qualities.Unknown.value
+                    }
+                )
+            }
+
+        // (c) any /download-fast/… links
+        doc.select("a[href*=download-fast]").skybapSafeAmap { a ->
+            callback.invoke(
+                newExtractorLink("Goflix", "[Goflix]", a.attr("href"), ExtractorLinkType.VIDEO) {
+                    this.quality = Qualities.Unknown.value
+                }
+            )
+        }
+    }
+}
+
+// =====================================================================
+// HubCloud — /drive/ pages + /video/ pages
+// =====================================================================
+
+open class SkyBapHubCloud : ExtractorApi() {
+    override val name = "Hub-Cloud"
+    override val mainUrl = "https://hubcloud.*"
+    override val requiresReferer = false
+
+    private fun extractPxlUrl(html: String): String? =
+        Regex("""var\s+pxl\s*=\s*["']([^"']+)["']""").find(html)?.groupValues?.get(1)
+
+    private fun extractDoubleAtob(html: String): String? =
+        Regex("""var\s+url\s*=\s*atob\s*\(\s*atob\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\)""")
+            .find(html)?.groupValues?.get(1)
+            ?.let { skybapBase64Decode(skybapBase64Decode(it)) }
+
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        // ---- /drive/<id> — find the gamerxyt generator and hand off ----
+        if (url.contains("/drive/")) {
+            val doc = app.get(url, referer = referer).document
+            val gen = doc.selectFirst("a[href*=gamerxyt.com/hubcloud.php]")?.attr("href")
+            if (!gen.isNullOrBlank()) {
+                loadExtractor(gen, url, subtitleCallback, callback)
+                return
+            }
+        }
+
+        // ---- /video/ and generic /view pages ----
+        val doc = app.get(url, referer = referer).document
+        val scriptTag = doc.selectFirst("script:containsData(url)")?.toString() ?: ""
+
+        var link = if (url.contains("/video/")) {
+            doc.selectFirst("div.vd > center > a")?.attr("href") ?: ""
+        } else if (url.contains("vcloud")) {
+            extractDoubleAtob(scriptTag) ?: ""
+        } else {
+            Regex("var url = '([^']*)'").find(scriptTag)?.groupValues?.get(1) ?: ""
+        }
+
+        if (link.isBlank()) return
+        if (!link.startsWith("https://")) link = skybapGetBaseUrl(url) + link
+
+        val sub = app.get(link, referer = url).document
+        val header = sub.select("div.card-header").text()
+        val size   = sub.select("i#size").text()
+        val quality = skybapGetIndexQuality(header)
+
+        suspend fun cb(href: String, server: String = "") {
+            callback.invoke(
+                newExtractorLink("$name$server", "$name$server $header[$size]",
+                    href, ExtractorLinkType.VIDEO) { this.quality = quality }
+            )
+        }
+
+        sub.select("h2 a.btn").skybapSafeAmap { el ->
+            val href = el.attr("href")
+            val text = el.text()
+            when {
+                text.contains("FSL Server")  -> cb(href, "[FSL Server]")
+                text.contains("FSLv2")       -> cb(href, "[FSLv2]")
+                text.contains("Mega Server") -> cb(href, "[Mega]")
+                text.contains("Download File") -> cb(href)
+
+                href.contains("pixeldra") -> {
+                    val pixelLink = extractPxlUrl(sub.toString()) ?: href
+                    skybapNormalizePixeldrain(pixelLink)?.let { cb(it, "[Pixeldrain]") }
+                }
+                text.contains("Gofile") -> loadExtractor(href, url, subtitleCallback, callback)
+
+                // 10 Gbps "Server : 10Gbps" branch — follow the redirect chain.
+                SkyBapSettings.allowDownloadLinks && text.contains("10Gbps") -> {
+                    var redirect = skybapResolveFinalUrl(href) ?: return@skybapSafeAmap null
+                    if (redirect.contains("link=")) redirect = redirect.substringAfter("link=")
+                    cb(redirect, "[10Gbps]")
+                }
+                else -> Log.d("SkyBapHubCloud", "No server matched: $text")
+            }
+        }
+    }
+}
+
+class SkyBapVCloud : SkyBapHubCloud() {
+    override val name = "V-Cloud"
+    override val mainUrl = "https://vcloud.*"
+}
+
+// =====================================================================
+// GDFlix family — one base class, all mirror subdomains inherit
+// =====================================================================
 
 class SkyBapGDLink : SkyBapGDFlix() {
     override var mainUrl = "https://gdlink.*"
@@ -254,6 +390,7 @@ class SkyBapGdFlix1 : SkyBapGDFlix() {
     override var mainUrl = "https://new1.gdflix.*"
 }
 
+/** Catches any *.gdflix.* — new4, new15, new42, gdflix.dad, etc. */
 class SkyBapGdFlix2 : SkyBapGDFlix() {
     override var mainUrl = "https://*.gdflix.*"
 }
@@ -269,101 +406,73 @@ open class SkyBapGDFlix : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        var baseUrl = skybapGetBaseUrl(url)
-        val latestBaseUrl = skybapGetLatestBaseUrl(baseUrl, "gdflix")
-
-        var newUrl = url
-        if (baseUrl != latestBaseUrl) {
-            newUrl = url.replace(baseUrl, latestBaseUrl)
-            baseUrl = latestBaseUrl
-        }
-
-        val document = app.get(newUrl).document
-        val fileName = document.select("ul > li.list-group-item:contains(Name)").text()
+        val doc = app.get(url, referer = referer).document
+        val fileName = doc.select("ul > li.list-group-item:contains(Name)").text()
             .substringAfter("Name : ")
-        val fileSize = document.select("ul > li.list-group-item:contains(Size)").text()
+        val fileSize = doc.select("ul > li.list-group-item:contains(Size)").text()
             .substringAfter("Size : ")
         val quality = skybapGetIndexQuality(fileName)
+        val baseUrl = skybapGetBaseUrl(url)
 
-        suspend fun myCallback(link: String, server: String = "") {
+        suspend fun cb(href: String, server: String = "") {
             callback.invoke(
-                newExtractorLink(
-                    "$name$server",
-                    "$name$server $fileName[$fileSize]",
-                    link,
-                    ExtractorLinkType.VIDEO
-                ) {
-                    this.quality = quality
-                }
+                newExtractorLink("$name$server", "$name$server $fileName[$fileSize]",
+                    href, ExtractorLinkType.VIDEO) { this.quality = quality }
             )
         }
 
-        document.select("div.text-center a").skybapSafeAmap { anchor ->
-            val text = anchor.text()
-            val link = anchor.attr("href")
+        // Every actionable button on the GDFlix detail page lives here.
+        doc.select("div.text-center a, a[data-mdb-ripple-color]").skybapSafeAmap { a ->
+            val text = a.text()
+            val href = a.attr("href")
 
             when {
-                text.contains("FSL V2") -> myCallback(link, "[FSL V2]")
-                text.contains("DIRECT DL") -> myCallback(link, "[Direct]")
-                text.contains("DIRECT SERVER") -> myCallback(link, "[Direct]")
-                text.contains("CLOUD DOWNLOAD [R2]") -> myCallback(link, "[Cloud]")
+                // ---- Direct — pass through, no follow-up ----
+                href.contains("instant.busycdn.xyz") -> cb(href, "[Instant DL]")
+                text.contains("DIRECT DL") || text.contains("DIRECT SERVER") -> cb(href, "[Direct]")
+                text.contains("FSL V2") -> cb(href, "[FSL V2]")
+                text.contains("CLOUD DOWNLOAD [R2]") -> cb(href, "[R2]")
 
+                // ---- GoFile mirror — route to SkyBapGofile ----
+                href.contains("goflix.sbs") || text.contains("GoFile", true)
+                    || text.contains("Multiup", true) ->
+                    loadExtractor(href, url, subtitleCallback, callback)
+
+                // ---- Pixeldrain — normalise ----
+                href.contains("pixeldra") ->
+                    skybapNormalizePixeldrain(href)?.let { cb(it, "[Pixeldrain]") }
+
+                // ---- HubCloud mirror — route to SkyBapHubCloud ----
+                href.contains("hubcloud.") ->
+                    loadExtractor(href, url, subtitleCallback, callback)
+
+                // ---- FAST CLOUD / ZIPDISK — /cloud/<n>/<slug> ----
+                text.contains("FAST CLOUD", true) || text.contains("ZIPDISK", true) -> {
+                    val cloudDoc = app.get("$baseUrl$href", referer = url).document
+                    val dl = cloudDoc.selectFirst("div.card-body a[href], a.btn-success[href]")
+                        ?.attr("href")
+                    if (!dl.isNullOrBlank()) cb(dl, "[FastCloud]")
+                }
+
+                // ---- GD Index — pattern from v4 log ----
                 text.contains("GD Index") -> {
-                    val cfLink = baseUrl + link
-                    listOf(1, 2).skybapSafeAmap { cfType ->
-                        app.get("$cfLink?type=$cfType").document
+                    val cfLink = baseUrl + href
+                    listOf("1", "2").forEach { t ->
+                        app.get("$cfLink?type=$t", referer = url).document
                             .select("a.btn-success")
-                            .skybapSafeAmap {
-                                myCallback(it.attr("href"), "[CF]")
-                            }
+                            .skybapSafeAmap { cb(it.attr("href"), "[CF]") }
                     }
                 }
 
-                text.contains("FAST CLOUD") -> {
-                    val dlink = app.get(baseUrl + link).document
-                        .select("div.card-body a").attr("href")
-                    if (dlink.isNotEmpty()) myCallback(dlink, "[FAST CLOUD]")
-                }
-
-                link.contains("pixeldra") -> {
-                    val baseUrlLink = skybapGetBaseUrl(link)
-                    val finalURL = if (link.contains("download", true)) link
-                    else "$baseUrlLink/api/file/${link.substringAfterLast("/")}?download"
-                    myCallback(finalURL, "[Pixeldrain]")
-                }
-
-                SkyBapSettings.allowDownloadLinks && text.contains("Instant DL") -> {
-                    try {
-                        val instantLink = app.get(link, allowRedirects = false)
-                            .headers["location"]?.substringAfter("url=").orEmpty()
-                        if (instantLink.isNotEmpty()) myCallback(instantLink, "[Instant Download]")
-                    } catch (e: Exception) {
-                        Log.d("SkyBapGDFlix", "Instant DL failed: $e")
-                    }
-                }
-
-                text.contains("GoFile") -> {
-                    try {
-                        app.get(link).document.select(".row .row a").skybapSafeAmap { gofileAnchor ->
-                            val gofileLink = gofileAnchor.attr("href")
-                            if (gofileLink.contains("gofile")) {
-                                loadExtractor(gofileLink, "", subtitleCallback, callback)
-                            }
-                        }
-                    } catch (e: Exception) {
-                        Log.d("SkyBapGDFlix", "Gofile branch failed: $e")
-                    }
-                }
-
-                else -> Log.d("SkyBapGDFlix", "No server matched for: $text")
+                else -> Log.d("SkyBapGDFlix", "No server matched: $text")
             }
         }
     }
 }
 
-// ---------------------------------------------------------------------
-// Hubdrive
-// ---------------------------------------------------------------------
+// =====================================================================
+// HubDrive — click the ".btn-success1" mirror link (HubCloud passthrough)
+// =====================================================================
 
 open class SkyBapHubdrive : ExtractorApi() {
     override val name = "Hubdrive"
@@ -376,44 +485,49 @@ open class SkyBapHubdrive : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        val href = app.get(url).document
-            .select(".btn.btn-primary.btn-user.btn-success1.m-1").attr("href")
-        if (href.isNotBlank()) loadExtractor(href, "", subtitleCallback, callback)
+        val doc = app.get(url, referer = referer).document
+
+        // Prefer the direct mirror button that works without login.
+        val mirror = doc.selectFirst("a[href*=hubcloud.ist/drive]")?.attr("href")
+        if (!mirror.isNullOrBlank()) {
+            loadExtractor(mirror, url, subtitleCallback, callback)
+            return
+        }
+
+        // Legacy selector (kept as fallback).
+        val href = doc.select(".btn.btn-primary.btn-user.btn-success1.m-1").attr("href")
+        if (href.isNotBlank()) loadExtractor(href, url, subtitleCallback, callback)
     }
 }
 
-// ---------------------------------------------------------------------
+// =====================================================================
 // Driveleech / Driveseed
-// ---------------------------------------------------------------------
+// =====================================================================
 
 class SkyBapDriveseed : SkyBapDriveleech() {
-    override val name: String = "Driveseed"
-    override val mainUrl: String = "https://driveseed.*"
+    override val name = "Driveseed"
+    override val mainUrl = "https://driveseed.*"
 }
 
 open class SkyBapDriveleech : ExtractorApi() {
-    override val name: String = "Driveleech"
-    override val mainUrl: String = "https://driveleech.*"
+    override val name = "Driveleech"
+    override val mainUrl = "https://driveleech.*"
     override val requiresReferer = false
 
     private suspend fun cfType(url: String): List<String> {
-        val downloadLinks = mutableListOf<String>()
+        val out = mutableListOf<String>()
         listOf("1", "2").forEach { t ->
-            val document = app.get("$url?type=$t").document
-            downloadLinks.addAll(document.select("a.btn-success").mapNotNull { it.attr("href") })
+            val d = app.get("$url?type=$t").document
+            out += d.select("a.btn-success").mapNotNull { it.attr("href") }
         }
-        return downloadLinks
+        return out
     }
 
-    private suspend fun resumeCloudLink(baseUrl: String, path: String): String? {
-        val document = app.get(baseUrl + path).document
-        return document.selectFirst("a.btn-success")?.attr("href")
-    }
+    private suspend fun resumeCloudLink(baseUrl: String, path: String): String? =
+        app.get(baseUrl + path).document.selectFirst("a.btn-success")?.attr("href")
 
-    private suspend fun instantLink(finalLink: String): String? {
-        val link = app.get(finalLink, allowRedirects = false).headers["location"]
-        return link?.substringAfter("?url=")
-    }
+    private suspend fun instantLink(finalLink: String): String? =
+        app.get(finalLink, allowRedirects = false).headers["location"]?.substringAfter("?url=")
 
     override suspend fun getUrl(
         url: String,
@@ -426,9 +540,7 @@ open class SkyBapDriveleech : ExtractorApi() {
             val temp = app.get(url).document.selectFirst("script")?.data()
                 ?.substringAfter("replace(\"")?.substringBefore("\")") ?: ""
             app.get(baseUrl + temp).document
-        } else {
-            app.get(url).document
-        }
+        } else app.get(url).document
 
         val fileName = document.select("ul > li.list-group-item:contains(Name)").text()
             .substringAfter("Name : ")
@@ -436,60 +548,52 @@ open class SkyBapDriveleech : ExtractorApi() {
             .substringAfter("Size : ")
         val quality = skybapGetIndexQuality(fileName)
 
-        suspend fun myCallback(link: String, server: String = "") {
+        suspend fun cb(link: String, server: String = "") {
             callback.invoke(
-                newExtractorLink(
-                    "$name$server",
-                    "$name$server $fileName[$fileSize]",
-                    link,
-                    ExtractorLinkType.VIDEO
-                ) {
-                    this.quality = quality
-                }
+                newExtractorLink("$name$server", "$name$server $fileName[$fileSize]",
+                    link, ExtractorLinkType.VIDEO) { this.quality = quality }
             )
         }
 
-        document.select("div.text-center > a").skybapSafeAmap { element ->
-            val text = element.text()
-            val href = element.attr("href")
-
+        document.select("div.text-center > a").skybapSafeAmap { el ->
+            val text = el.text()
+            val href = el.attr("href")
             when {
-                text.contains("Cloud Download") -> myCallback(href, "[Cloud]")
-
-                SkyBapSettings.allowDownloadLinks && text.contains("Instant Download") -> {
-                    val instant = instantLink(href) ?: return@skybapSafeAmap null
-                    myCallback(instant, "[Instant(Download)]")
-                }
-
-                text.contains("Direct Links") -> {
-                    val link = baseUrl + href
-                    cfType(link).forEach { myCallback(it, "[CF]") }
-                }
-
-                text.contains("Resume Cloud") -> {
-                    val resumeCloud = resumeCloudLink(baseUrl, href) ?: return@skybapSafeAmap null
-                    myCallback(resumeCloud, "[ResumeCloud]")
-                }
-
-                text.contains("gofile") -> loadExtractor(href, "", subtitleCallback, callback)
-
-                else -> Log.d("SkyBapDriveleech", "No server matched for: $text")
+                text.contains("Cloud Download") -> cb(href, "[Cloud]")
+                text.contains("Instant Download") && SkyBapSettings.allowDownloadLinks ->
+                    instantLink(href)?.let { cb(it, "[Instant]") }
+                text.contains("Direct Links") ->
+                    cfType(baseUrl + href).forEach { cb(it, "[CF]") }
+                text.contains("Resume Cloud") ->
+                    resumeCloudLink(baseUrl, href)?.let { cb(it, "[ResumeCloud]") }
+                text.contains("gofile", true) ->
+                    loadExtractor(href, url, subtitleCallback, callback)
+                else -> Log.d("SkyBapDriveleech", "No server matched: $text")
             }
         }
     }
 }
 
-// ---------------------------------------------------------------------
-// Gofile
-// ---------------------------------------------------------------------
+// =====================================================================
+// Gofile — updated salt + X-Website-Token algorithm
+// =====================================================================
 
 class SkyBapGofile : ExtractorApi() {
     override val name = "Gofile"
     override val mainUrl = "https://gofile.io"
     override val requiresReferer = false
+
     private val mainApi = "https://api.gofile.io"
     private val browserLanguage = "en-US"
-    private val secret = "9844d94d963d30"
+
+    /**
+     * Rotating salt used in the X-Website-Token hash. GoFile changes this
+     * periodically; when downloads start failing with 401 error-notPremium,
+     * pull the current value from:
+     *   https://gofile.io/dist/js/wt.obf.js
+     * (search for a 16-char hex literal near the sha256 call).
+     */
+    private val secret = "5d4f7g8sd45fsd"
 
     override suspend fun getUrl(
         url: String,
@@ -497,14 +601,20 @@ class SkyBapGofile : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        val id = Regex("/(?:\\?c=|d/)([\\da-zA-Z-]+)").find(url)?.groupValues?.get(1) ?: return
+        val id = Regex("""/(?:\?c=|d/)([A-Za-z0-9-]+)""")
+            .find(url)?.groupValues?.get(1) ?: return
 
+        // Guest account token
         val websiteToken = generateWebsiteToken(SKYBAP_USER_AGENT, "")
         val token = app.post(
             "$mainApi/accounts",
-            headers = mapOf("X-Website-Token" to websiteToken, "X-BL" to browserLanguage)
+            headers = mapOf(
+                "X-Website-Token" to websiteToken,
+                "X-BL" to browserLanguage
+            )
         ).parsedSafe<AccountResponse>()?.data?.token ?: return
 
+        // Account-scoped website token
         val hashedToken = generateWebsiteToken(SKYBAP_USER_AGENT, token)
         val headers = mapOf(
             "Referer" to "$mainUrl/",
@@ -514,20 +624,19 @@ class SkyBapGofile : ExtractorApi() {
             "X-Website-Token" to hashedToken
         )
 
-        val parsedResponse = app.get(
+        val parsed = app.get(
             "$mainApi/contents/$id?cache=true&sortField=createTime&sortDirection=1",
             headers = headers
-        ).parsedSafe<GofileResponse>()
+        ).parsedSafe<GofileResponse>() ?: return
 
-        val childrenMap = parsedResponse?.data?.children ?: return
-        for ((_, file) in childrenMap) {
+        val children = parsed.data?.children ?: return
+        for ((_, file) in children) {
             if (file.link.isNullOrEmpty() || file.type != "file") continue
             val fileName = file.name ?: ""
-            val size = file.size ?: 0L
             callback.invoke(
                 newExtractorLink(
                     "Gofile",
-                    "[Gofile] $fileName [${formatBytes(size)}]",
+                    "[Gofile] $fileName [${formatBytes(file.size ?: 0L)}]",
                     file.link,
                     ExtractorLinkType.VIDEO
                 ) {
@@ -541,12 +650,9 @@ class SkyBapGofile : ExtractorApi() {
     private fun generateWebsiteToken(userAgent: String, accountToken: String): String {
         val timeSlot = System.currentTimeMillis() / 1000 / 14400
         val raw = "$userAgent::$browserLanguage::$accountToken::$timeSlot::$secret"
-        return sha256(raw)
-    }
-
-    private fun sha256(input: String): String {
-        val md = MessageDigest.getInstance("SHA-256")
-        return md.digest(input.toByteArray(Charsets.UTF_8)).joinToString("") { "%02x".format(it) }
+        return MessageDigest.getInstance("SHA-256")
+            .digest(raw.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
     }
 
     private fun formatBytes(bytes: Long): String = when {
@@ -557,7 +663,9 @@ class SkyBapGofile : ExtractorApi() {
     data class AccountResponse(@param:JsonProperty("data") val data: AccountData? = null)
     data class AccountData(@param:JsonProperty("token") val token: String? = null)
     data class GofileResponse(@param:JsonProperty("data") val data: GofileData? = null)
-    data class GofileData(@param:JsonProperty("children") val children: Map<String, GofileFile>? = null)
+    data class GofileData(
+        @param:JsonProperty("children") val children: Map<String, GofileFile>? = null
+    )
     data class GofileFile(
         @param:JsonProperty("type") val type: String? = null,
         @param:JsonProperty("name") val name: String? = null,
@@ -566,20 +674,41 @@ class SkyBapGofile : ExtractorApi() {
     )
 }
 
-// ---------------------------------------------------------------------
-// Howblogs - intermediate "link wall" pages with streaming/download links
-// mixed in among ad/payroll-timer redirects.
-// ---------------------------------------------------------------------
+// =====================================================================
+// Howblogs — intermediate link-wall, routes every child link
+// =====================================================================
 
-// ---------------------------------------------------------------------
-// StreamTape-family rebrand domains (tpead.net, advtpe.*) - these run the
-// exact same backend as streamtape.com but under a different domain name,
-// so Cloudstream's core StreamTape extractor (which matches on the
-// "streamtape" substring) doesn't recognize them at all. This mirrors the
-// long-stable public StreamTape bypass: the watch page embeds a script
-// that builds the final video URL from two JS-concatenated string parts
-// assigned to a "robotlink" element.
-// ---------------------------------------------------------------------
+class SkyBapHowblogs : ExtractorApi() {
+    override val name = "Howblogs"
+    // Matches howblogs.* AND *.howblogs.* (dynamic subdomains)
+    override val mainUrl = "https://howblogs.*"
+    override val requiresReferer = false
+
+    override suspend fun getUrl(
+        url: String,
+        referer: String?,
+        subtitleCallback: (SubtitleFile) -> Unit,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        app.get(url, referer = referer).document
+            .select("div.center_it a[href]")
+            .skybapSafeAmap { a ->
+                val href = a.attr("href")
+                if (href.isNotBlank() && href.startsWith("http")) {
+                    loadExtractor(href, url, subtitleCallback, callback)
+                }
+            }
+    }
+}
+
+// Variant that also catches dynamic subdomains of howblogs.
+class SkyBapHowblogsSub : SkyBapHowblogs() {
+    override val mainUrl = "https://*.howblogs.*"
+}
+
+// =====================================================================
+// StreamTape aliases — same backend, different domain name
+// =====================================================================
 
 class SkyBapTpead : SkyBapStreamTapeAlias() {
     override val name = "Tpead"
@@ -602,24 +731,16 @@ open class SkyBapStreamTapeAlias : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        val doc = app.get(url).document
-        val script = doc.select("script")
-            .map { it.data() }
-            .firstOrNull { it.contains("robotlink") }
-            ?: return
+        val doc = app.get(url, referer = referer).document
+        val script = doc.select("script").map { it.data() }
+            .firstOrNull { it.contains("robotlink") } ?: return
 
-        // The script looks like:
-        //   document.getElementById('robotlink').innerHTML = '//host/get_video?...&token='
-        //   + ('SOME_RANDOM_STRING').substring(SOME, RANGE)
-        // i.e. two concatenated pieces that together form the final path.
-        val firstPart = Regex("robotlink'\\)\\.innerHTML\\s*=\\s*'([^']*)'")
-            .find(script)?.groupValues?.get(1)
-        val secondPart = Regex("\\+\\s*\\('([^']*)'\\)")
+        val first = Regex("""robotlink'\)\.innerHTML\s*=\s*'([^']*)'""")
+            .find(script)?.groupValues?.get(1) ?: return
+        val second = Regex("""\+\s*\('([^']*)'\)""")
             .find(script)?.groupValues?.get(1)
 
-        if (firstPart.isNullOrBlank()) return
-
-        val fullPath = if (!secondPart.isNullOrBlank()) firstPart + secondPart else firstPart
+        val fullPath = if (!second.isNullOrBlank()) first + second else first
         val finalUrl = if (fullPath.startsWith("http")) fullPath else "https:$fullPath"
 
         callback.invoke(
@@ -627,23 +748,5 @@ open class SkyBapStreamTapeAlias : ExtractorApi() {
                 this.quality = Qualities.Unknown.value
             }
         )
-    }
-}
-
-class SkyBapHowblogs : ExtractorApi() {
-    override val name: String = "Howblogs"
-    override val mainUrl: String = "https://howblogs.*"
-    override val requiresReferer = false
-
-    override suspend fun getUrl(
-        url: String,
-        referer: String?,
-        subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
-    ) {
-        app.get(url).document.select("div.center_it a").skybapSafeAmap {
-            val href = it.attr("href")
-            if (href.isNotBlank()) loadExtractor(href, referer, subtitleCallback, callback)
-        }
     }
 }
