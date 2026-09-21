@@ -51,10 +51,8 @@ private fun skybapBase64Decode(str: String): String = try {
 
 /**
  * Normalises ANY pixeldrain URL to the canonical API download URL.
- *   https://pixeldrain.dev/u/ABC123          -> .../api/file/ABC123?download
- *   https://pixeldrain.com/u/ABC123          -> .../api/file/ABC123?download
- *   https://pixeldrain.com/api/file/ABC123?download -> unchanged
- * Returns null when the input is not pixeldrain.
+ *   https://pixeldrain.dev/u/ABC123  ->  .../api/file/ABC123?download
+ *   https://pixeldrain.com/u/ABC123  ->  .../api/file/ABC123?download
  */
 fun skybapNormalizePixeldrain(url: String): String? {
     if (!url.contains("pixeldra", ignoreCase = true)) return null
@@ -92,12 +90,13 @@ suspend fun <A, B> Iterable<A>.skybapSafeAmap(
 }
 
 // =====================================================================
-// Pixeldrain — always convert to the API download URL
+// Pixeldrain — mainUrl uses wildcard so one extractor catches .com & .dev
 // =====================================================================
 
 class SkyBapPixeldrain : ExtractorApi() {
     override val name = "Pixeldrain"
-    override val mainUrl = "https://pixeldrain.com"
+    // Wildcard TLD: matches pixeldrain.com AND pixeldrain.dev
+    override val mainUrl = "https://pixeldrain.*"
     override val requiresReferer = false
 
     override suspend fun getUrl(
@@ -115,11 +114,6 @@ class SkyBapPixeldrain : ExtractorApi() {
     }
 }
 
-// Alias so pixeldrain.dev is also routed here.
-class SkyBapPixeldrainDev : SkyBapPixeldrain() {
-    override val mainUrl = "https://pixeldrain.dev"
-}
-
 // =====================================================================
 // pixel.hubcloud.ist — already a direct 10 Gbps download
 // =====================================================================
@@ -135,7 +129,6 @@ class SkyBapPixelHubcloud : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        // The URL *is* the download. No follow-up needed.
         callback.invoke(
             newExtractorLink(name, "[HubCloud 10Gbps]", url, ExtractorLinkType.VIDEO) {
                 this.quality = Qualities.Unknown.value
@@ -159,7 +152,6 @@ class SkyBapBusyCdn : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        // URL already contains the signature + ?bytes=… — it is final.
         callback.invoke(
             newExtractorLink(name, "[Instant DL]", url, ExtractorLinkType.VIDEO) {
                 this.quality = Qualities.Unknown.value
@@ -209,11 +201,10 @@ class SkyBapGoflix : ExtractorApi() {
                         }
                     )
                 }
-                href.contains("gofile.io/d/") -> {
-                    // Hand off to the gofile extractor.
+                href.contains("gofile.io/d/") ->
                     loadExtractor(href, url, subtitleCallback, callback)
-                }
-                href.contains("pixeldrain") -> {
+
+                href.contains("pixeldra") ->
                     skybapNormalizePixeldrain(href)?.let { dl ->
                         callback.invoke(
                             newExtractorLink(name, "[Goflix→Pixeldrain]", dl, ExtractorLinkType.VIDEO) {
@@ -221,7 +212,6 @@ class SkyBapGoflix : ExtractorApi() {
                             }
                         )
                     }
-                }
                 else -> null
             }
         }
@@ -357,7 +347,6 @@ open class SkyBapHubCloud : ExtractorApi() {
                 }
                 text.contains("Gofile") -> loadExtractor(href, url, subtitleCallback, callback)
 
-                // 10 Gbps "Server : 10Gbps" branch — follow the redirect chain.
                 SkyBapSettings.allowDownloadLinks && text.contains("10Gbps") -> {
                     var redirect = skybapResolveFinalUrl(href) ?: return@skybapSafeAmap null
                     if (redirect.contains("link=")) redirect = redirect.substringAfter("link=")
@@ -421,32 +410,26 @@ open class SkyBapGDFlix : ExtractorApi() {
             )
         }
 
-        // Every actionable button on the GDFlix detail page lives here.
         doc.select("div.text-center a, a[data-mdb-ripple-color]").skybapSafeAmap { a ->
             val text = a.text()
             val href = a.attr("href")
 
             when {
-                // ---- Direct — pass through, no follow-up ----
                 href.contains("instant.busycdn.xyz") -> cb(href, "[Instant DL]")
                 text.contains("DIRECT DL") || text.contains("DIRECT SERVER") -> cb(href, "[Direct]")
                 text.contains("FSL V2") -> cb(href, "[FSL V2]")
                 text.contains("CLOUD DOWNLOAD [R2]") -> cb(href, "[R2]")
 
-                // ---- GoFile mirror — route to SkyBapGofile ----
                 href.contains("goflix.sbs") || text.contains("GoFile", true)
                     || text.contains("Multiup", true) ->
                     loadExtractor(href, url, subtitleCallback, callback)
 
-                // ---- Pixeldrain — normalise ----
                 href.contains("pixeldra") ->
                     skybapNormalizePixeldrain(href)?.let { cb(it, "[Pixeldrain]") }
 
-                // ---- HubCloud mirror — route to SkyBapHubCloud ----
                 href.contains("hubcloud.") ->
                     loadExtractor(href, url, subtitleCallback, callback)
 
-                // ---- FAST CLOUD / ZIPDISK — /cloud/<n>/<slug> ----
                 text.contains("FAST CLOUD", true) || text.contains("ZIPDISK", true) -> {
                     val cloudDoc = app.get("$baseUrl$href", referer = url).document
                     val dl = cloudDoc.selectFirst("div.card-body a[href], a.btn-success[href]")
@@ -454,7 +437,6 @@ open class SkyBapGDFlix : ExtractorApi() {
                     if (!dl.isNullOrBlank()) cb(dl, "[FastCloud]")
                 }
 
-                // ---- GD Index — pattern from v4 log ----
                 text.contains("GD Index") -> {
                     val cfLink = baseUrl + href
                     listOf("1", "2").forEach { t ->
@@ -487,14 +469,12 @@ open class SkyBapHubdrive : ExtractorApi() {
     ) {
         val doc = app.get(url, referer = referer).document
 
-        // Prefer the direct mirror button that works without login.
         val mirror = doc.selectFirst("a[href*=hubcloud.ist/drive]")?.attr("href")
         if (!mirror.isNullOrBlank()) {
             loadExtractor(mirror, url, subtitleCallback, callback)
             return
         }
 
-        // Legacy selector (kept as fallback).
         val href = doc.select(".btn.btn-primary.btn-user.btn-success1.m-1").attr("href")
         if (href.isNotBlank()) loadExtractor(href, url, subtitleCallback, callback)
     }
@@ -591,7 +571,6 @@ class SkyBapGofile : ExtractorApi() {
      * periodically; when downloads start failing with 401 error-notPremium,
      * pull the current value from:
      *   https://gofile.io/dist/js/wt.obf.js
-     * (search for a 16-char hex literal near the sha256 call).
      */
     private val secret = "5d4f7g8sd45fsd"
 
@@ -604,7 +583,6 @@ class SkyBapGofile : ExtractorApi() {
         val id = Regex("""/(?:\?c=|d/)([A-Za-z0-9-]+)""")
             .find(url)?.groupValues?.get(1) ?: return
 
-        // Guest account token
         val websiteToken = generateWebsiteToken(SKYBAP_USER_AGENT, "")
         val token = app.post(
             "$mainApi/accounts",
@@ -614,7 +592,6 @@ class SkyBapGofile : ExtractorApi() {
             )
         ).parsedSafe<AccountResponse>()?.data?.token ?: return
 
-        // Account-scoped website token
         val hashedToken = generateWebsiteToken(SKYBAP_USER_AGENT, token)
         val headers = mapOf(
             "Referer" to "$mainUrl/",
@@ -676,11 +653,11 @@ class SkyBapGofile : ExtractorApi() {
 
 // =====================================================================
 // Howblogs — intermediate link-wall, routes every child link
+// FIX: `open class` so SkyBapHowblogsSub can extend it.
 // =====================================================================
 
-class SkyBapHowblogs : ExtractorApi() {
+open class SkyBapHowblogs : ExtractorApi() {
     override val name = "Howblogs"
-    // Matches howblogs.* AND *.howblogs.* (dynamic subdomains)
     override val mainUrl = "https://howblogs.*"
     override val requiresReferer = false
 
@@ -701,7 +678,7 @@ class SkyBapHowblogs : ExtractorApi() {
     }
 }
 
-// Variant that also catches dynamic subdomains of howblogs.
+/** Variant that catches dynamic subdomains of howblogs. */
 class SkyBapHowblogsSub : SkyBapHowblogs() {
     override val mainUrl = "https://*.howblogs.*"
 }
