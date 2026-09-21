@@ -9,28 +9,27 @@ class SkyBapPlugin : Plugin() {
     override fun load(context: Context) {
         registerMainAPI(SkyBapProvider())
 
-        // Direct-CDN extractors solved from live recon.
-        registerExtractorAPI(SkyBapPixeldrain())      // pixeldrain.com AND pixeldrain.dev
-        registerExtractorAPI(SkyBapPixelHubcloud())   // pixel.hubcloud.ist  (10 Gbps direct)
-        registerExtractorAPI(SkyBapBusyCdn())         // instant.busycdn.xyz (signed direct)
-        registerExtractorAPI(SkyBapGoflix())          // goflix.sbs  (mirror + /download-fast/…)
-        registerExtractorAPI(SkyBapGamerxyt())        // gamerxyt.com/hubcloud.php generator
+        registerExtractorAPI(SkyBapWorkersDev())      // *.workers.dev (NEW — fixes the 403s)
+        registerExtractorAPI(SkyBapPixeldrain())      // pixeldrain.com + pixeldrain.dev
+        registerExtractorAPI(SkyBapPixelHubcloud())   // pixel.hubcloud.ist
+        registerExtractorAPI(SkyBapBusyCdn())         // instant.busycdn.xyz
+        registerExtractorAPI(SkyBapGoflix())          // goflix.sbs
+        registerExtractorAPI(SkyBapGamerxyt())        // gamerxyt.com generator
 
-        // Panel / file-host extractors.
-        registerExtractorAPI(SkyBapHubCloud())        // https://hubcloud.*
-        registerExtractorAPI(SkyBapVCloud())          // https://vcloud.*
-        registerExtractorAPI(SkyBapGDFlix())          // https://gdflix.*
-        registerExtractorAPI(SkyBapGDLink())          // https://gdlink.*
-        registerExtractorAPI(SkyBapGDFlixApp())       // https://new.gdflix.*
-        registerExtractorAPI(SkyBapGdFlix1())         // https://new1.gdflix.*
-        registerExtractorAPI(SkyBapGdFlix2())         // https://*.gdflix.*  (rotating subdomains)
-        registerExtractorAPI(SkyBapHubdrive())        // https://hubdrive.*
-        registerExtractorAPI(SkyBapDriveleech())      // https://driveleech.*
-        registerExtractorAPI(SkyBapDriveseed())       // https://driveseed.*
-        registerExtractorAPI(SkyBapGofile())          // https://gofile.io
-        registerExtractorAPI(SkyBapHowblogs())        // https://howblogs.*
-        registerExtractorAPI(SkyBapHowblogsSub())     // https://*.howblogs.*  (dynamic subdomains)
-        registerExtractorAPI(SkyBapTpead())           // https://tpead.net
-        registerExtractorAPI(SkyBapAdvtpe())          // https://advtpe.*
+        registerExtractorAPI(SkyBapHubCloud())
+        registerExtractorAPI(SkyBapVCloud())
+        registerExtractorAPI(SkyBapGDFlix())
+        registerExtractorAPI(SkyBapGDLink())
+        registerExtractorAPI(SkyBapGDFlixApp())
+        registerExtractorAPI(SkyBapGdFlix1())
+        registerExtractorAPI(SkyBapGdFlix2())
+        registerExtractorAPI(SkyBapHubdrive())
+        registerExtractorAPI(SkyBapDriveleech())
+        registerExtractorAPI(SkyBapDriveseed())
+        registerExtractorAPI(SkyBapGofile())
+        registerExtractorAPI(SkyBapHowblogs())
+        registerExtractorAPI(SkyBapHowblogsSub())
+        registerExtractorAPI(SkyBapTpead())
+        registerExtractorAPI(SkyBapAdvtpe())
     }
 }
