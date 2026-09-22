@@ -1,4 +1,4 @@
-package com.youtubetamil
+package com.YoutubeTamil
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
