@@ -4,6 +4,8 @@ This repository contains custom CloudStream providers for accessing and organizi
 More providers may be added or updated over time.
 
 ## Repository URL
+[![Deploy](https://shields.io)](cloudstreamrepo://raw.githubusercontent.com/ChocoCooper/cloudstream-repo/master/repo.json)
+
 https://raw.githubusercontent.com/ChocoCooper/cloudstream-repo/master/repo.json
 
 ## ⭐ Support
