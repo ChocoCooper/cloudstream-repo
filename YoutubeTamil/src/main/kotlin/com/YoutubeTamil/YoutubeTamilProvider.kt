@@ -31,15 +31,16 @@ class YoutubeTamilProvider : MainAPI() {
     private val service = ServiceList.YouTube
 
     // ---- Custom main page: channels and playlists ----
-    // FIX: Use MainPageRequest explicitly to ensure `name` and `data` are assigned correctly.
-    override val mainPage = listOf(
-        MainPageRequest("IOF Tamil", "https://www.youtube.com/channel/UCMtWgxssEYhojNFUPi0uTzQ"),
-        MainPageRequest("WAM Tamil Movies", "https://www.youtube.com/channel/UCEFIconx-E0D2ohYsdVjpng"),
-        MainPageRequest("Sony Pictures Tamil", "https://www.youtube.com/channel/UCH5rEIkKj4ioLZQMabpH4Qg"),
-        MainPageRequest("WorldMoviesLocal Tamil", "https://www.youtube.com/channel/UCF7D7DemdQDD0Zhe-UyUuUQ"),
-        MainPageRequest("BookMyShow Stream Tamil", "https://www.youtube.com/channel/UCIOPB_bXpXu-vzZKeAaQqVQ"),
-        MainPageRequest("WorldCinema Tamil", "https://www.youtube.com/channel/UCLqe9MEbZL_gSU9aWBJZN8A"),
-        MainPageRequest("Dimensions Pictures Tamil", "https://youtube.com/playlist?list=PL1NedV9y84PJ74HjYfKPktCWYTj5XDtCw")
+    // FIX: mainPageOf pairs are (DATA, NAME) — the first element becomes `data`,
+    // the second becomes `name`. So the URL must come FIRST.
+    override val mainPage = mainPageOf(
+        "https://www.youtube.com/channel/UCMtWgxssEYhojNFUPi0uTzQ" to "IOF Tamil",
+        "https://www.youtube.com/channel/UCEFIconx-E0D2ohYsdVjpng" to "WAM Tamil Movies",
+        "https://www.youtube.com/channel/UCH5rEIkKj4ioLZQMabpH4Qg" to "Sony Pictures Tamil",
+        "https://www.youtube.com/channel/UCF7D7DemdQDD0Zhe-UyUuUQ" to "WorldMoviesLocal Tamil",
+        "https://www.youtube.com/channel/UCIOPB_bXpXu-vzZKeAaQqVQ" to "BookMyShow Stream Tamil",
+        "https://www.youtube.com/channel/UCLqe9MEbZL_gSU9aWBJZN8A" to "WorldCinema Tamil",
+        "https://youtube.com/playlist?list=PL1NedV9y84PJ74HjYfKPktCWYTj5XDtCw" to "Dimensions Pictures Tamil"
     )
 
     // Cache to store pagination state (nextPage tokens) for both kiosks and custom lists.
@@ -242,7 +243,7 @@ class YoutubeTamilProvider : MainAPI() {
 
         return newTvSeriesLoadResponse(
             channelName,
-            url,      // keep original URL for later load()
+            url,
             TvType.TvSeries,
             episodes
         ) {
@@ -330,11 +331,9 @@ class YoutubeTamilProvider : MainAPI() {
             collectedLinks.add(link)
         }
 
-        // The `data` parameter is the full video URL.
         YoutubeExtractor().getUrl(data, null, subtitleCallback, collectingCallback)
 
-        // 2. Map allowed qualities to their resolution and estimated bandwidth
-        // Only 360p, 480p, 720p, and 1080p are kept.
+        // 2. Map allowed qualities to (resolution, bandwidth) - only 360p-1080p
         val allowedQualities = mapOf(
             Qualities.P1080.value to Triple("1920x1080", 5000000, "1080p"),
             Qualities.P720.value to Triple("1280x720", 2500000, "720p"),
@@ -351,9 +350,10 @@ class YoutubeTamilProvider : MainAPI() {
             val qualityInfo = allowedQualities[link.quality] ?: continue
             val (resolution, bandwidth, _) = qualityInfo
 
-            // Note: YouTube links are usually progressive MP4/WebM.
-            // We are placing them in an HLS master playlist so the player treats them as variants.
-            m3u8Builder.append("#EXT-X-STREAM-INF:BANDWIDTH=$bandwidth,RESOLUTION=$resolution,CODECS=\"avc1.640028,mp4a.40.2\"\n")
+            m3u8Builder.append(
+                "#EXT-X-STREAM-INF:BANDWIDTH=$bandwidth," +
+                "RESOLUTION=$resolution,CODECS=\"avc1.640028,mp4a.40.2\"\n"
+            )
             m3u8Builder.append("${link.url}\n")
             hasLinks = true
         }
@@ -375,7 +375,7 @@ class YoutubeTamilProvider : MainAPI() {
                 type = ExtractorLinkType.M3U8
             ) {
                 this.referer = "https://www.youtube.com/"
-                this.quality = Qualities.Unknown.value // Let the player auto-select
+                this.quality = Qualities.Unknown.value
             }
         )
 
@@ -383,10 +383,9 @@ class YoutubeTamilProvider : MainAPI() {
     }
 
     // ---- Local Server (In-Memory) ----
-    // This object runs a tiny HTTP server on localhost to serve the master playlist.
     private object LocalMasterPlaylistServer {
         private const val TAG = "YT-LocalServer"
-        private const val TTL_MS = 30 * 60 * 1000L // 30 minutes
+        private const val TTL_MS = 30 * 60 * 1000L
 
         private data class Entry(val bytes: ByteArray, val createdAt: Long)
 
@@ -409,7 +408,9 @@ class YoutubeTamilProvider : MainAPI() {
                     while (!ss.isClosed) {
                         try {
                             val client = ss.accept()
-                            thread(isDaemon = true, name = "YT-MasterPlaylistClient") { handleClient(client) }
+                            thread(isDaemon = true, name = "YT-MasterPlaylistClient") {
+                                handleClient(client)
+                            }
                         } catch (e: Exception) {
                             if (!ss.isClosed) Log.e(TAG, "Server accept error: $e")
                         }
@@ -425,7 +426,6 @@ class YoutubeTamilProvider : MainAPI() {
                     s.soTimeout = 10000
                     val input = s.getInputStream().bufferedReader(Charsets.US_ASCII)
                     val requestLine = input.readLine() ?: return
-                    // Consume headers
                     while (true) {
                         val line = input.readLine() ?: break
                         if (line.isEmpty()) break
@@ -438,11 +438,17 @@ class YoutubeTamilProvider : MainAPI() {
 
                     if (entry == null) {
                         val body = "not found".toByteArray()
-                        val header = "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: ${body.size}\r\nConnection: close\r\n\r\n"
+                        val header = "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\n" +
+                            "Content-Length: ${body.size}\r\nConnection: close\r\n\r\n"
                         output.write(header.toByteArray(Charsets.US_ASCII))
                         output.write(body)
                     } else {
-                        val header = "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: ${entry.bytes.size}\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n"
+                        val header = "HTTP/1.1 200 OK\r\n" +
+                            "Content-Type: application/vnd.apple.mpegurl\r\n" +
+                            "Content-Length: ${entry.bytes.size}\r\n" +
+                            "Access-Control-Allow-Origin: *\r\n" +
+                            "Cache-Control: no-cache\r\n" +
+                            "Connection: close\r\n\r\n"
                         output.write(header.toByteArray(Charsets.US_ASCII))
                         output.write(entry.bytes)
                     }
