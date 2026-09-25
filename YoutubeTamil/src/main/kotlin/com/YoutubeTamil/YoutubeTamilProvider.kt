@@ -31,14 +31,15 @@ class YoutubeTamilProvider : MainAPI() {
     private val service = ServiceList.YouTube
 
     // ---- Custom main page: channels and playlists ----
-    override val mainPage = mainPageOf(
-        "IOF Tamil" to "https://www.youtube.com/channel/UCMtWgxssEYhojNFUPi0uTzQ",
-        "WAM Tamil Movies" to "https://www.youtube.com/channel/UCEFIconx-E0D2ohYsdVjpng",
-        "Sony Pictures Tamil" to "https://www.youtube.com/channel/UCH5rEIkKj4ioLZQMabpH4Qg",
-        "WorldMoviesLocal Tamil" to "https://www.youtube.com/channel/UCF7D7DemdQDD0Zhe-UyUuUQ",
-        "BookMyShow Stream Tamil" to "https://www.youtube.com/channel/UCIOPB_bXpXu-vzZKeAaQqVQ",
-        "WorldCinema Tamil" to "https://www.youtube.com/channel/UCLqe9MEbZL_gSU9aWBJZN8A",
-        "Dimensions Pictures Tamil" to "https://youtube.com/playlist?list=PL1NedV9y84PJ74HjYfKPktCWYTj5XDtCw"
+    // FIX: Use MainPageRequest explicitly to ensure `name` and `data` are assigned correctly.
+    override val mainPage = listOf(
+        MainPageRequest("IOF Tamil", "https://www.youtube.com/channel/UCMtWgxssEYhojNFUPi0uTzQ"),
+        MainPageRequest("WAM Tamil Movies", "https://www.youtube.com/channel/UCEFIconx-E0D2ohYsdVjpng"),
+        MainPageRequest("Sony Pictures Tamil", "https://www.youtube.com/channel/UCH5rEIkKj4ioLZQMabpH4Qg"),
+        MainPageRequest("WorldMoviesLocal Tamil", "https://www.youtube.com/channel/UCF7D7DemdQDD0Zhe-UyUuUQ"),
+        MainPageRequest("BookMyShow Stream Tamil", "https://www.youtube.com/channel/UCIOPB_bXpXu-vzZKeAaQqVQ"),
+        MainPageRequest("WorldCinema Tamil", "https://www.youtube.com/channel/UCLqe9MEbZL_gSU9aWBJZN8A"),
+        MainPageRequest("Dimensions Pictures Tamil", "https://youtube.com/playlist?list=PL1NedV9y84PJ74HjYfKPktCWYTj5XDtCw")
     )
 
     // Cache to store pagination state (nextPage tokens) for both kiosks and custom lists.
@@ -241,7 +242,7 @@ class YoutubeTamilProvider : MainAPI() {
 
         return newTvSeriesLoadResponse(
             channelName,
-            url,
+            url,      // keep original URL for later load()
             TvType.TvSeries,
             episodes
         ) {
@@ -333,6 +334,7 @@ class YoutubeTamilProvider : MainAPI() {
         YoutubeExtractor().getUrl(data, null, subtitleCallback, collectingCallback)
 
         // 2. Map allowed qualities to their resolution and estimated bandwidth
+        // Only 360p, 480p, 720p, and 1080p are kept.
         val allowedQualities = mapOf(
             Qualities.P1080.value to Triple("1920x1080", 5000000, "1080p"),
             Qualities.P720.value to Triple("1280x720", 2500000, "720p"),
