@@ -318,8 +318,10 @@ class YoutubeTamilProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         // The `data` parameter is the full video URL (e.g., https://www.youtube.com/watch?v=...).
-        // Pass `null` as the referer (YouTube does not require a referer header).
-        // The YoutubeExtractor handles the rest.
-        return YoutubeExtractor().getUrl(data, null, subtitleCallback, callback)
+        // Pass `null` as the referer. The YoutubeExtractor delivers results via callbacks.
+        YoutubeExtractor().getUrl(data, null, subtitleCallback, callback)
+
+        // Return true to indicate the extraction process was initiated successfully.
+        return true
     }
 }
