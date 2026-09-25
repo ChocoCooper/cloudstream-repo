@@ -22,14 +22,16 @@ data class CinemetaMeta(
     val genres: List<String>? = null,
     val poster: String? = null,
     val background: String? = null,
-    val logo: String? = null, 
+    val logo: String? = null,
     val description: String? = null,
     val releaseInfo: String? = null,
     val year: String? = null,
     val cast: List<String>? = null,
     val imdbRating: String? = null,
     val runtime: String? = null,
-    val country: String? = null
+    val country: String? = null,
+    val certification: String? = null,
+    val language: String? = null
 )
 
 // --- WP-JSON Data Classes ---
@@ -88,7 +90,7 @@ class Film1kProvider : MainAPI() {
     private fun cleanTitle(raw: String): String {
         return raw
             .replace(titleJunkRegex, "")
-            .replace(Regex("\\(\\d{4}\\)"), "") 
+            .replace(Regex("\\(\\d{4}\\)"), "")
             .replace(Regex("\\s+"), " ")
             .trim(' ', '-', '|', ':')
             .trim()
@@ -128,7 +130,7 @@ class Film1kProvider : MainAPI() {
         request: MainPageRequest
     ): HomePageResponse {
         val url = "${request.data}&page=$page"
-        
+
         val responseText = try {
             app.get(url, verify = false).text
         } catch (e: Exception) {
@@ -137,7 +139,7 @@ class Film1kProvider : MainAPI() {
 
         val wpPosts = tryParseJson<List<WpPost>>(responseText) ?: emptyList()
         val items = parseWpPosts(wpPosts)
-        
+
         return newHomePageResponse(
             list = HomePageList(
                 name = request.name,
@@ -149,9 +151,8 @@ class Film1kProvider : MainAPI() {
     }
 
     override suspend fun search(query: String): List<SearchResponse> {
-        // FIXED: Added &orderby=relevance to prevent WordPress from returning random date-ordered results
         val apiUrl = "$mainUrl/wp-json/wp/v2/posts?search=$query&per_page=15&orderby=relevance"
-        
+
         val responseText = try {
             app.get(apiUrl, verify = false).text
         } catch (e: Exception) {
@@ -162,7 +163,6 @@ class Film1kProvider : MainAPI() {
         return parseWpPosts(wpPosts)
     }
 
-    // 🚀 ULTRA-FAST JSON PARSER (Shared by Homepage & Search)
     private suspend fun parseWpPosts(wpPosts: List<WpPost>): List<SearchResponse> = coroutineScope {
         wpPosts.map { post ->
             async {
@@ -179,7 +179,6 @@ class Film1kProvider : MainAPI() {
                     }
                     manualPosterUrl = manualPosterUrl?.let { fixUrl(it) }
 
-                    // Rip the IMDb ID straight out of the JSON HTML block
                     val imdbId = post.content?.rendered?.let { html ->
                         Regex("imdb\\.com/title/(tt\\d+)").find(html)?.groupValues?.get(1)
                             ?: Regex("tt\\d{7,8}").find(html)?.value
@@ -187,15 +186,14 @@ class Film1kProvider : MainAPI() {
 
                     val cinemeta = imdbId?.let { fetchCinemetaData(it) }
 
-                    // Cinemeta Priority, Manual Fallback
                     val mediaName = cinemeta?.name?.takeIf { it.isNotBlank() } ?: manualMediaName
-                    val yearInt = cinemeta?.year?.toIntOrNull() 
+                    val yearInt = cinemeta?.year?.toIntOrNull()
                         ?: cinemeta?.releaseInfo?.let { Regex("\\d{4}").find(it)?.value?.toIntOrNull() }
                         ?: Regex("\\((\\d{4})\\)").find(rawName)?.groupValues?.get(1)?.toIntOrNull()
 
                     val finalPosterUrl = cinemeta?.poster ?: manualPosterUrl
 
-                    newMovieSearchResponse(mediaName, mediaUrl, TvType.Movie) {
+                    newMovieSearchResponse(mediaName, mediaUrl, TvType.NSFW) {
                         this.posterUrl = finalPosterUrl
                         this.year = yearInt
                     }
@@ -345,28 +343,37 @@ class Film1kProvider : MainAPI() {
 
         // --- Prioritized Resolution (Cinemeta first, then Manual) ---
         val mediaName = cinemeta?.name?.takeIf { it.isNotBlank() } ?: manualMediaName
-        val yearInt = cinemeta?.year?.toIntOrNull() 
+        val yearInt = cinemeta?.year?.toIntOrNull()
             ?: cinemeta?.releaseInfo?.let { Regex("\\d{4}").find(it)?.value?.toIntOrNull() }
 
         val finalPosterUrl = getValidImageUrl(cinemeta?.poster, manualPosterUrl)
         val finalBackgroundUrl = getValidImageUrl(cinemeta?.background, finalPosterUrl)
 
         val plot = cinemeta?.description?.takeIf { it.isNotBlank() } ?: manualPlot
-        
+
+        // --- Tags: Genres + Country + Language ---
         val allTags = mutableListOf<String>()
         cinemeta?.genres?.takeIf { it.isNotEmpty() }?.let { allTags.addAll(it) }
         cinemeta?.country?.takeIf { it.isNotBlank() }?.let { allTags.add(it) }
-        
+        cinemeta?.language?.takeIf { it.isNotBlank() }?.let { allTags.add(it) }
+
         // Fallback to manual tags only if Cinemeta had absolutely nothing
         if (allTags.isEmpty() && manualTags.isNotEmpty()) {
             allTags.addAll(manualTags)
         }
 
+        // --- Cast Panel ---
         val allActors = mutableListOf<ActorData>()
-        cinemeta?.cast?.forEach { cast -> allActors.add(ActorData(Actor(cast), roleString = "Cast")) }
+        cinemeta?.cast?.forEach { castName ->
+            allActors.add(ActorData(Actor(castName), roleString = "Cast"))
+        }
 
-        val ratingText = cinemeta?.imdbRating?.takeIf { it.isNotBlank() }
+        // --- Runtime (duration in minutes) ---
         val durationInt = cinemeta?.runtime?.let { Regex("\\d+").find(it)?.value?.toIntOrNull() }
+
+        // --- IMDb Score ---
+        val ratingText = cinemeta?.imdbRating?.takeIf { it.isNotBlank() }
+
         val recommendations = extractRecommendations(doc)
 
         return newMovieLoadResponse(mediaName, url, TvType.Movie, url) {
@@ -378,7 +385,8 @@ class Film1kProvider : MainAPI() {
             this.tags = allTags.distinct()
             this.score = ratingText?.let { Score.from10(it) }
             this.duration = durationInt
-            
+            this.contentRating = cinemeta?.certification?.takeIf { it.isNotBlank() }
+
             if (allActors.isNotEmpty()) {
                 this.actors = allActors
             }
@@ -402,7 +410,7 @@ class Film1kProvider : MainAPI() {
             val docText = app.get(data, verify = false, cacheTime = 1440).text
             val imdbId = Regex("imdb\\.com/title/(tt\\d+)").find(docText)?.groupValues?.get(1)
                 ?: Regex("tt\\d{7,8}").find(docText)?.value
-            
+
             if (imdbId != null) {
                 fetchOpenSubtitles(imdbId)
             } else emptyList()
