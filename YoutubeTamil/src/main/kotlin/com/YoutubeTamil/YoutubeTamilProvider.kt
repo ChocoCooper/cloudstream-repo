@@ -2,6 +2,7 @@ package com.YoutubeTamil
 
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
+import com.lagradost.cloudstream3.extractors.YoutubeExtractor
 import org.schabi.newpipe.extractor.ServiceList
 import org.schabi.newpipe.extractor.InfoItem
 import org.schabi.newpipe.extractor.Page
@@ -316,10 +317,8 @@ class YoutubeTamilProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        return loadExtractor(
-            "https://youtube.com/watch?v=$data",
-            subtitleCallback,
-            callback
-        )
+        // The `data` parameter is the full video URL (e.g., https://www.youtube.com/watch?v=...).
+        // Use the dedicated YoutubeExtractor instead of the generic loadExtractor.
+        return YoutubeExtractor().getUrl(data, subtitleCallback, callback)
     }
 }
