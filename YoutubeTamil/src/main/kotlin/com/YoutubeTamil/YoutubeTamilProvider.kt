@@ -1,5 +1,6 @@
 package com.YoutubeTamil
 
+import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.extractors.YoutubeExtractor
@@ -7,6 +8,13 @@ import org.schabi.newpipe.extractor.ServiceList
 import org.schabi.newpipe.extractor.InfoItem
 import org.schabi.newpipe.extractor.Page
 import org.schabi.newpipe.extractor.stream.StreamInfo
+import kotlinx.coroutines.coroutineScope
+import java.net.InetAddress
+import java.net.ServerSocket
+import java.net.Socket
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.concurrent.thread
 
 class YoutubeTamilProvider : MainAPI() {
     override var mainUrl = "https://www.youtube.com"
@@ -24,12 +32,12 @@ class YoutubeTamilProvider : MainAPI() {
 
     // ---- Custom main page: channels and playlists ----
     override val mainPage = mainPageOf(
-        "IOF Tamil" to "https://youtube.com/@indooverseasfilms-tamil",
-        "WAM Tamil Movies" to "https://youtube.com/@wamtamilmovies",
-        "Sony Pictures Tamil" to "https://youtube.com/@sonypictures-tamil",
-        "WorldMoviesLocal Tamil" to "https://youtube.com/@worldmovieslocal_tamil-zh6gd",
-        "BookMyShow Stream Tamil" to "https://youtube.com/@bookmyshow_stream_tamil",
-        "WorldCinema Tamil" to "https://youtube.com/@worldcinema_tamil",
+        "IOF Tamil" to "https://www.youtube.com/channel/UCMtWgxssEYhojNFUPi0uTzQ",
+        "WAM Tamil Movies" to "https://www.youtube.com/channel/UCEFIconx-E0D2ohYsdVjpng",
+        "Sony Pictures Tamil" to "https://www.youtube.com/channel/UCH5rEIkKj4ioLZQMabpH4Qg",
+        "WorldMoviesLocal Tamil" to "https://www.youtube.com/channel/UCF7D7DemdQDD0Zhe-UyUuUQ",
+        "BookMyShow Stream Tamil" to "https://www.youtube.com/channel/UCIOPB_bXpXu-vzZKeAaQqVQ",
+        "WorldCinema Tamil" to "https://www.youtube.com/channel/UCLqe9MEbZL_gSU9aWBJZN8A",
         "Dimensions Pictures Tamil" to "https://youtube.com/playlist?list=PL1NedV9y84PJ74HjYfKPktCWYTj5XDtCw"
     )
 
@@ -38,10 +46,7 @@ class YoutubeTamilProvider : MainAPI() {
 
     // ---- Resolve @handle URLs to /channel/UC... URLs ----
     private suspend fun resolveChannelUrl(url: String): String {
-        // Already a canonical channel URL — nothing to do
         if (url.contains("/channel/")) return url
-
-        // Only handle @handle URLs (and legacy /c/ and /user/ if you want)
         if (!url.contains("/@")) return url
 
         return try {
@@ -236,7 +241,7 @@ class YoutubeTamilProvider : MainAPI() {
 
         return newTvSeriesLoadResponse(
             channelName,
-            url,      // keep original URL for later load()
+            url,
             TvType.TvSeries,
             episodes
         ) {
@@ -311,17 +316,152 @@ class YoutubeTamilProvider : MainAPI() {
         }
     }
 
+    // ---- LOAD LINKS: Builds a master playlist locally ----
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
-    ): Boolean {
-        // The `data` parameter is the full video URL (e.g., https://www.youtube.com/watch?v=...).
-        // Pass `null` as the referer. The YoutubeExtractor delivers results via callbacks.
-        YoutubeExtractor().getUrl(data, null, subtitleCallback, callback)
+    ): Boolean = coroutineScope {
+        // 1. Collect all individual links from YoutubeExtractor
+        val collectedLinks = mutableListOf<ExtractorLink>()
+        val collectingCallback: (ExtractorLink) -> Unit = { link ->
+            collectedLinks.add(link)
+        }
 
-        // Return true to indicate the extraction process was initiated successfully.
-        return true
+        // The `data` parameter is the full video URL.
+        YoutubeExtractor().getUrl(data, null, subtitleCallback, collectingCallback)
+
+        // 2. Map allowed qualities to their resolution and estimated bandwidth
+        val allowedQualities = mapOf(
+            Qualities.P1080.value to Triple("1920x1080", 5000000, "1080p"),
+            Qualities.P720.value to Triple("1280x720", 2500000, "720p"),
+            Qualities.P480.value to Triple("854x480", 1200000, "480p"),
+            Qualities.P360.value to Triple("640x360", 600000, "360p")
+        )
+
+        // 3. Build the HLS master playlist string
+        val m3u8Builder = StringBuilder()
+        m3u8Builder.append("#EXTM3U\n#EXT-X-VERSION:3\n")
+
+        var hasLinks = false
+        for (link in collectedLinks) {
+            val qualityInfo = allowedQualities[link.quality] ?: continue
+            val (resolution, bandwidth, _) = qualityInfo
+
+            // Note: YouTube links are usually progressive MP4/WebM.
+            // We are placing them in an HLS master playlist so the player treats them as variants.
+            m3u8Builder.append("#EXT-X-STREAM-INF:BANDWIDTH=$bandwidth,RESOLUTION=$resolution,CODECS=\"avc1.640028,mp4a.40.2\"\n")
+            m3u8Builder.append("${link.url}\n")
+            hasLinks = true
+        }
+
+        if (!hasLinks) {
+            return@coroutineScope false
+        }
+
+        // 4. Serve the generated playlist via the local Kotlin server
+        val manifestBytes = m3u8Builder.toString().toByteArray(Charsets.UTF_8)
+        val localUrl = LocalMasterPlaylistServer.serve(manifestBytes)
+
+        // 5. Emit the single local URL as "YouTube"
+        callback(
+            newExtractorLink(
+                source = "YouTube",
+                name = "YouTube",
+                url = localUrl,
+                type = ExtractorLinkType.M3U8
+            ) {
+                this.referer = "https://www.youtube.com/"
+                this.quality = Qualities.Unknown.value // Let the player auto-select
+            }
+        )
+
+        return@coroutineScope true
+    }
+
+    // ---- Local Server (In-Memory) ----
+    // This object runs a tiny HTTP server on localhost to serve the master playlist.
+    private object LocalMasterPlaylistServer {
+        private const val TAG = "YT-LocalServer"
+        private const val TTL_MS = 30 * 60 * 1000L // 30 minutes
+
+        private data class Entry(val bytes: ByteArray, val createdAt: Long)
+
+        private val lock = Any()
+        private var serverSocket: ServerSocket? = null
+        private var port: Int = -1
+        private val manifests = ConcurrentHashMap<String, Entry>()
+
+        private fun ensureStarted(): Int {
+            synchronized(lock) {
+                val existing = serverSocket
+                if (existing != null && !existing.isClosed) return port
+
+                val ss = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
+                serverSocket = ss
+                port = ss.localPort
+                Log.d(TAG, "LocalServer listening on 127.0.0.1:$port")
+
+                thread(isDaemon = true, name = "YT-MasterPlaylistServer") {
+                    while (!ss.isClosed) {
+                        try {
+                            val client = ss.accept()
+                            thread(isDaemon = true, name = "YT-MasterPlaylistClient") { handleClient(client) }
+                        } catch (e: Exception) {
+                            if (!ss.isClosed) Log.e(TAG, "Server accept error: $e")
+                        }
+                    }
+                }
+                return port
+            }
+        }
+
+        private fun handleClient(socket: Socket) {
+            socket.use { s ->
+                try {
+                    s.soTimeout = 10000
+                    val input = s.getInputStream().bufferedReader(Charsets.US_ASCII)
+                    val requestLine = input.readLine() ?: return
+                    // Consume headers
+                    while (true) {
+                        val line = input.readLine() ?: break
+                        if (line.isEmpty()) break
+                    }
+
+                    val path = requestLine.split(" ").getOrNull(1) ?: "/"
+                    val id = path.trimStart('/').substringBefore("?").substringBefore(".")
+                    val entry = manifests[id]
+                    val output = s.getOutputStream()
+
+                    if (entry == null) {
+                        val body = "not found".toByteArray()
+                        val header = "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: ${body.size}\r\nConnection: close\r\n\r\n"
+                        output.write(header.toByteArray(Charsets.US_ASCII))
+                        output.write(body)
+                    } else {
+                        val header = "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.apple.mpegurl\r\nContent-Length: ${entry.bytes.size}\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n"
+                        output.write(header.toByteArray(Charsets.US_ASCII))
+                        output.write(entry.bytes)
+                    }
+                    output.flush()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Client error: $e")
+                }
+            }
+        }
+
+        private fun pruneExpired() {
+            val cutoff = System.currentTimeMillis() - TTL_MS
+            manifests.entries.removeAll { it.value.createdAt < cutoff }
+        }
+
+        fun serve(bytes: ByteArray): String {
+            val p = ensureStarted()
+            pruneExpired()
+            val id = UUID.randomUUID().toString()
+            manifests[id] = Entry(bytes, System.currentTimeMillis())
+            return "http://127.0.0.1:$p/$id.m3u8"
+        }
     }
 }
