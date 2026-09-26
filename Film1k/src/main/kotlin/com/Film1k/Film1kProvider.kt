@@ -31,37 +31,6 @@ data class CinemetaMeta(
     val language: String? = null
 )
 
-// --- IMDb GraphQL Data Classes ---
-data class ImdbGqlResponse(
-    val data: ImdbGqlData? = null
-)
-
-data class ImdbGqlData(
-    val title: ImdbGqlTitle? = null
-)
-
-data class ImdbGqlTitle(
-    val certificates: ImdbCertificatesConnection? = null
-)
-
-data class ImdbCertificatesConnection(
-    val edges: List<ImdbCertEdge>? = null
-)
-
-data class ImdbCertEdge(
-    val node: ImdbCertNode? = null
-)
-
-data class ImdbCertNode(
-    val rating: String? = null,
-    val country: ImdbCountry? = null
-)
-
-data class ImdbCountry(
-    val id: String? = null,
-    val text: String? = null
-)
-
 // --- WP-JSON Data Classes ---
 data class WpPost(
     val link: String? = null,
@@ -103,26 +72,6 @@ class Film1kProvider : MainAPI() {
     private val openSubtitlesMaxResults = 10
 
     private val isHorizontalImages = false
-
-    // --- IMDb GraphQL config ---
-    private val imdbGraphqlUrl = "https://caching.graphql.imdb.com/"
-
-    private val mpaaRatings = setOf("G", "PG", "PG-13", "R", "NC-17")
-
-    private val imdbCertQuery = """
-        query TitleCertificates(${'$'}id: ID!) {
-          title(id: ${'$'}id) {
-            certificates(first: 100) {
-              edges {
-                node {
-                  rating
-                  country { id text }
-                }
-              }
-            }
-          }
-        }
-    """.trimIndent()
 
     override val mainPage = mainPageOf(
         "$mainUrl/wp-json/wp/v2/posts?tags=11&per_page=8" to "USA Movies",
@@ -264,38 +213,6 @@ class Film1kProvider : MainAPI() {
         }
     }
 
-    private suspend fun fetchImdbCertification(imdbId: String): String? {
-        return try {
-            val response = app.post(
-                imdbGraphqlUrl,
-                json = mapOf(
-                    "query" to imdbCertQuery,
-                    "variables" to mapOf("id" to imdbId)
-                ),
-                headers = mapOf(
-                    "content-type" to "application/json",
-                    "origin" to "https://www.imdb.com",
-                    "referer" to "https://www.imdb.com/",
-                    "x-imdb-client-name" to "imdb-web-next",
-                    "x-imdb-user-language" to "en-US",
-                    "x-imdb-user-country" to "US"
-                ),
-                cacheTime = 1440
-            ).text
-
-            val parsed = tryParseJson<ImdbGqlResponse>(response)
-            val edges = parsed?.data?.title?.certificates?.edges ?: return null
-
-            edges
-                .mapNotNull { it.node }
-                .filter { it.country?.id == "US" }
-                .mapNotNull { it.rating?.trim() }
-                .firstOrNull { it.uppercase() in mpaaRatings }
-        } catch (e: Exception) {
-            null
-        }
-    }
-
     private suspend fun fetchOpenSubtitles(imdbId: String): List<SubtitleFile> {
         val requestUrl = "$openSubtitlesBaseUrl/$imdbId.json"
 
@@ -322,6 +239,7 @@ class Film1kProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url, verify = false, cacheTime = 1440).document
 
+        // --- Manual Scraping ---
         val manualPosterUrl = extractDetailPoster(doc)?.let { fixUrl(it) }
 
         val manualRawName = doc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div > img")?.attr("alt")?.takeIf { it.isNotBlank() }
@@ -402,12 +320,10 @@ class Film1kProvider : MainAPI() {
         val imdbId = Regex("imdb\\.com/title/(tt\\d+)").find(doc.html())?.groupValues?.get(1)
             ?: Regex("tt\\d{7,8}").find(doc.html())?.value
 
-        val (cinemeta, certification) = coroutineScope {
-            val cinemetaDeferred = async { imdbId?.let { fetchCinemetaData(it) } }
-            val certDeferred = async { imdbId?.let { fetchImdbCertification(it) } }
-            cinemetaDeferred.await() to certDeferred.await()
-        }
+        // --- Cinemeta Enrichment ---
+        val cinemeta = imdbId?.let { fetchCinemetaData(it) }
 
+        // --- Prioritized Resolution (Cinemeta first, then Manual) ---
         val mediaName = cinemeta?.name?.takeIf { it.isNotBlank() } ?: manualMediaName
         val yearInt = cinemeta?.year?.toIntOrNull()
             ?: cinemeta?.releaseInfo?.let { Regex("\\d{4}").find(it)?.value?.toIntOrNull() }
@@ -417,22 +333,27 @@ class Film1kProvider : MainAPI() {
 
         val plot = cinemeta?.description?.takeIf { it.isNotBlank() } ?: manualPlot
 
+        // --- Tags: Genres + Country + Language ---
         val allTags = mutableListOf<String>()
         cinemeta?.genres?.takeIf { it.isNotEmpty() }?.let { allTags.addAll(it) }
         cinemeta?.country?.takeIf { it.isNotBlank() }?.let { allTags.add(it) }
         cinemeta?.language?.takeIf { it.isNotBlank() }?.let { allTags.add(it) }
 
+        // Fallback to manual tags only if Cinemeta had absolutely nothing
         if (allTags.isEmpty() && manualTags.isNotEmpty()) {
             allTags.addAll(manualTags)
         }
 
+        // --- Cast Panel ---
         val allActors = mutableListOf<ActorData>()
         cinemeta?.cast?.forEach { castName ->
             allActors.add(ActorData(Actor(castName), roleString = "Cast"))
         }
 
+        // --- Runtime (duration in minutes) ---
         val durationInt = cinemeta?.runtime?.let { Regex("\\d+").find(it)?.value?.toIntOrNull() }
 
+        // --- IMDb Score ---
         val ratingText = cinemeta?.imdbRating?.takeIf { it.isNotBlank() }
 
         return newMovieLoadResponse(mediaName, url, TvType.Movie, url) {
@@ -444,7 +365,6 @@ class Film1kProvider : MainAPI() {
             this.tags = allTags.distinct()
             this.score = ratingText?.let { Score.from10(it) }
             this.duration = durationInt
-            this.contentRating = certification
 
             if (allActors.isNotEmpty()) {
                 this.actors = allActors
