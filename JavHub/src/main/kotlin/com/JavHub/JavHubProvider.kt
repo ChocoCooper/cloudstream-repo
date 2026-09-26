@@ -109,6 +109,44 @@ class JavHubProvider : MainAPI() {
         return text?.trim()?.decodeHtmlEntities()?.ifBlank { null }
     }
 
+    /**
+     * Extract Actress/Actresses and Actor/Actors from a MissAV detail page.
+     *
+     * The MissAV info block renders each field as:
+     *   <div class="text-secondary">
+     *     <span>Actress:</span>
+     *     <a class="text-nord13 font-medium" href="...">Nao Jinguji</a>
+     *     , <a class="text-nord13 font-medium" href="...">Def Ghi</a>
+     *   </div>
+     *
+     * Multiple names are comma-separated siblings. We anchor on the label span
+     * so the extraction is independent of row order (nth-of-type would break
+     * if MissAV inserts a new field above Actress/Actor).
+     */
+    private fun extractMissAvActors(doc: Document): List<Actor> {
+        val labels = setOf(
+            "Actress:", "Actress", "Actresses:", "Actresses",
+            "Actor:",   "Actor",   "Actors:",   "Actors"
+        )
+
+        val seen   = linkedSetOf<String>()
+        val actors = mutableListOf<Actor>()
+
+        for (div in doc.select("div.text-secondary")) {
+            val label = div.selectFirst("span")?.text()?.trim() ?: continue
+            if (label !in labels) continue
+
+            div.select("a").forEach { a ->
+                val name = a.text().trim().decodeHtmlEntities()
+                if (name.isNotBlank() && seen.add(name)) {
+                    actors.add(newActor(name))
+                }
+            }
+        }
+
+        return actors
+    }
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = if (page <= 1) request.data else "${request.data}?page=$page"
         val document = app.get(url, headers = browserHeaders, cacheTime = 0).document
@@ -122,7 +160,7 @@ class JavHubProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         val encoded = URLEncoder.encode(query, "UTF-8")
-        
+
         val ajaxHeaders = mapOf(
             "X-Requested-With" to "XMLHttpRequest",
             "Accept" to "application/json, text/javascript, */*; q=0.01",
@@ -211,7 +249,12 @@ class JavHubProvider : MainAPI() {
         val verticalPoster = loadData?.poster ?: document.selectFirst("div.video-player img")?.attr("src")?.ifBlank { null }
         val horizontalPoster = cleanCode?.let { "https://fourhoi.com/$it/cover-n.jpg" }
 
+        // ---------------------------------------------------------------
+        // MissAV enrichment: description + cast (actress/actresses, actor/actors)
+        // ---------------------------------------------------------------
         var fetchedDescription: String? = null
+        var fetchedActors: List<Actor>   = emptyList()
+
         if (!cleanCode.isNullOrBlank()) {
             val missAvSlugCandidates = listOf(
                 cleanCode,
@@ -220,24 +263,29 @@ class JavHubProvider : MainAPI() {
             )
 
             for (slug in missAvSlugCandidates) {
-                val found = runCatching {
-                    val missAvDoc = app.get(
+                val missAvDoc = runCatching {
+                    app.get(
                         "$missAvUrl/en/$slug",
                         timeout = 10,
                         headers = browserHeaders
                     ).document
-                    extractMissAvDescription(missAvDoc)
-                }.getOrNull()
+                }.getOrNull() ?: continue
 
-                if (!found.isNullOrBlank()) {
-                    fetchedDescription = found
-                    break
+                if (fetchedDescription.isNullOrBlank()) {
+                    fetchedDescription = extractMissAvDescription(missAvDoc)
                 }
+
+                if (fetchedActors.isEmpty()) {
+                    fetchedActors = extractMissAvActors(missAvDoc)
+                }
+
+                // Stop early once we have both — avoids hitting the remaining slugs.
+                if (!fetchedDescription.isNullOrBlank() && fetchedActors.isNotEmpty()) break
             }
         }
 
         val plotText = fetchedDescription?.ifBlank { null } ?: rawTitle
-        
+
         val loadDataJson = LoadData(videoUrl, verticalPoster, code).toJson()
 
         return newMovieLoadResponse(title, videoUrl, TvType.NSFW, loadDataJson) {
@@ -245,6 +293,8 @@ class JavHubProvider : MainAPI() {
             this.posterHeaders = mapOf("User-Agent" to browserHeaders["User-Agent"]!!)
             this.backgroundPosterUrl = horizontalPoster
             this.plot = plotText
+            // Cast panel — CloudStream renders these as "Cast: name1, name2, ..."
+            this.actors = fetchedActors
         }
     }
 
@@ -357,12 +407,12 @@ class JavHubProvider : MainAPI() {
                     val javtifulSearchDoc = app.get("https://javtiful.com/search?q=$cleanCode", headers = browserHeaders).document
                     val path = javtifulSearchDoc.selectFirst("body > main > section.front-section > div > div.front-video-grid > article > a")?.attr("href")
                         ?: javtifulSearchDoc.selectFirst("article a")?.attr("href")
-                    
+
                     if (!path.isNullOrBlank()) {
                         val fullUrl = if (path.startsWith("http")) path else "https://javtiful.com$path"
                         val document = app.get(fullUrl, headers = browserHeaders).document
                         val scriptData = document.selectFirst("script#frontWatchConfig")?.data()
-                        
+
                         if (!scriptData.isNullOrBlank()) {
                             val config = parseJson<JavtifulWatchConfig>(scriptData)
                             config.playerSources?.forEach { source ->
