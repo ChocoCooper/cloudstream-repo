@@ -30,8 +30,39 @@ data class CinemetaMeta(
     val imdbRating: String? = null,
     val runtime: String? = null,
     val country: String? = null,
-    val certification: String? = null,
     val language: String? = null
+    // Note: 'certification' removed — Cinemeta v3 never populates it
+)
+
+// --- IMDb GraphQL Data Classes ---
+data class ImdbGqlResponse(
+    val data: ImdbGqlData? = null
+)
+
+data class ImdbGqlData(
+    val title: ImdbGqlTitle? = null
+)
+
+data class ImdbGqlTitle(
+    val certificates: ImdbCertificatesConnection? = null
+)
+
+data class ImdbCertificatesConnection(
+    val edges: List<ImdbCertEdge>? = null
+)
+
+data class ImdbCertEdge(
+    val node: ImdbCertNode? = null
+)
+
+data class ImdbCertNode(
+    val rating: String? = null,
+    val country: ImdbCountry? = null
+)
+
+data class ImdbCountry(
+    val id: String? = null,
+    val text: String? = null
 )
 
 // --- WP-JSON Data Classes ---
@@ -76,6 +107,27 @@ class Film1kProvider : MainAPI() {
 
     private val listingConcurrency = Semaphore(5)
     private val isHorizontalImages = false
+
+    // --- IMDb GraphQL config ---
+    private val imdbGraphqlUrl = "https://caching.graphql.imdb.com/"
+
+    // Only these are real MPAA ratings; TV-* ratings are excluded
+    private val mpaaRatings = setOf("G", "PG", "PG-13", "R", "NC-17")
+
+    private val imdbCertQuery = """
+        query TitleCertificates(${'$'}id: ID!) {
+          title(id: ${'$'}id) {
+            certificates(first: 100) {
+              edges {
+                node {
+                  rating
+                  country { id text }
+                }
+              }
+            }
+          }
+        }
+    """.trimIndent()
 
     override val mainPage = mainPageOf(
         "$mainUrl/wp-json/wp/v2/posts?tags=11" to "USA Movies",
@@ -211,6 +263,46 @@ class Film1kProvider : MainAPI() {
         }
     }
 
+    /**
+     * Fetches the MPAA certification (G / PG / PG-13 / R / NC-17) from IMDb's
+     * private GraphQL endpoint. Keyless, no WAF, works from Indian networks.
+     *
+     * IMDb returns BOTH TV ratings (TV-14, TV-PG, ...) and MPAA ratings for
+     * the US. We explicitly filter out any rating starting with "TV-" and
+     * return only the first exact MPAA match.
+     */
+    private suspend fun fetchImdbCertification(imdbId: String): String? {
+        return try {
+            val response = app.post(
+                imdbGraphqlUrl,
+                json = mapOf(
+                    "query" to imdbCertQuery,
+                    "variables" to mapOf("id" to imdbId)
+                ),
+                headers = mapOf(
+                    "content-type" to "application/json",
+                    "origin" to "https://www.imdb.com",
+                    "referer" to "https://www.imdb.com/",
+                    "x-imdb-client-name" to "imdb-web-next",
+                    "x-imdb-user-language" to "en-US",
+                    "x-imdb-user-country" to "US"
+                ),
+                cacheTime = 1440
+            ).text
+
+            val parsed = tryParseJson<ImdbGqlResponse>(response)
+            val edges = parsed?.data?.title?.certificates?.edges ?: return null
+
+            edges
+                .mapNotNull { it.node }
+                .filter { it.country?.id == "US" }
+                .mapNotNull { it.rating?.trim() }
+                .firstOrNull { it.uppercase() in mpaaRatings }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     private suspend fun fetchOpenSubtitles(imdbId: String): List<SubtitleFile> {
         val requestUrl = "$openSubtitlesBaseUrl/$imdbId.json"
 
@@ -338,8 +430,12 @@ class Film1kProvider : MainAPI() {
         val imdbId = Regex("imdb\\.com/title/(tt\\d+)").find(doc.html())?.groupValues?.get(1)
             ?: Regex("tt\\d{7,8}").find(doc.html())?.value
 
-        // --- Cinemeta Enrichment ---
-        val cinemeta = imdbId?.let { fetchCinemetaData(it) }
+        // --- Cinemeta + IMDb GraphQL fetched in parallel ---
+        val (cinemeta, certification) = coroutineScope {
+            val cinemetaDeferred = async { imdbId?.let { fetchCinemetaData(it) } }
+            val certDeferred = async { imdbId?.let { fetchImdbCertification(it) } }
+            cinemetaDeferred.await() to certDeferred.await()
+        }
 
         // --- Prioritized Resolution (Cinemeta first, then Manual) ---
         val mediaName = cinemeta?.name?.takeIf { it.isNotBlank() } ?: manualMediaName
@@ -385,7 +481,8 @@ class Film1kProvider : MainAPI() {
             this.tags = allTags.distinct()
             this.score = ratingText?.let { Score.from10(it) }
             this.duration = durationInt
-            this.contentRating = cinemeta?.certification?.takeIf { it.isNotBlank() }
+            // MPAA certification from IMDb GraphQL (G / PG / PG-13 / R / NC-17)
+            this.contentRating = certification
 
             if (allActors.isNotEmpty()) {
                 this.actors = allActors
