@@ -107,7 +107,6 @@ class Film1kProvider : MainAPI() {
     // --- IMDb GraphQL config ---
     private val imdbGraphqlUrl = "https://caching.graphql.imdb.com/"
 
-    // Only these are real MPAA ratings; TV-* ratings are excluded
     private val mpaaRatings = setOf("G", "PG", "PG-13", "R", "NC-17")
 
     private val imdbCertQuery = """
@@ -212,33 +211,41 @@ class Film1kProvider : MainAPI() {
     }
 
     /**
-     * Lightweight listing parser — NO Cinemeta calls here.
-     * Uses only what WP JSON already returns, so the homepage and search
-     * results render as fast as possible with a single network request.
+     * Lightweight listing parser — NO Cinemeta API calls here.
      *
-     * Cinemeta enrichment happens later in load(), only when the user
-     * actually opens a movie.
+     * Constructs a deterministic Cinemeta poster URL from the IMDb ID
+     * embedded in the WP post content. No API request is made; the image
+     * loader (Coil/Glide) fetches actual bytes lazily when scrolled into view.
+     *
+     * Priority: Cinemeta URL > WP fifu_image_url > WP content <img src>
      */
     private fun parseWpPosts(wpPosts: List<WpPost>): List<SearchResponse> {
         return wpPosts
-            .take(8) // Safety net: cap at 8 even if WP API returns extra (e.g. sticky posts)
+            .take(8)
             .mapNotNull { post ->
                 val mediaUrl = post.link?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
                 val rawName = post.title?.rendered ?: return@mapNotNull null
                 val mediaName = cleanTitle(rawName)
 
-                // Poster URL only — no network call. CloudStream's image loader
-                // (Coil/Glide) will fetch the actual bytes lazily when the item
-                // scrolls into view.
-                var posterUrl = post.meta?.fifu_image_url?.takeIf { it.isNotBlank() }
-                if (posterUrl == null) {
-                    posterUrl = post.content?.rendered?.let { html ->
-                        Regex("src=\"([^\"]+)\"").find(html)?.groupValues?.get(1)
-                    }
+                // Extract IMDb ID from the WP content — already in the JSON response
+                val imdbId = post.content?.rendered?.let { html ->
+                    Regex("imdb\\.com/title/(tt\\d+)").find(html)?.groupValues?.get(1)
+                        ?: Regex("tt\\d{7,8}").find(html)?.value
                 }
-                val finalPosterUrl = posterUrl?.let { fixUrl(it) }
 
-                // Year from the WP title only; Cinemeta will refine it in load()
+                // Cinemeta poster URL — deterministic, no API call
+                val cinemetaPosterUrl = imdbId?.let {
+                    "https://images.metahub.space/poster/medium/$it/img"
+                }
+
+                // WP poster as fallback
+                val wpPosterUrl = post.meta?.fifu_image_url?.takeIf { it.isNotBlank() }
+                    ?: post.content?.rendered?.let { html ->
+                        Regex("src=\"([^\"]+)\"").find(html)?.groupValues?.get(1)
+                    }?.let { fixUrl(it) }
+
+                val finalPosterUrl = cinemetaPosterUrl ?: wpPosterUrl
+
                 val yearInt = Regex("\\((\\d{4})\\)").find(rawName)?.groupValues?.get(1)?.toIntOrNull()
 
                 newMovieSearchResponse(mediaName, mediaUrl, TvType.NSFW) {
@@ -257,14 +264,6 @@ class Film1kProvider : MainAPI() {
         }
     }
 
-    /**
-     * Fetches the MPAA certification (G / PG / PG-13 / R / NC-17) from IMDb's
-     * private GraphQL endpoint. Keyless, no WAF, works from Indian networks.
-     *
-     * IMDb returns BOTH TV ratings (TV-14, TV-PG, ...) and MPAA ratings for
-     * the US. We explicitly filter out any rating starting with "TV-" and
-     * return only the first exact MPAA match.
-     */
     private suspend fun fetchImdbCertification(imdbId: String): String? {
         return try {
             val response = app.post(
@@ -323,7 +322,6 @@ class Film1kProvider : MainAPI() {
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url, verify = false, cacheTime = 1440).document
 
-        // --- Manual Scraping ---
         val manualPosterUrl = extractDetailPoster(doc)?.let { fixUrl(it) }
 
         val manualRawName = doc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div > img")?.attr("alt")?.takeIf { it.isNotBlank() }
@@ -404,15 +402,12 @@ class Film1kProvider : MainAPI() {
         val imdbId = Regex("imdb\\.com/title/(tt\\d+)").find(doc.html())?.groupValues?.get(1)
             ?: Regex("tt\\d{7,8}").find(doc.html())?.value
 
-        // --- Cinemeta + IMDb GraphQL fetched in parallel ---
-        // This runs ONLY when the user opens a movie, not on homepage/search.
         val (cinemeta, certification) = coroutineScope {
             val cinemetaDeferred = async { imdbId?.let { fetchCinemetaData(it) } }
             val certDeferred = async { imdbId?.let { fetchImdbCertification(it) } }
             cinemetaDeferred.await() to certDeferred.await()
         }
 
-        // --- Prioritized Resolution (Cinemeta first, then Manual) ---
         val mediaName = cinemeta?.name?.takeIf { it.isNotBlank() } ?: manualMediaName
         val yearInt = cinemeta?.year?.toIntOrNull()
             ?: cinemeta?.releaseInfo?.let { Regex("\\d{4}").find(it)?.value?.toIntOrNull() }
@@ -422,27 +417,22 @@ class Film1kProvider : MainAPI() {
 
         val plot = cinemeta?.description?.takeIf { it.isNotBlank() } ?: manualPlot
 
-        // --- Tags: Genres + Country + Language ---
         val allTags = mutableListOf<String>()
         cinemeta?.genres?.takeIf { it.isNotEmpty() }?.let { allTags.addAll(it) }
         cinemeta?.country?.takeIf { it.isNotBlank() }?.let { allTags.add(it) }
         cinemeta?.language?.takeIf { it.isNotBlank() }?.let { allTags.add(it) }
 
-        // Fallback to manual tags only if Cinemeta had absolutely nothing
         if (allTags.isEmpty() && manualTags.isNotEmpty()) {
             allTags.addAll(manualTags)
         }
 
-        // --- Cast Panel ---
         val allActors = mutableListOf<ActorData>()
         cinemeta?.cast?.forEach { castName ->
             allActors.add(ActorData(Actor(castName), roleString = "Cast"))
         }
 
-        // --- Runtime (duration in minutes) ---
         val durationInt = cinemeta?.runtime?.let { Regex("\\d+").find(it)?.value?.toIntOrNull() }
 
-        // --- IMDb Score ---
         val ratingText = cinemeta?.imdbRating?.takeIf { it.isNotBlank() }
 
         return newMovieLoadResponse(mediaName, url, TvType.Movie, url) {
@@ -454,7 +444,6 @@ class Film1kProvider : MainAPI() {
             this.tags = allTags.distinct()
             this.score = ratingText?.let { Score.from10(it) }
             this.duration = durationInt
-            // MPAA certification from IMDb GraphQL (G / PG / PG-13 / R / NC-17)
             this.contentRating = certification
 
             if (allActors.isNotEmpty()) {
