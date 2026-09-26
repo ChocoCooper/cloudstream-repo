@@ -112,25 +112,28 @@ class JavHubProvider : MainAPI() {
     /**
      * Extract Actress/Actresses and Actor/Actors from a MissAV detail page.
      *
-     * The MissAV info block renders each field as:
+     * MissAV renders each info field as:
      *   <div class="text-secondary">
      *     <span>Actress:</span>
      *     <a class="text-nord13 font-medium" href="...">Nao Jinguji</a>
      *     , <a class="text-nord13 font-medium" href="...">Def Ghi</a>
      *   </div>
      *
-     * Multiple names are comma-separated siblings. We anchor on the label span
-     * so the extraction is independent of row order (nth-of-type would break
-     * if MissAV inserts a new field above Actress/Actor).
+     * Multiple names are comma-separated sibling <a> tags. We anchor on the
+     * label span so extraction is independent of row order — nth-of-type
+     * selectors break whenever MissAV inserts a new field above Actress/Actor.
+     *
+     * Returns List<ActorData> because LoadResponse.actors expects ActorData,
+     * not bare Actor. Each name is wrapped as ActorData(actor = Actor(name)).
      */
-    private fun extractMissAvActors(doc: Document): List<Actor> {
+    private fun extractMissAvActors(doc: Document): List<ActorData> {
         val labels = setOf(
             "Actress:", "Actress", "Actresses:", "Actresses",
             "Actor:",   "Actor",   "Actors:",   "Actors"
         )
 
         val seen   = linkedSetOf<String>()
-        val actors = mutableListOf<Actor>()
+        val actors = mutableListOf<ActorData>()
 
         for (div in doc.select("div.text-secondary")) {
             val label = div.selectFirst("span")?.text()?.trim() ?: continue
@@ -139,7 +142,7 @@ class JavHubProvider : MainAPI() {
             div.select("a").forEach { a ->
                 val name = a.text().trim().decodeHtmlEntities()
                 if (name.isNotBlank() && seen.add(name)) {
-                    actors.add(newActor(name))
+                    actors.add(ActorData(actor = Actor(name = name)))
                 }
             }
         }
@@ -252,8 +255,8 @@ class JavHubProvider : MainAPI() {
         // ---------------------------------------------------------------
         // MissAV enrichment: description + cast (actress/actresses, actor/actors)
         // ---------------------------------------------------------------
-        var fetchedDescription: String? = null
-        var fetchedActors: List<Actor>   = emptyList()
+        var fetchedDescription: String?    = null
+        var fetchedActors: List<ActorData> = emptyList()
 
         if (!cleanCode.isNullOrBlank()) {
             val missAvSlugCandidates = listOf(
@@ -294,6 +297,7 @@ class JavHubProvider : MainAPI() {
             this.backgroundPosterUrl = horizontalPoster
             this.plot = plotText
             // Cast panel — CloudStream renders these as "Cast: name1, name2, ..."
+            // LoadResponse.actors is List<ActorData>?, so each name is wrapped.
             this.actors = fetchedActors
         }
     }
