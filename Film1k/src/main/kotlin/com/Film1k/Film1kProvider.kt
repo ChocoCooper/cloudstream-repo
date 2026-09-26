@@ -6,8 +6,6 @@ import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.jsoup.nodes.TextNode
@@ -31,7 +29,6 @@ data class CinemetaMeta(
     val runtime: String? = null,
     val country: String? = null,
     val language: String? = null
-    // Note: 'certification' removed — Cinemeta v3 never populates it
 )
 
 // --- IMDb GraphQL Data Classes ---
@@ -105,7 +102,6 @@ class Film1kProvider : MainAPI() {
     private val openSubtitlesBaseUrl = "https://opensubtitles-v3.strem.io/subtitles/movie"
     private val openSubtitlesMaxResults = 10
 
-    private val listingConcurrency = Semaphore(5)
     private val isHorizontalImages = false
 
     // --- IMDb GraphQL config ---
@@ -130,8 +126,8 @@ class Film1kProvider : MainAPI() {
     """.trimIndent()
 
     override val mainPage = mainPageOf(
-        "$mainUrl/wp-json/wp/v2/posts?tags=11" to "USA Movies",
-        "$mainUrl/wp-json/wp/v2/posts?tags=58" to "1990s Movies"
+        "$mainUrl/wp-json/wp/v2/posts?tags=11&per_page=8" to "USA Movies",
+        "$mainUrl/wp-json/wp/v2/posts?tags=58&per_page=8" to "1990s Movies"
     )
 
     private val titleJunkRegex = Regex(
@@ -215,43 +211,41 @@ class Film1kProvider : MainAPI() {
         return parseWpPosts(wpPosts)
     }
 
-    private suspend fun parseWpPosts(wpPosts: List<WpPost>): List<SearchResponse> = coroutineScope {
-        wpPosts.map { post ->
-            async {
-                listingConcurrency.withPermit {
-                    val mediaUrl = post.link?.takeIf { it.isNotBlank() } ?: return@withPermit null
-                    val rawName = post.title?.rendered ?: return@withPermit null
-                    val manualMediaName = cleanTitle(rawName)
+    /**
+     * Lightweight listing parser — NO Cinemeta calls here.
+     * Uses only what WP JSON already returns, so the homepage and search
+     * results render as fast as possible with a single network request.
+     *
+     * Cinemeta enrichment happens later in load(), only when the user
+     * actually opens a movie.
+     */
+    private fun parseWpPosts(wpPosts: List<WpPost>): List<SearchResponse> {
+        return wpPosts
+            .take(8) // Safety net: cap at 8 even if WP API returns extra (e.g. sticky posts)
+            .mapNotNull { post ->
+                val mediaUrl = post.link?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                val rawName = post.title?.rendered ?: return@mapNotNull null
+                val mediaName = cleanTitle(rawName)
 
-                    var manualPosterUrl = post.meta?.fifu_image_url?.takeIf { it.isNotBlank() }
-                    if (manualPosterUrl == null) {
-                        manualPosterUrl = post.content?.rendered?.let { html ->
-                            Regex("src=\"([^\"]+)\"").find(html)?.groupValues?.get(1)
-                        }
-                    }
-                    manualPosterUrl = manualPosterUrl?.let { fixUrl(it) }
-
-                    val imdbId = post.content?.rendered?.let { html ->
-                        Regex("imdb\\.com/title/(tt\\d+)").find(html)?.groupValues?.get(1)
-                            ?: Regex("tt\\d{7,8}").find(html)?.value
-                    }
-
-                    val cinemeta = imdbId?.let { fetchCinemetaData(it) }
-
-                    val mediaName = cinemeta?.name?.takeIf { it.isNotBlank() } ?: manualMediaName
-                    val yearInt = cinemeta?.year?.toIntOrNull()
-                        ?: cinemeta?.releaseInfo?.let { Regex("\\d{4}").find(it)?.value?.toIntOrNull() }
-                        ?: Regex("\\((\\d{4})\\)").find(rawName)?.groupValues?.get(1)?.toIntOrNull()
-
-                    val finalPosterUrl = cinemeta?.poster ?: manualPosterUrl
-
-                    newMovieSearchResponse(mediaName, mediaUrl, TvType.NSFW) {
-                        this.posterUrl = finalPosterUrl
-                        this.year = yearInt
+                // Poster URL only — no network call. CloudStream's image loader
+                // (Coil/Glide) will fetch the actual bytes lazily when the item
+                // scrolls into view.
+                var posterUrl = post.meta?.fifu_image_url?.takeIf { it.isNotBlank() }
+                if (posterUrl == null) {
+                    posterUrl = post.content?.rendered?.let { html ->
+                        Regex("src=\"([^\"]+)\"").find(html)?.groupValues?.get(1)
                     }
                 }
+                val finalPosterUrl = posterUrl?.let { fixUrl(it) }
+
+                // Year from the WP title only; Cinemeta will refine it in load()
+                val yearInt = Regex("\\((\\d{4})\\)").find(rawName)?.groupValues?.get(1)?.toIntOrNull()
+
+                newMovieSearchResponse(mediaName, mediaUrl, TvType.NSFW) {
+                    this.posterUrl = finalPosterUrl
+                    this.year = yearInt
+                }
             }
-        }.awaitAll().filterNotNull()
     }
 
     private suspend fun fetchCinemetaData(imdbId: String): CinemetaMeta? {
@@ -324,26 +318,6 @@ class Film1kProvider : MainAPI() {
             ?.take(openSubtitlesMaxResults)
             ?.mapNotNull { sub -> sub.url?.let { SubtitleFile("English", it) } }
             ?: emptyList()
-    }
-
-    private fun extractRecommendations(doc: Document): List<SearchResponse> {
-        val articles = doc.select("main > section article > header > a")
-        return articles.mapNotNull { aTag ->
-            val href = fixUrl(aTag.attr("href"))
-            if (href.isBlank()) return@mapNotNull null
-
-            val rawTitle = aTag.selectFirst("h2")?.text()?.trim()?.takeIf { it.isNotBlank() }
-                ?: aTag.text().trim()
-            if (rawTitle.isBlank()) return@mapNotNull null
-            val title = cleanTitle(rawTitle)
-
-            val imgEl = aTag.selectFirst("figure img") ?: aTag.selectFirst("img")
-            val posterUrl = getImageUrl(imgEl)?.let { fixUrl(it) }
-
-            newMovieSearchResponse(title, href, TvType.Movie) {
-                this.posterUrl = posterUrl
-            }
-        }
     }
 
     override suspend fun load(url: String): LoadResponse {
@@ -431,6 +405,7 @@ class Film1kProvider : MainAPI() {
             ?: Regex("tt\\d{7,8}").find(doc.html())?.value
 
         // --- Cinemeta + IMDb GraphQL fetched in parallel ---
+        // This runs ONLY when the user opens a movie, not on homepage/search.
         val (cinemeta, certification) = coroutineScope {
             val cinemetaDeferred = async { imdbId?.let { fetchCinemetaData(it) } }
             val certDeferred = async { imdbId?.let { fetchImdbCertification(it) } }
@@ -470,8 +445,6 @@ class Film1kProvider : MainAPI() {
         // --- IMDb Score ---
         val ratingText = cinemeta?.imdbRating?.takeIf { it.isNotBlank() }
 
-        val recommendations = extractRecommendations(doc)
-
         return newMovieLoadResponse(mediaName, url, TvType.Movie, url) {
             this.posterUrl = finalPosterUrl
             this.backgroundPosterUrl = finalBackgroundUrl
@@ -486,9 +459,6 @@ class Film1kProvider : MainAPI() {
 
             if (allActors.isNotEmpty()) {
                 this.actors = allActors
-            }
-            if (recommendations.isNotEmpty()) {
-                this.recommendations = recommendations
             }
         }
     }
