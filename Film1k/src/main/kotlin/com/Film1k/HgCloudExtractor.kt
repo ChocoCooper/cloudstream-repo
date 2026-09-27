@@ -21,7 +21,7 @@ class HgCloudExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        android.util.Log.d(TAG, "HgCloud getUrl: $url")
+        android.util.Log.e(TAG, "HgCloud.getUrl: $url")
         try {
             val resolver = WebViewResolver(
                 interceptUrl = Regex(
@@ -41,15 +41,14 @@ class HgCloudExtractor : ExtractorApi() {
                 referer = referer
             )
 
-            android.util.Log.d(TAG, "HgCloud: intercepted=${interceptedRequest?.url} extras=${extraRequests.size}")
+            android.util.Log.e(TAG, "HgCloud intercepted=${interceptedRequest?.url} extras=${extraRequests.size}")
 
             val streamUrl = interceptedRequest?.url?.toString() ?: run {
-                android.util.Log.w(TAG, "HgCloud: no intercepted request")
+                android.util.Log.e(TAG, "HgCloud: NO intercepted request")
                 return
             }
             val isM3u8 = streamUrl.contains(".m3u8", ignoreCase = true)
-
-            android.util.Log.d(TAG, "HgCloud: emitting $streamUrl")
+            android.util.Log.e(TAG, "HgCloud emitting: $streamUrl")
 
             callback.invoke(
                 newExtractorLink(
@@ -63,7 +62,7 @@ class HgCloudExtractor : ExtractorApi() {
                 }
             )
         } catch (e: Exception) {
-            android.util.Log.e(TAG, "HgCloud failed", e)
+            android.util.Log.e(TAG, "HgCloud FAILED", e)
         }
     }
 }
