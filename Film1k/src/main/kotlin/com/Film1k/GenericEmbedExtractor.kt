@@ -7,14 +7,16 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import java.net.URI
 
 /**
  * Generic fallback extractor for any embed host we don't have a specific
- * handler for. Uses WebViewResolver to execute the player JavaScript and
- * intercept the .m3u8 / .mp4 request.
+ * handler for.
  *
- * Handles: myvidplay.com, hqq.ac, sbrapid.com, callistanise.com, and any
- * future host the site starts using.
+ * CRITICAL: The Referer sent to the CDN must match the stream's own origin,
+ * not the parent film1k.com page. Callistanise, myvidplay, hqq.ac and
+ * similar hosts enforce hotlink protection — sending film1k.com as Referer
+ * causes 403 Forbidden on the m3u8 / mp4 request.
  */
 class GenericEmbedExtractor : ExtractorApi() {
     override var mainUrl = "https://www.film1k.com"
@@ -22,6 +24,17 @@ class GenericEmbedExtractor : ExtractorApi() {
     override val requiresReferer = true
 
     private val TAG = "Film1kDebug"
+
+    /** Return scheme://host[:port]/ of the given URL, or null. */
+    private fun originOf(url: String): String? {
+        return try {
+            val u = URI(url)
+            val port = if (u.port > 0) ":${u.port}" else ""
+            "${u.scheme}://${u.host}$port/"
+        } catch (_: Throwable) {
+            null
+        }
+    }
 
     override suspend fun getUrl(
         url: String,
@@ -35,7 +48,7 @@ class GenericEmbedExtractor : ExtractorApi() {
         try {
             val resolver = WebViewResolver(
                 interceptUrl = Regex(
-                    """\.m3u8(\?|$)|\.mp4(\?|$)|\.ts(\?|$)|master\.m3u8|/hls/""",
+                    """\.m3u8(\?|$)|\.mp4(\?|$)|\.ts(\?|$)|master\.m3u8|/hls/|/stream/|/playlist/""",
                     RegexOption.IGNORE_CASE
                 ),
                 additionalUrls = emptyList(),
@@ -53,7 +66,9 @@ class GenericEmbedExtractor : ExtractorApi() {
                                     '.jw-display-icon-container, ' +
                                     '.jw-display-icon-display, ' +
                                     '.jw-icon-display, ' +
-                                    '.play-button, [class*="play"]'
+                                    '.play-button, ' +
+                                    'button[class*="play"], ' +
+                                    '[class*="play"]'
                                 );
                                 if (display) display.click();
                                 var v = document.querySelector('video');
@@ -63,14 +78,14 @@ class GenericEmbedExtractor : ExtractorApi() {
                                     if (p && p.catch) p.catch(function(){});
                                 }
                             } catch(e) {}
-                            if (tries > 25) clearInterval(iv);
+                            if (tries > 20) clearInterval(iv);
                         }, 1000);
                     })();
                 """.trimIndent(),
                 scriptCallback = { msg ->
                     android.util.Log.e(TAG, "GenericEmbed.WebView → $msg")
                 },
-                timeout = 45_000L
+                timeout = 20_000L
             )
 
             val (interceptedRequest, extraRequests) = resolver.resolveUsingWebView(
@@ -98,10 +113,19 @@ class GenericEmbedExtractor : ExtractorApi() {
                 }
 
             val isM3u8 = streamUrl.contains(".m3u8", ignoreCase = true)
+
+            // *** THE FIX ***
+            // Use the STREAM's own origin as the Referer, not the parent
+            // film1k.com page. CDNs like callistanise.com, myvidplay.com,
+            // hqq.ac require this for hotlink protection. If originOf()
+            // fails, fall back to the embed page's origin, then film1k.
+            val streamOrigin = originOf(streamUrl)
+                ?: originOf(url)
+                ?: mainUrl
             android.util.Log.e(
                 TAG,
                 "GenericEmbed EMITTING [${if (isM3u8) "M3U8" else "MP4"}] $streamUrl " +
-                "(total ${System.currentTimeMillis() - start}ms)"
+                "referer=$streamOrigin (total ${System.currentTimeMillis() - start}ms)"
             )
 
             callback.invoke(
@@ -111,7 +135,7 @@ class GenericEmbedExtractor : ExtractorApi() {
                     url = streamUrl,
                     type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                 ) {
-                    this.referer = referer ?: mainUrl
+                    this.referer = streamOrigin
                     this.quality = Qualities.Unknown.value
                 }
             )
