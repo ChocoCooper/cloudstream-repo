@@ -7,23 +7,25 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import java.net.URI
 
-/**
- * TurboVidHLS (Option 3) extractor.
- *
- * Uses CloudStream's WebViewResolver to load the embed page, execute the
- * JW Player, and intercept the .m3u8 request. Enhanced with full analytics:
- *  - WebView console capture via scriptCallback
- *  - Per-stage timing
- *  - Every intercepted URL logged
- *  - SSL/network/JS errors surfaced
- */
 class TurboVidHLSExtractor : ExtractorApi() {
     override var mainUrl = "https://turbovidhls.com"
     override var name = "TurboVid"
     override val requiresReferer = true
 
     private val TAG = "Film1kDebug"
+
+    /** Return scheme://host[:port]/ of the given URL, or null. */
+    private fun originOf(url: String): String? {
+        return try {
+            val u = URI(url)
+            val port = if (u.port > 0) ":${u.port}" else ""
+            "${u.scheme}://${u.host}$port/"
+        } catch (_: Throwable) {
+            null
+        }
+    }
 
     override suspend fun getUrl(
         url: String,
@@ -49,15 +51,31 @@ class TurboVidHLSExtractor : ExtractorApi() {
                 useOkhttp = false,
                 script = """
                     (function(){
-                        function report(msg) {
+                        // Robust callback: try every known CloudStream bridge shape
+                        function cb(msg) {
                             try {
-                                if (window.CloudstreamCallback && window.CloudstreamCallback.log) {
-                                    window.CloudstreamCallback.log('[TurboVid] ' + msg);
+                                if (typeof window.CloudstreamCallback === 'function') {
+                                    window.CloudstreamCallback(msg);
+                                    return;
+                                }
+                                if (window.CloudstreamCallback) {
+                                    if (typeof window.CloudstreamCallback.postMessage === 'function') {
+                                        window.CloudstreamCallback.postMessage(msg); return;
+                                    }
+                                    if (typeof window.CloudstreamCallback.log === 'function') {
+                                        window.CloudstreamCallback.log(msg); return;
+                                    }
+                                    if (typeof window.CloudstreamCallback.done === 'function') {
+                                        window.CloudstreamCallback.done(msg); return;
+                                    }
                                 }
                             } catch(e) {}
                         }
-                        report('script injected, url=' + window.location.href);
-                        report('readyState=' + document.readyState);
+
+                        function report(msg) { cb('[TurboVid] ' + msg); }
+
+                        report('script injected, url=' + window.location.href +
+                               ' readyState=' + document.readyState);
 
                         window.addEventListener('error', function(ev){
                             report('JS_ERROR: ' + (ev.message || ev) + ' @ ' +
@@ -105,22 +123,14 @@ class TurboVidHLSExtractor : ExtractorApi() {
                                     '.jw-display-icon-display, ' +
                                     '.jw-icon-display'
                                 );
-                                if (display) {
-                                    display.click();
-                                    if (!reported['click_' + tries]) {
-                                        reported['click_' + tries] = true;
-                                        report('CLICK display try ' + tries);
-                                    }
-                                }
+                                if (display) display.click();
                                 var v = document.querySelector('video');
                                 if (v) {
                                     v.muted = true;
                                     var p = v.play();
-                                    if (p && p.catch) {
-                                        p.catch(function(e){
-                                            report('PLAY_REJECT try ' + tries + ': ' + (e.message || e));
-                                        });
-                                    }
+                                    if (p && p.catch) p.catch(function(e){
+                                        report('PLAY_REJECT try ' + tries + ': ' + (e.message || e));
+                                    });
                                 }
                             } catch(e) {
                                 report('PLAY_ERR try ' + tries + ': ' + (e.message || e));
@@ -167,20 +177,18 @@ class TurboVidHLSExtractor : ExtractorApi() {
             val streamUrl = candidates.firstOrNull { it.contains(".m3u8", ignoreCase = true) }
                 ?: candidates.firstOrNull { it.contains(".mp4", ignoreCase = true) }
                 ?: run {
-                    android.util.Log.e(
-                        TAG,
-                        "TurboVid NO STREAM — resolve complete but no candidate matched. " +
-                        "This usually means the player never requested the manifest " +
-                        "(play button never fired, or SSL block)."
-                    )
+                    android.util.Log.e(TAG, "TurboVid NO STREAM")
                     return
                 }
 
             val isM3u8 = streamUrl.contains(".m3u8", ignoreCase = true)
+
+            // CDN requires a Referer matching its own origin (hotlink protection).
+            val streamOrigin = originOf(streamUrl) ?: "$mainUrl/"
             android.util.Log.e(
                 TAG,
                 "TurboVid EMITTING [${if (isM3u8) "M3U8" else "MP4"}] $streamUrl " +
-                "(total ${System.currentTimeMillis() - start}ms)"
+                "referer=$streamOrigin (total ${System.currentTimeMillis() - start}ms)"
             )
 
             callback.invoke(
@@ -190,7 +198,7 @@ class TurboVidHLSExtractor : ExtractorApi() {
                     url = streamUrl,
                     type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                 ) {
-                    this.referer = "$mainUrl/"
+                    this.referer = streamOrigin
                     this.quality = Qualities.Unknown.value
                 }
             )
