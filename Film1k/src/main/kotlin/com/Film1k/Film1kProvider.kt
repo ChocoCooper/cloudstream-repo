@@ -329,9 +329,6 @@ class Film1kProvider : MainAPI() {
         }
     }
 
-    // ------------------------------------------------------------------
-    // AJAX — fetch a server embed URL for a given key (0..3)
-    // ------------------------------------------------------------------
     private suspend fun fetchServerEmbed(postId: String, key: Int, referer: String): String? {
         return try {
             val r = app.post(
@@ -373,16 +370,13 @@ class Film1kProvider : MainAPI() {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Route an embed URL to the correct extractor based on hostname
-    // ------------------------------------------------------------------
     private suspend fun routeToExtractor(
         embedUrl: String,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
+        // Specific handlers first
         when {
-            // film1k.xyz native — full PoW+attest+AES flow (Option 1)
             embedUrl.contains("film1k.xyz") && embedUrl.contains("/e/") -> {
                 android.util.Log.e(TAG, "Route → Film1k: $embedUrl")
                 try {
@@ -392,8 +386,8 @@ class Film1kProvider : MainAPI() {
                 } catch (e: Throwable) {
                     android.util.Log.e(TAG, "Film1k FAILED", e)
                 }
+                return
             }
-            // TurboVidHLS (Option 3)
             embedUrl.contains("turbovidhls.com") -> {
                 android.util.Log.e(TAG, "Route → TurboVid: $embedUrl")
                 try {
@@ -403,8 +397,8 @@ class Film1kProvider : MainAPI() {
                 } catch (e: Throwable) {
                     android.util.Log.e(TAG, "TurboVid FAILED", e)
                 }
+                return
             }
-            // HgCloud (Option 4)
             embedUrl.contains("hgcloud.to") -> {
                 android.util.Log.e(TAG, "Route → HgCloud: $embedUrl")
                 try {
@@ -414,58 +408,55 @@ class Film1kProvider : MainAPI() {
                 } catch (e: Throwable) {
                     android.util.Log.e(TAG, "HgCloud FAILED", e)
                 }
+                return
             }
-            // AbyssPlayer (Option 2) — intentionally skipped
             embedUrl.contains("abyssplayer.com") -> {
                 android.util.Log.e(TAG, "Route → Abyss SKIPPED: $embedUrl")
+                return
             }
-            // Any other direct media URL — labelled "Direct"
-            embedUrl.startsWith("http") &&
-                (embedUrl.contains(".mp4") || embedUrl.contains(".m3u8")) -> {
-                android.util.Log.e(TAG, "Route → Direct media: $embedUrl")
-                callback.invoke(
-                    newExtractorLink(
-                        name = "Direct",
-                        source = "Direct",
-                        url = embedUrl,
-                        type = if (embedUrl.contains(".m3u8"))
-                            ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                    ) {
-                        this.referer = mainUrl
-                        this.quality = Qualities.Unknown.value
-                    }
-                )
-            }
-            // Let CloudStream's native extractor registry try
-            else -> {
-                android.util.Log.e(TAG, "Route → loadExtractor: $embedUrl")
-                try {
-                    loadExtractor(embedUrl, mainUrl, subtitleCallback, callback)
-                } catch (e: Throwable) {
-                    android.util.Log.e(TAG, "loadExtractor FAILED for $embedUrl", e)
+        }
+
+        // STRICT direct-media detection
+        val lower = embedUrl.lowercase()
+        val hasEmbedMarker =
+            lower.contains("/e/") ||
+            lower.contains("/embed/") ||
+            lower.contains("/v/") ||
+            lower.contains("?v=") ||
+            lower.contains("/player") ||
+            lower.contains("/watch")
+
+        val endsWithMediaExt =
+            lower.contains(".mp4") || lower.contains(".m3u8")
+
+        if (embedUrl.startsWith("http") && endsWithMediaExt && !hasEmbedMarker) {
+            android.util.Log.e(TAG, "Route → Direct media: $embedUrl")
+            callback.invoke(
+                newExtractorLink(
+                    name = "Direct",
+                    source = "Direct",
+                    url = embedUrl,
+                    type = if (lower.contains(".m3u8"))
+                        ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                ) {
+                    this.referer = mainUrl
+                    this.quality = Qualities.Unknown.value
                 }
-            }
+            )
+            return
+        }
+
+        // Generic WebView fallback
+        android.util.Log.e(TAG, "Route → GenericEmbed: $embedUrl")
+        try {
+            GenericEmbedExtractor().getUrl(embedUrl, mainUrl, subtitleCallback, callback)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            android.util.Log.e(TAG, "GenericEmbed CANCELLED: ${e.message}")
+        } catch (e: Throwable) {
+            android.util.Log.e(TAG, "GenericEmbed FAILED", e)
         }
     }
 
-    // ------------------------------------------------------------------
-    // loadLinks — orchestrates the full extraction pipeline
-    //
-    // CRITICAL DESIGN NOTES:
-    //
-    //  * Uses `supervisorScope` so a failure in one extractor does NOT
-    //    cancel the others.
-    //
-    //  * Collects every `launch { }` Job into a list and calls
-    //    `jobs.joinAll()` before checking the emitted count. Without this,
-    //    supervisorScope returns as soon as the block body completes,
-    //    causing `loadLinks` to return false BEFORE the extractors finish.
-    //    CloudStream then reports "no links found" even when extractors
-    //    successfully emitted links (observed in the 20:08:02 log).
-    //
-    //  * Emits each link immediately as it arrives so the user can start
-    //    playing as soon as the first extractor finishes.
-    // ------------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -588,8 +579,6 @@ class Film1kProvider : MainAPI() {
         android.util.Log.e(TAG, "loadLinks: total embedUrls=${embedUrls.size}")
         embedUrls.forEachIndexed { i, u -> android.util.Log.e(TAG, "  [$i] $u") }
 
-        // Launch every extractor as an independent job and keep the Job
-        // references so we can joinAll() them.
         val jobs = embedUrls.map { videoUrl ->
             launch(Dispatchers.IO) {
                 val start = System.currentTimeMillis()
@@ -614,9 +603,6 @@ class Film1kProvider : MainAPI() {
             }
         }
 
-        // *** CRITICAL *** Block until every launched extractor has either
-        // emitted a link or failed. Without joinAll(), supervisorScope would
-        // return immediately and loadLinks would report false prematurely.
         jobs.joinAll()
 
         val subtitles = try {
