@@ -11,26 +11,16 @@ import com.lagradost.cloudstream3.utils.newExtractorLink
 /**
  * TurboVidHLS (Option 3) extractor.
  *
- * Confirmed behavior from live testing:
- *   - https://turbovidhls.com/t/<code> serves a JW Player 7 page.
- *   - The page contains a header-gated MP4 URL (e08.etvp.cc/uploads/...mp4)
- *     that returns an error when opened without a Referer header.
- *   - The actual playable stream is an HLS manifest (.m3u8) on a separate
- *     CDN (cdn4.turboviplay.com/data3/<code>/<code>.m3u8) that requires
- *     a Referer matching the player origin.
- *   - The M3U8 URL is only constructed at runtime by the JW Player.
- *
- * WebViewResolver executes the player's JavaScript, clicks play, and
- * intercepts the actual .m3u8 request. The header-gated MP4 is captured
- * as a fallback.
- *
- * IMPORTANT: Some titles only expose the MP4 as the intercepted request
- * because the WebView captures it before JW Player upgrades to HLS. We
- * therefore collect every candidate and prefer .m3u8 over .mp4.
+ * Uses CloudStream's WebViewResolver to load the embed page, execute the
+ * JW Player, and intercept the .m3u8 request. Enhanced with full analytics:
+ *  - WebView console capture via scriptCallback
+ *  - Per-stage timing
+ *  - Every intercepted URL logged
+ *  - SSL/network/JS errors surfaced
  */
 class TurboVidHLSExtractor : ExtractorApi() {
     override var mainUrl = "https://turbovidhls.com"
-    override var name = "TurboVidHLS"
+    override var name = "TurboVid"
     override val requiresReferer = true
 
     private val TAG = "Film1kDebug"
@@ -41,12 +31,13 @@ class TurboVidHLSExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        android.util.Log.e(TAG, "TurboVidHLS.getUrl: $url")
+        val start = System.currentTimeMillis()
+        android.util.Log.e(TAG, "TurboVid.getUrl → url=$url referer=$referer")
+
         try {
+            val effectiveReferer = referer ?: "$mainUrl/"
+
             val resolver = WebViewResolver(
-                // Strict media pattern. Do NOT include bare "turboviplay"
-                // or "etvp.cc" — those match the JW Player library JS file,
-                // which caused an incorrect early interception previously.
                 interceptUrl = Regex(
                     """\.m3u8(\?|$)|\.mp4(\?|$)|\.ts(\?|$)|master\.m3u8|/hls/""",
                     RegexOption.IGNORE_CASE
@@ -56,11 +47,55 @@ class TurboVidHLSExtractor : ExtractorApi() {
                             "AppleWebKit/537.36 (KHTML, like Gecko) " +
                             "Chrome/127.0.0.0 Safari/537.36",
                 useOkhttp = false,
-                // Auto-click the JW Player play button so it requests the
-                // .m3u8 stream. JW Player only fetches the manifest after
-                // playback begins.
                 script = """
                     (function(){
+                        function report(msg) {
+                            try {
+                                if (window.CloudstreamCallback && window.CloudstreamCallback.log) {
+                                    window.CloudstreamCallback.log('[TurboVid] ' + msg);
+                                }
+                            } catch(e) {}
+                        }
+                        report('script injected, url=' + window.location.href);
+                        report('readyState=' + document.readyState);
+
+                        window.addEventListener('error', function(ev){
+                            report('JS_ERROR: ' + (ev.message || ev) + ' @ ' +
+                                   (ev.filename||'?') + ':' + (ev.lineno||'?'));
+                        }, true);
+
+                        var lastUrl = window.location.href;
+                        setInterval(function(){
+                            if (window.location.href !== lastUrl) {
+                                report('REDIRECT → ' + window.location.href);
+                                lastUrl = window.location.href;
+                            }
+                        }, 500);
+
+                        var reported = {};
+                        setInterval(function(){
+                            var v = document.querySelector('video');
+                            if (v) {
+                                var key = 'v_' + (v.src || 'nosrc');
+                                if (!reported[key]) {
+                                    reported[key] = true;
+                                    report('VIDEO_FOUND src=' + (v.src || '(none)') +
+                                           ' readyState=' + v.readyState +
+                                           ' networkState=' + v.networkState);
+                                }
+                                if (v.error && !reported['verr_' + v.error.code]) {
+                                    reported['verr_' + v.error.code] = true;
+                                    report('VIDEO_ERROR code=' + v.error.code +
+                                           ' msg=' + (v.error.message || '?'));
+                                }
+                            }
+                            var iframe = document.querySelector('iframe');
+                            if (iframe && iframe.src && !reported['if_' + iframe.src]) {
+                                reported['if_' + iframe.src] = true;
+                                report('IFRAME src=' + iframe.src);
+                            }
+                        }, 1000);
+
                         var tries = 0;
                         var iv = setInterval(function(){
                             tries++;
@@ -70,60 +105,83 @@ class TurboVidHLSExtractor : ExtractorApi() {
                                     '.jw-display-icon-display, ' +
                                     '.jw-icon-display'
                                 );
-                                if (display) display.click();
+                                if (display) {
+                                    display.click();
+                                    if (!reported['click_' + tries]) {
+                                        reported['click_' + tries] = true;
+                                        report('CLICK display try ' + tries);
+                                    }
+                                }
                                 var v = document.querySelector('video');
                                 if (v) {
                                     v.muted = true;
                                     var p = v.play();
-                                    if (p && p.catch) p.catch(function(){});
+                                    if (p && p.catch) {
+                                        p.catch(function(e){
+                                            report('PLAY_REJECT try ' + tries + ': ' + (e.message || e));
+                                        });
+                                    }
                                 }
-                            } catch(e) {}
-                            if (tries > 30) clearInterval(iv);
+                            } catch(e) {
+                                report('PLAY_ERR try ' + tries + ': ' + (e.message || e));
+                            }
+                            if (tries > 30) {
+                                clearInterval(iv);
+                                report('STOPPED clicking after 30 tries');
+                            }
                         }, 1000);
                     })();
                 """.trimIndent(),
-                scriptCallback = null,
-                // TurboVidHLS usually resolves in ~18s (JW Player init +
-                // play click + HLS request). 60s gives enough margin for
-                // slower devices.
+                scriptCallback = { msg ->
+                    android.util.Log.e(TAG, "TurboVid.WebView → $msg")
+                },
                 timeout = 60_000L
             )
 
+            android.util.Log.e(TAG, "TurboVid resolver built, calling resolveUsingWebView...")
+            val resolveStart = System.currentTimeMillis()
             val (interceptedRequest, extraRequests) = resolver.resolveUsingWebView(
                 url = url,
-                referer = referer ?: "$mainUrl/"
+                referer = effectiveReferer
+            )
+            android.util.Log.e(
+                TAG,
+                "TurboVid resolveUsingWebView returned in ${System.currentTimeMillis() - resolveStart}ms"
             )
 
             android.util.Log.e(
                 TAG,
-                "TurboVidHLS intercepted=${interceptedRequest?.url} extras=${extraRequests.size}"
+                "TurboVid intercepted=${interceptedRequest?.url} extras=${extraRequests.size}"
             )
             extraRequests.forEachIndexed { i, r ->
-                android.util.Log.e(TAG, "TurboVidHLS extra[$i]=${r.url}")
+                android.util.Log.e(TAG, "TurboVid extra[$i]=${r.url}")
             }
 
-            // Build the full candidate list — the intercepted request first,
-            // then any additional matches.
             val candidates = buildList {
                 interceptedRequest?.url?.toString()?.let { add(it) }
                 extraRequests.forEach { add(it.url.toString()) }
             }.distinct()
 
-            android.util.Log.e(TAG, "TurboVidHLS candidates: $candidates")
+            android.util.Log.e(TAG, "TurboVid candidates (${candidates.size}): $candidates")
 
-            // STRICT PREFERENCE: M3U8 > MP4.
-            // The header-gated MP4 on etvp.cc returns an error without the
-            // correct Referer and is not directly playable. Always prefer
-            // the HLS manifest when available.
             val streamUrl = candidates.firstOrNull { it.contains(".m3u8", ignoreCase = true) }
                 ?: candidates.firstOrNull { it.contains(".mp4", ignoreCase = true) }
                 ?: run {
-                    android.util.Log.e(TAG, "TurboVidHLS: NO stream URL")
+                    android.util.Log.e(
+                        TAG,
+                        "TurboVid NO STREAM — resolve complete but no candidate matched. " +
+                        "This usually means the player never requested the manifest " +
+                        "(play button never fired, or SSL block)."
+                    )
                     return
                 }
 
             val isM3u8 = streamUrl.contains(".m3u8", ignoreCase = true)
-            android.util.Log.e(TAG, "TurboVidHLS EMITTING: $streamUrl")
+            android.util.Log.e(
+                TAG,
+                "TurboVid EMITTING [${if (isM3u8) "M3U8" else "MP4"}] $streamUrl " +
+                "(total ${System.currentTimeMillis() - start}ms)"
+            )
 
             callback.invoke(
                 newExtractorLink(
@@ -132,17 +190,21 @@ class TurboVidHLSExtractor : ExtractorApi() {
                     url = streamUrl,
                     type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                 ) {
-                    // The CDN requires a Referer matching the player origin.
-                    // Different subdomains (turboviplay.com, sacdnssedge.com,
-                    // etvp.cc) accept the root player referer.
                     this.referer = "$mainUrl/"
                     this.quality = Qualities.Unknown.value
                 }
             )
         } catch (e: kotlinx.coroutines.CancellationException) {
-            android.util.Log.e(TAG, "TurboVidHLS CANCELLED (timeout): ${e.message}")
+            android.util.Log.e(
+                TAG,
+                "TurboVid CANCELLED after ${System.currentTimeMillis() - start}ms: ${e.message}"
+            )
         } catch (e: Throwable) {
-            android.util.Log.e(TAG, "TurboVidHLS FAILED", e)
+            android.util.Log.e(
+                TAG,
+                "TurboVid FAILED after ${System.currentTimeMillis() - start}ms",
+                e
+            )
         }
     }
 }
