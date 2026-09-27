@@ -7,28 +7,24 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import java.net.URI
 
-/**
- * HgCloud (Option 4) extractor.
- *
- * Chains: hgcloud.to (JS redirector) → vibuxer.com (JW Player 8) → m3u8.
- *
- * Uses WebViewResolver + auto-click script. Enhanced analytics capture
- * every stage: redirect, player init, play click, video element state,
- * SSL errors, and the final intercepted request.
- *
- * Confirmed from prior logs:
- *  - Chromium inside the WebView reports `SSL error -202`
- *    (ERR_CERT_AUTHORITY_INVALID) for some CDN endpoints. This is a
- *    device WebView CA-bundle limitation, not a code issue.
- *  - The 30s timeout fails fast so it doesn't block the user.
- */
 class HgCloudExtractor : ExtractorApi() {
     override var mainUrl = "https://hgcloud.to"
     override var name = "HgCloud"
     override val requiresReferer = true
 
     private val TAG = "Film1kDebug"
+
+    private fun originOf(url: String): String? {
+        return try {
+            val u = URI(url)
+            val port = if (u.port > 0) ":${u.port}" else ""
+            "${u.scheme}://${u.host}$port/"
+        } catch (_: Throwable) {
+            null
+        }
+    }
 
     override suspend fun getUrl(
         url: String,
@@ -52,15 +48,31 @@ class HgCloudExtractor : ExtractorApi() {
                 useOkhttp = false,
                 script = """
                     (function(){
-                        function report(msg) {
+                        function cb(msg) {
                             try {
-                                if (window.CloudstreamCallback && window.CloudstreamCallback.log) {
-                                    window.CloudstreamCallback.log('[HgCloud] ' + msg);
+                                if (typeof window.CloudstreamCallback === 'function') {
+                                    window.CloudstreamCallback(msg);
+                                    return;
+                                }
+                                if (window.CloudstreamCallback) {
+                                    if (typeof window.CloudstreamCallback.postMessage === 'function') {
+                                        window.CloudstreamCallback.postMessage(msg); return;
+                                    }
+                                    if (typeof window.CloudstreamCallback.log === 'function') {
+                                        window.CloudstreamCallback.log(msg); return;
+                                    }
+                                    if (typeof window.CloudstreamCallback.done === 'function') {
+                                        window.CloudstreamCallback.done(msg); return;
+                                    }
                                 }
                             } catch(e) {}
                         }
-                        report('script injected, url=' + window.location.href);
-                        report('readyState=' + document.readyState + ' title=' + document.title);
+
+                        function report(msg) { cb('[HgCloud] ' + msg); }
+
+                        report('script injected, url=' + window.location.href +
+                               ' readyState=' + document.readyState +
+                               ' title=' + document.title);
 
                         window.addEventListener('error', function(ev){
                             report('JS_ERROR: ' + (ev.message || ev) + ' @ ' +
@@ -108,7 +120,8 @@ class HgCloudExtractor : ExtractorApi() {
                             var playerEl = document.querySelector('.jwplayer, #vplayer');
                             if (playerEl && !reported['player_el']) {
                                 reported['player_el'] = true;
-                                report('PLAYER_ELEMENT found: ' + playerEl.id + ' / ' + playerEl.className);
+                                report('PLAYER_ELEMENT found: ' + playerEl.id +
+                                       ' / ' + playerEl.className);
                             }
                         }, 1000);
 
@@ -121,22 +134,14 @@ class HgCloudExtractor : ExtractorApi() {
                                     '.jw-display-icon-display, ' +
                                     '.jw-icon-display'
                                 );
-                                if (display) {
-                                    display.click();
-                                    if (!reported['click_' + tries]) {
-                                        reported['click_' + tries] = true;
-                                        report('CLICK display try ' + tries);
-                                    }
-                                }
+                                if (display) display.click();
                                 var v = document.querySelector('video');
                                 if (v) {
                                     v.muted = true;
                                     var p = v.play();
-                                    if (p && p.catch) {
-                                        p.catch(function(e){
-                                            report('PLAY_REJECT try ' + tries + ': ' + (e.message || e));
-                                        });
-                                    }
+                                    if (p && p.catch) p.catch(function(e){
+                                        report('PLAY_REJECT try ' + tries + ': ' + (e.message || e));
+                                    });
                                 }
                             } catch(e) {
                                 report('PLAY_ERR try ' + tries + ': ' + (e.message || e));
@@ -183,19 +188,17 @@ class HgCloudExtractor : ExtractorApi() {
             val streamUrl = candidates.firstOrNull { it.contains(".m3u8", ignoreCase = true) }
                 ?: candidates.firstOrNull { it.contains(".mp4", ignoreCase = true) }
                 ?: run {
-                    android.util.Log.e(
-                        TAG,
-                        "HgCloud NO STREAM — resolve complete but no candidate. " +
-                        "Check WebView log above for redirect/video/SSL status."
-                    )
+                    android.util.Log.e(TAG, "HgCloud NO STREAM")
                     return
                 }
 
             val isM3u8 = streamUrl.contains(".m3u8", ignoreCase = true)
+            // Use the CDN's own origin as Referer (hotlink protection bypass)
+            val streamOrigin = originOf(streamUrl) ?: "https://vibuxer.com/"
             android.util.Log.e(
                 TAG,
                 "HgCloud EMITTING [${if (isM3u8) "M3U8" else "MP4"}] $streamUrl " +
-                "(total ${System.currentTimeMillis() - start}ms)"
+                "referer=$streamOrigin (total ${System.currentTimeMillis() - start}ms)"
             )
 
             callback.invoke(
@@ -205,7 +208,7 @@ class HgCloudExtractor : ExtractorApi() {
                     url = streamUrl,
                     type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                 ) {
-                    this.referer = "https://vibuxer.com/"
+                    this.referer = streamOrigin
                     this.quality = Qualities.Unknown.value
                 }
             )
