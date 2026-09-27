@@ -10,26 +10,12 @@ import com.lagradost.cloudstream3.utils.newExtractorLink
 import org.json.JSONObject
 import java.net.URI
 
-// ---------------------------------------------------------------------
-// FILM1K EMBED EXTRACTOR — fully validated, no-browser flow.
-//
-// Reverse-engineered and confirmed against the real server:
-//  - PoW hash: exact match on a real accepted nonce/solution pair.
-//  - AES-256-GCM key derivation + decrypt: exact match, decrypts a real
-//    /playback response to the real working .m3u8 URL.
-//  - /attest fingerprint payload: tested end-to-end with plain HTTP
-//    (Python) requests.Session() — accepted with confidence 0.88, no
-//    Cloudflare blocking encountered.
-//
-// Flow: details -> settings -> challenge -> [ECDSA keypair + sign] ->
-//       attest -> [captcha -> solve PoW -> captcha/verify, if required]
-//       -> playback -> AES-256-GCM decrypt -> real source URLs.
-// ---------------------------------------------------------------------
-
 class Film1kExtractor : ExtractorApi() {
     override var mainUrl = "https://film1k.xyz"
-    override var name = "Film1k" // Updated from "Film1k Embed"
+    override var name = "Film1k"
     override val requiresReferer = false
+
+    private val TAG = "Film1kDebug"
 
     override suspend fun getUrl(
         url: String,
@@ -38,12 +24,13 @@ class Film1kExtractor : ExtractorApi() {
         callback: (ExtractorLink) -> Unit
     ) {
         try {
-            // Accepts URLs like https://film1k.xyz/e/<code> or .../e/<code>.mp4
-            val code = Regex("""/e/([a-zA-Z0-9]+)""").find(url)?.groupValues?.get(1) ?: return
+            android.util.Log.d(TAG, "Film1k getUrl: $url")
+            val code = Regex("""/e/([a-zA-Z0-9]+)""").find(url)?.groupValues?.get(1) ?: run {
+                android.util.Log.w(TAG, "Film1k: no code in URL")
+                return
+            }
             val embedParent = "https://film1k.xyz/e/$code"
 
-            // 1. details -> tells us the actual player host (embed_frame_url),
-            //    which rotates its path but keeps the same host per session.
             val detailsResp = app.get(
                 "https://film1k.xyz/api/videos/$code/embed/details",
                 referer = embedParent,
@@ -53,16 +40,23 @@ class Film1kExtractor : ExtractorApi() {
             val embedFrameUrl = details.getString("embed_frame_url")
             val uri = URI(embedFrameUrl)
             val apiBase = "${uri.scheme}://${uri.host}"
+            android.util.Log.d(TAG, "Film1k: apiBase=$apiBase")
 
-            // 2. Run the full attest -> captcha/PoW -> playback -> decrypt chain.
-            val decrypted = Film1kResolver.resolvePlayback(apiBase, embedParent, code) ?: return
-            val sources = decrypted.optJSONArray("sources") ?: return
+            val decrypted = Film1kResolver.resolvePlayback(apiBase, embedParent, code) ?: run {
+                android.util.Log.w(TAG, "Film1k: resolvePlayback returned null")
+                return
+            }
+            val sources = decrypted.optJSONArray("sources") ?: run {
+                android.util.Log.w(TAG, "Film1k: no sources in decrypted payload")
+                return
+            }
 
             for (i in 0 until sources.length()) {
                 val src = sources.getJSONObject(i)
                 val streamUrl = src.optString("url").takeIf { it.isNotBlank() } ?: continue
                 val mimeType = src.optString("mime_type")
                 val isM3u8 = streamUrl.contains(".m3u8") || mimeType.contains("mpegurl")
+                android.util.Log.d(TAG, "Film1k: emitting $streamUrl (m3u8=$isM3u8)")
 
                 callback.invoke(
                     newExtractorLink(
@@ -72,12 +66,11 @@ class Film1kExtractor : ExtractorApi() {
                         type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                     ) {
                         this.referer = apiBase
-                        this.quality = Qualities.Unknown.value // Strip all resolution numbers
+                        this.quality = Qualities.Unknown.value
                     }
                 )
             }
 
-            // Subtitles, if any were included in the decrypted payload.
             val tracks = decrypted.optJSONArray("tracks")
             if (tracks != null) {
                 for (i in 0 until tracks.length()) {
@@ -88,7 +81,7 @@ class Film1kExtractor : ExtractorApi() {
                 }
             }
         } catch (e: Exception) {
-            // Fail silently to prevent app crashes; nothing gets added to callback.
+            android.util.Log.e(TAG, "Film1k extractor failed", e)
         }
     }
 }
