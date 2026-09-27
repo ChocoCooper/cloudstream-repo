@@ -1,7 +1,7 @@
 package com.Film1k
 
 import com.lagradost.cloudstream3.SubtitleFile
-import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.network.WebViewResolver
 import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
@@ -9,29 +9,28 @@ import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
 
 /**
- * TurboVidHLS (Option 3) extractor.
+ * TurboVidHLS (Option 3) extractor — CORRECTED.
  *
- * Confirmed from live testing against https://turbovidhls.com/t/<code>:
- *  - The page uses JW Player 7 (cdn4.turboviplay.com/jwplayer/js/jwplayer1.js)
- *  - The direct MP4 URL is present in the raw HTML:
- *      https://e08.etvp.cc/uploads/<code>.mp4
- *  - No API call, no encryption, no JS execution required.
+ * Previous approach (regex for direct MP4) was WRONG:
+ *  - The MP4 URL (e08.etvp.cc/uploads/<code>.mp4) returns an error when opened
+ *    without a Referer header. It is not a directly playable stream.
  *
- * Extraction is a single regex for .mp4 / .m3u8 URLs.
+ * Confirmed behavior from live evidence:
+ *  - TurboVid hosts serve HLS manifests on external CDNs such as:
+ *      https://b-hls-20.sacdnssedge.com/hls/<id>/<id>_480p.m3u8
+ *      https://cdn3.turboviplay.com/data1/<hash>/<hash>480.m3u8
+ *  - These M3U8 URLs require a Referer header matching the player origin
+ *    (e.g., https://cdn3.turboviplay.com).
+ *  - The OCE project classifies EmTurbovid (same host family) as
+ *    "API extraction", confirming the stream URL is resolved at runtime.
+ *
+ * WebViewResolver executes the player's JavaScript and intercepts the
+ * actual M3U8 request, which is the only reliable method.
  */
 class TurboVidHLSExtractor : ExtractorApi() {
     override var mainUrl = "https://turbovidhls.com"
     override var name = "TurboVidHLS"
     override val requiresReferer = true
-
-    private val mp4Regex = Regex(
-        """https?://[^\s"'<>]+\.mp4[^\s"'<>]*""",
-        RegexOption.IGNORE_CASE
-    )
-    private val m3u8Regex = Regex(
-        """https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""",
-        RegexOption.IGNORE_CASE
-    )
 
     override suspend fun getUrl(
         url: String,
@@ -40,30 +39,34 @@ class TurboVidHLSExtractor : ExtractorApi() {
         callback: (ExtractorLink) -> Unit
     ) {
         try {
-            val html = app.get(
-                url,
-                referer = referer ?: mainUrl,
-                verify = false
-            ).text
+            WebViewResolver(
+                // Match the HLS manifest and any MP4 fallback.
+                // The M3U8 is the real stream; MP4 is header-gated.
+                interceptUrl = Regex(
+                    """\.m3u8|\.mp4|master\.m3u8|/hls/|sacdnssedge|turboviplay""",
+                    RegexOption.IGNORE_CASE
+                ),
+                additionalUrls = emptyList(),
+                useOkHttp = false
+            ).resolveUsingWebView(url) { link ->
+                val streamUrl = link.url
+                val isM3u8 = streamUrl.contains(".m3u8", ignoreCase = true)
 
-            // Prefer direct MP4 (this is what the site actually serves)
-            val mp4 = mp4Regex.find(html)?.value
-            val m3u8 = m3u8Regex.find(html)?.value
-            val streamUrl = mp4 ?: m3u8 ?: return
-
-            val isM3u8 = streamUrl.contains(".m3u8")
-
-            callback.invoke(
-                newExtractorLink(
-                    source = name,
-                    name = name,
-                    url = streamUrl,
-                    type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                ) {
-                    this.referer = "$mainUrl/"
-                    this.quality = Qualities.Unknown.value
-                }
-            )
+                callback.invoke(
+                    newExtractorLink(
+                        source = name,
+                        name = name,
+                        url = streamUrl,
+                        type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                    ) {
+                        // The M3U8 CDNs require a Referer header. Use the
+                        // player origin as the referer, which matches what
+                        // a real browser sends when JW Player requests the stream.
+                        this.referer = "$mainUrl/"
+                        this.quality = Qualities.Unknown.value
+                    }
+                )
+            }
         } catch (e: Exception) {
             // Fail silently
         }
