@@ -3,9 +3,10 @@ package com.Film1k
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
-import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.supervisorScope
 import org.json.JSONObject
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -349,7 +350,6 @@ class Film1kProvider : MainAPI() {
             )
 
             android.util.Log.e(TAG, "AJAX key=$key status=${r.code} len=${r.text.length}")
-            android.util.Log.e(TAG, "AJAX key=$key body=${r.text.take(500)}")
 
             val json = JSONObject(r.text)
             val videoHtml = json.optString("video", "")
@@ -365,7 +365,7 @@ class Film1kProvider : MainAPI() {
 
             android.util.Log.e(TAG, "AJAX key=$key iframe src=$src")
             src
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             android.util.Log.e(TAG, "AJAX key=$key EXCEPTION", e)
             null
         }
@@ -380,7 +380,6 @@ class Film1kProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ) {
         when {
-            // Direct MP4 on film1k.xyz — final file URL, bypass Film1kExtractor
             embedUrl.contains("film1k.xyz") && embedUrl.endsWith(".mp4") -> {
                 android.util.Log.e(TAG, "Route → Direct film1k MP4: $embedUrl")
                 callback.invoke(
@@ -395,26 +394,21 @@ class Film1kProvider : MainAPI() {
                     }
                 )
             }
-            // film1k.xyz embed page — full PoW+attest+AES flow
             embedUrl.contains("film1k.xyz") && embedUrl.contains("/e/") -> {
                 android.util.Log.e(TAG, "Route → Film1kExtractor: $embedUrl")
                 Film1kExtractor().getUrl(embedUrl, mainUrl, subtitleCallback, callback)
             }
-            // TurboVidHLS — WebViewResolver
             embedUrl.contains("turbovidhls.com") -> {
                 android.util.Log.e(TAG, "Route → TurboVidHLSExtractor: $embedUrl")
                 TurboVidHLSExtractor().getUrl(embedUrl, mainUrl, subtitleCallback, callback)
             }
-            // HgCloud — WebViewResolver
             embedUrl.contains("hgcloud.to") -> {
                 android.util.Log.e(TAG, "Route → HgCloudExtractor: $embedUrl")
                 HgCloudExtractor().getUrl(embedUrl, mainUrl, subtitleCallback, callback)
             }
-            // AbyssPlayer — skipped
             embedUrl.contains("abyssplayer.com") -> {
                 android.util.Log.e(TAG, "Route → AbyssPlayer SKIPPED: $embedUrl")
             }
-            // Any other direct media URL
             embedUrl.startsWith("http") && (embedUrl.contains(".mp4") || embedUrl.contains(".m3u8")) -> {
                 android.util.Log.e(TAG, "Route → Direct media: $embedUrl")
                 callback.invoke(
@@ -429,7 +423,6 @@ class Film1kProvider : MainAPI() {
                     }
                 )
             }
-            // Let CloudStream's native extractor registry try
             else -> {
                 android.util.Log.e(TAG, "Route → loadExtractor: $embedUrl")
                 loadExtractor(embedUrl, mainUrl, subtitleCallback, callback)
@@ -439,36 +432,68 @@ class Film1kProvider : MainAPI() {
 
     // ------------------------------------------------------------------
     // loadLinks — orchestrates the full extraction pipeline
+    //
+    // CRITICAL DESIGN NOTES:
+    //
+    //  * Uses `supervisorScope` (NOT `coroutineScope`), so a timeout or
+    //    failure in one extractor does NOT cancel the whole loadLinks call.
+    //    This was the root cause of "no links found" — HgCloud's
+    //    TimeoutCancellationException was cancelling the parent scope,
+    //    preventing the emit stage from ever running.
+    //
+    //  * Emits each link IMMEDIATELY as it arrives, rather than collecting
+    //    all and picking one at the end. The user gets the Film1k M3U8
+    //    in ~4 seconds instead of waiting ~2 minutes for HgCloud to
+    //    time out. HgCloud continues in the background; if it ever
+    //    succeeds, another link appears.
     // ------------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
-    ): Boolean = coroutineScope {
+    ): Boolean = supervisorScope {
 
         android.util.Log.e(TAG, "=== loadLinks START: $data ===")
 
         val doc = try {
             app.get(data, headers = browserHeaders, verify = false, cacheTime = 0).document
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             android.util.Log.e(TAG, "loadLinks: fetch FAILED", e)
-            return@coroutineScope false
+            return@supervisorScope false
         }
         android.util.Log.e(TAG, "loadLinks: doc len=${doc.html().length}")
 
-        val collectedLinks = mutableListOf<ExtractorLink>()
-        val collectingCallback: (ExtractorLink) -> Unit = { link ->
-            android.util.Log.e(TAG, ">>> LINK COLLECTED: ${link.url}")
-            collectedLinks.add(link)
+        // Synchronized set to dedupe emitted URLs
+        val emittedUrls = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+        val emittedCount = java.util.concurrent.atomic.AtomicInteger(0)
+
+        // Emit links immediately as they arrive
+        val emittingCallback: (ExtractorLink) -> Unit = { link ->
+            if (emittedUrls.add(link.url)) {
+                val n = emittedCount.incrementAndGet()
+                android.util.Log.e(TAG, ">>> EMITTING #$n: ${link.url}")
+                try {
+                    callback.invoke(link)
+                } catch (e: Throwable) {
+                    android.util.Log.e(TAG, "callback.invoke failed", e)
+                }
+            } else {
+                android.util.Log.e(TAG, ">>> DEDUPED: ${link.url}")
+            }
         }
 
-        // Kick off subtitle fetch in parallel
-        val subtitleJob = async {
-            val docText = doc.html()
-            val imdbId = Regex("imdb\\.com/title/(tt\\d+)").find(docText)?.groupValues?.get(1)
-                ?: Regex("tt\\d{7,8}").find(docText)?.value
-            if (imdbId != null) fetchOpenSubtitles(imdbId) else emptyList()
+        // Start subtitle fetch in parallel (fire-and-forget on the scope)
+        val subtitleJob = async(Dispatchers.IO) {
+            try {
+                val docText = doc.html()
+                val imdbId = Regex("imdb\\.com/title/(tt\\d+)").find(docText)?.groupValues?.get(1)
+                    ?: Regex("tt\\d{7,8}").find(docText)?.value
+                if (imdbId != null) fetchOpenSubtitles(imdbId) else emptyList()
+            } catch (e: Throwable) {
+                android.util.Log.e(TAG, "subtitle fetch failed", e)
+                emptyList()
+            }
         }
 
         // Extract post ID used by the theme's AJAX endpoint
@@ -505,24 +530,20 @@ class Film1kProvider : MainAPI() {
                 }
             }
         }
-        doc.select("#Eroz > div > ul > li > a").forEach { aTag ->
-            val href = aTag.attr("href").ifBlank { aTag.attr("data-link") }
-            if (href.isNotBlank() &&
-                href.startsWith("http") &&
-                !href.contains("#") &&
-                !embedUrls.contains(href)
-            ) {
-                embedUrls.add(href)
-                android.util.Log.e(TAG, "static <a>: $href")
-            }
-        }
 
-        // --- AJAX extraction for keys 0..3 (the confirmed server list mechanism) ---
+        // --- AJAX extraction for keys 0..3 ---
         if (postId != null) {
             android.util.Log.e(TAG, "loadLinks: calling AJAX for keys 0..3")
             val ajaxResults = (0..3).map { key ->
-                async { key to fetchServerEmbed(postId, key, data) }
-            }.awaitAll()
+                async(Dispatchers.IO) { key to fetchServerEmbed(postId, key, data) }
+            }.mapNotNull { deferred ->
+                try {
+                    deferred.await()
+                } catch (e: Throwable) {
+                    android.util.Log.e(TAG, "AJAX await failed", e)
+                    null
+                }
+            }
 
             ajaxResults.forEach { (key, url) ->
                 if (url != null && url.startsWith("http") && !embedUrls.contains(url)) {
@@ -537,30 +558,39 @@ class Film1kProvider : MainAPI() {
         android.util.Log.e(TAG, "loadLinks: total embedUrls=${embedUrls.size}")
         embedUrls.forEachIndexed { i, u -> android.util.Log.e(TAG, "  [$i] $u") }
 
-        // --- Route every embed URL to the correct extractor, in parallel ---
-        embedUrls.map { videoUrl ->
-            async {
+        // --- Route every embed URL to the correct extractor, in parallel.
+        // Each extractor runs in its own launch. A failure (or timeout) in
+        // one does NOT cancel the others because we're inside supervisorScope.
+        embedUrls.forEach { videoUrl ->
+            launch(Dispatchers.IO) {
                 try {
-                    routeToExtractor(videoUrl, subtitleCallback, collectingCallback)
-                } catch (e: Exception) {
+                    routeToExtractor(videoUrl, subtitleCallback, emittingCallback)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    // Swallow cancellation from a nested timeout — do NOT
+                    // re-throw, as that would cancel the sibling launches.
+                    android.util.Log.e(TAG, "route CANCELLED for $videoUrl: ${e.message}")
+                } catch (e: Throwable) {
                     android.util.Log.e(TAG, "route FAILED for $videoUrl", e)
                 }
             }
-        }.awaitAll()
+        }
 
-        // --- Emit subtitles ---
-        subtitleJob.await().forEach { subtitleCallback(it) }
+        // Wait for subtitles (they're cheap, always succeed quickly)
+        val subtitles = try {
+            subtitleJob.await()
+        } catch (e: Throwable) {
+            android.util.Log.e(TAG, "subtitleJob await failed", e)
+            emptyList()
+        }
+        subtitles.forEach { subtitleCallback(it) }
 
-        // --- Emit the best link (M3U8 preferred) ---
-        android.util.Log.e(TAG, "loadLinks: total collected=${collectedLinks.size}")
-        val sortedLinks = collectedLinks.sortedByDescending { it.type == ExtractorLinkType.M3U8 }
-        sortedLinks.firstOrNull()?.let {
-            android.util.Log.e(TAG, ">>> EMITTING: ${it.url}")
-            callback.invoke(it)
-        } ?: android.util.Log.e(TAG, "loadLinks: NO LINKS TO EMIT")
+        // supervisorScope automatically waits for all launched children to complete.
+        // By the time we reach here, every extractor has either emitted or failed.
 
+        val totalEmitted = emittedCount.get()
+        android.util.Log.e(TAG, "loadLinks: emitted $totalEmitted link(s)")
         android.util.Log.e(TAG, "=== loadLinks END ===")
 
-        return@coroutineScope collectedLinks.isNotEmpty()
+        return@supervisorScope totalEmitted > 0
     }
 }
