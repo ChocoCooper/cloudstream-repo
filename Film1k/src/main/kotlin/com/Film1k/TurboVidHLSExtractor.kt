@@ -7,7 +7,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import java.net.URI
 
 class TurboVidHLSExtractor : ExtractorApi() {
     override var mainUrl = "https://turbovidhls.com"
@@ -15,17 +14,6 @@ class TurboVidHLSExtractor : ExtractorApi() {
     override val requiresReferer = true
 
     private val TAG = "Film1kDebug"
-
-    /** Return scheme://host[:port]/ of the given URL, or null. */
-    private fun originOf(url: String): String? {
-        return try {
-            val u = URI(url)
-            val port = if (u.port > 0) ":${u.port}" else ""
-            "${u.scheme}://${u.host}$port/"
-        } catch (_: Throwable) {
-            null
-        }
-    }
 
     override suspend fun getUrl(
         url: String,
@@ -51,29 +39,14 @@ class TurboVidHLSExtractor : ExtractorApi() {
                 useOkhttp = false,
                 script = """
                     (function(){
-                        // Robust callback: try every known CloudStream bridge shape
-                        function cb(msg) {
+                        function report(msg) {
                             try {
-                                if (typeof window.CloudstreamCallback === 'function') {
-                                    window.CloudstreamCallback(msg);
-                                    return;
-                                }
-                                if (window.CloudstreamCallback) {
-                                    if (typeof window.CloudstreamCallback.postMessage === 'function') {
-                                        window.CloudstreamCallback.postMessage(msg); return;
-                                    }
-                                    if (typeof window.CloudstreamCallback.log === 'function') {
-                                        window.CloudstreamCallback.log(msg); return;
-                                    }
-                                    if (typeof window.CloudstreamCallback.done === 'function') {
-                                        window.CloudstreamCallback.done(msg); return;
-                                    }
+                                if (window.CloudstreamCallback &&
+                                    typeof window.CloudstreamCallback.postMessage === 'function') {
+                                    window.CloudstreamCallback.postMessage('[TurboVid] ' + msg);
                                 }
                             } catch(e) {}
                         }
-
-                        function report(msg) { cb('[TurboVid] ' + msg); }
-
                         report('script injected, url=' + window.location.href +
                                ' readyState=' + document.readyState);
 
@@ -159,14 +132,6 @@ class TurboVidHLSExtractor : ExtractorApi() {
                 "TurboVid resolveUsingWebView returned in ${System.currentTimeMillis() - resolveStart}ms"
             )
 
-            android.util.Log.e(
-                TAG,
-                "TurboVid intercepted=${interceptedRequest?.url} extras=${extraRequests.size}"
-            )
-            extraRequests.forEachIndexed { i, r ->
-                android.util.Log.e(TAG, "TurboVid extra[$i]=${r.url}")
-            }
-
             val candidates = buildList {
                 interceptedRequest?.url?.toString()?.let { add(it) }
                 extraRequests.forEach { add(it.url.toString()) }
@@ -182,13 +147,10 @@ class TurboVidHLSExtractor : ExtractorApi() {
                 }
 
             val isM3u8 = streamUrl.contains(".m3u8", ignoreCase = true)
-
-            // CDN requires a Referer matching its own origin (hotlink protection).
-            val streamOrigin = originOf(streamUrl) ?: "$mainUrl/"
             android.util.Log.e(
                 TAG,
                 "TurboVid EMITTING [${if (isM3u8) "M3U8" else "MP4"}] $streamUrl " +
-                "referer=$streamOrigin (total ${System.currentTimeMillis() - start}ms)"
+                "referer=$effectiveReferer (total ${System.currentTimeMillis() - start}ms)"
             )
 
             callback.invoke(
@@ -198,7 +160,9 @@ class TurboVidHLSExtractor : ExtractorApi() {
                     url = streamUrl,
                     type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                 ) {
-                    this.referer = streamOrigin
+                    // Browser behavior: player page fetches CDN with the
+                    // PLAYER's origin as Referer, not the CDN's own origin.
+                    this.referer = effectiveReferer
                     this.quality = Qualities.Unknown.value
                 }
             )
