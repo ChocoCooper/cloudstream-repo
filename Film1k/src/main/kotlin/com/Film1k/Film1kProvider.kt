@@ -11,9 +11,7 @@ import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.jsoup.nodes.TextNode
 
-// --- Cinemeta Data Classes ---
 data class CinemetaResponse(val meta: CinemetaMeta? = null)
-
 data class CinemetaMeta(
     val name: String? = null,
     val genres: List<String>? = null,
@@ -30,18 +28,15 @@ data class CinemetaMeta(
     val language: String? = null
 )
 
-// --- WP-JSON Data Classes ---
 data class WpPost(
     val link: String? = null,
     val title: WpRendered? = null,
     val content: WpRendered? = null,
     val meta: WpMeta? = null
 )
-
 data class WpRendered(val rendered: String? = null)
 data class WpMeta(val fifu_image_url: String? = null)
 
-// --- Subtitle Data Classes ---
 data class StremioSubtitle(
     val id: String? = null,
     val url: String? = null,
@@ -49,7 +44,6 @@ data class StremioSubtitle(
     val score: Double? = null,
     val downloads: Int? = null
 )
-
 data class StremioSubtitlesResponse(val subtitles: List<StremioSubtitle>? = null)
 
 class Film1kProvider : MainAPI() {
@@ -66,6 +60,15 @@ class Film1kProvider : MainAPI() {
     private val openSubtitlesMaxResults = 10
     private val isHorizontalImages = false
     private val ajaxUrl = "$mainUrl/wp-admin/admin-ajax.php"
+
+    // Browser-like headers used for every request to film1k.
+    private val browserHeaders = mapOf(
+        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
+        "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language" to "en-US,en;q=0.9",
+        "Cache-Control" to "no-cache",
+        "Pragma" to "no-cache"
+    )
 
     override val mainPage = mainPageOf(
         "$mainUrl/wp-json/wp/v2/posts?tags=11&per_page=8" to "USA Movies",
@@ -115,12 +118,20 @@ class Film1kProvider : MainAPI() {
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = "${request.data}&page=$page"
+        android.util.Log.e(TAG, "getMainPage URL: $url")
         val responseText = try {
-            app.get(url, verify = false).text
+            val r = app.get(url, headers = browserHeaders, verify = false)
+            android.util.Log.e(TAG, "getMainPage status=${r.code} len=${r.text.length} preview=${r.text.take(200)}")
+            r.text
         } catch (e: Exception) {
+            android.util.Log.e(TAG, "getMainPage FAILED", e)
             return newHomePageResponse(emptyList())
         }
-        val wpPosts = tryParseJson<List<WpPost>>(responseText) ?: emptyList()
+        val wpPosts = tryParseJson<List<WpPost>>(responseText) ?: run {
+            android.util.Log.e(TAG, "getMainPage: JSON parse returned null")
+            return newHomePageResponse(emptyList())
+        }
+        android.util.Log.e(TAG, "getMainPage: parsed ${wpPosts.size} posts")
         val items = parseWpPosts(wpPosts)
         return newHomePageResponse(
             list = HomePageList(name = request.name, list = items, isHorizontalImages = isHorizontalImages),
@@ -130,9 +141,11 @@ class Film1kProvider : MainAPI() {
 
     override suspend fun search(query: String): List<SearchResponse> {
         val apiUrl = "$mainUrl/wp-json/wp/v2/posts?search=$query&per_page=15&orderby=relevance"
+        android.util.Log.e(TAG, "search URL: $apiUrl")
         val responseText = try {
-            app.get(apiUrl, verify = false).text
+            app.get(apiUrl, headers = browserHeaders, verify = false).text
         } catch (e: Exception) {
+            android.util.Log.e(TAG, "search FAILED", e)
             return emptyList()
         }
         val wpPosts = tryParseJson<List<WpPost>>(responseText) ?: return emptyList()
@@ -199,7 +212,7 @@ class Film1kProvider : MainAPI() {
     }
 
     override suspend fun load(url: String): LoadResponse {
-        val doc = app.get(url, verify = false, cacheTime = 1440).document
+        val doc = app.get(url, headers = browserHeaders, verify = false, cacheTime = 1440).document
         val manualPosterUrl = extractDetailPoster(doc)?.let { fixUrl(it) }
 
         val manualRawName = doc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div > img")?.attr("alt")?.takeIf { it.isNotBlank() }
@@ -307,40 +320,32 @@ class Film1kProvider : MainAPI() {
         }
     }
 
-    /**
-     * POST to admin-ajax.php with action_change_player_eroz.
-     * Logs everything for diagnostics.
-     */
-    private suspend fun fetchServerEmbed(
-        postId: String,
-        key: Int,
-        referer: String
-    ): String? {
+    private suspend fun fetchServerEmbed(postId: String, key: Int, referer: String): String? {
         return try {
-            val response = app.post(
+            val r = app.post(
                 ajaxUrl,
                 data = mapOf(
                     "action" to "action_change_player_eroz",
                     "ide" to postId,
                     "key" to key.toString()
                 ),
-                headers = mapOf(
+                headers = browserHeaders + mapOf(
                     "X-Requested-With" to "XMLHttpRequest",
                     "Origin" to mainUrl,
-                    "Accept" to "application/json, text/javascript, */*; q=0.01"
+                    "Accept" to "application/json, text/javascript, */*; q=0.01",
+                    "Content-Type" to "application/x-www-form-urlencoded; charset=UTF-8"
                 ),
                 referer = referer,
                 verify = false
             )
 
-            val body = response.text
-            android.util.Log.d(TAG, "AJAX key=$key status=${response.code} len=${body.length}")
-            android.util.Log.d(TAG, "AJAX key=$key body=${body.take(400)}")
+            android.util.Log.e(TAG, "AJAX key=$key status=${r.code} len=${r.text.length}")
+            android.util.Log.e(TAG, "AJAX key=$key body=${r.text.take(500)}")
 
-            val json = JSONObject(body)
+            val json = JSONObject(r.text)
             val videoHtml = json.optString("video", "")
             if (videoHtml.isBlank()) {
-                android.util.Log.w(TAG, "AJAX key=$key: empty 'video' field")
+                android.util.Log.e(TAG, "AJAX key=$key: EMPTY 'video' field")
                 return null
             }
 
@@ -349,10 +354,10 @@ class Film1kProvider : MainAPI() {
                 RegexOption.IGNORE_CASE
             ).find(videoHtml)?.groupValues?.get(1)
 
-            android.util.Log.d(TAG, "AJAX key=$key: iframe src=$src")
+            android.util.Log.e(TAG, "AJAX key=$key iframe src=$src")
             src
         } catch (e: Exception) {
-            android.util.Log.e(TAG, "AJAX key=$key failed", e)
+            android.util.Log.e(TAG, "AJAX key=$key EXCEPTION", e)
             null
         }
     }
@@ -364,29 +369,28 @@ class Film1kProvider : MainAPI() {
     ) {
         when {
             embedUrl.contains("film1k.xyz") -> {
-                android.util.Log.d(TAG, "Route → Film1kExtractor: $embedUrl")
+                android.util.Log.e(TAG, "Route → Film1kExtractor: $embedUrl")
                 Film1kExtractor().getUrl(embedUrl, mainUrl, subtitleCallback, callback)
             }
             embedUrl.contains("turbovidhls.com") -> {
-                android.util.Log.d(TAG, "Route → TurboVidHLSExtractor: $embedUrl")
+                android.util.Log.e(TAG, "Route → TurboVidHLSExtractor: $embedUrl")
                 TurboVidHLSExtractor().getUrl(embedUrl, mainUrl, subtitleCallback, callback)
             }
             embedUrl.contains("hgcloud.to") -> {
-                android.util.Log.d(TAG, "Route → HgCloudExtractor: $embedUrl")
+                android.util.Log.e(TAG, "Route → HgCloudExtractor: $embedUrl")
                 HgCloudExtractor().getUrl(embedUrl, mainUrl, subtitleCallback, callback)
             }
             embedUrl.contains("abyssplayer.com") -> {
-                android.util.Log.d(TAG, "Route → AbyssPlayer (skipped): $embedUrl")
+                android.util.Log.e(TAG, "Route → AbyssPlayer SKIPPED: $embedUrl")
             }
             embedUrl.contains(".mp4") || embedUrl.contains(".m3u8") -> {
-                android.util.Log.d(TAG, "Route → Direct media: $embedUrl")
+                android.util.Log.e(TAG, "Route → Direct media: $embedUrl")
                 callback.invoke(
                     newExtractorLink(
                         name = "Film1k Direct",
                         source = "Film1k Direct",
                         url = embedUrl,
-                        type = if (embedUrl.contains(".m3u8"))
-                            ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                        type = if (embedUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                     ) {
                         this.referer = mainUrl
                         this.quality = Qualities.Unknown.value
@@ -394,7 +398,7 @@ class Film1kProvider : MainAPI() {
                 )
             }
             else -> {
-                android.util.Log.d(TAG, "Route → loadExtractor: $embedUrl")
+                android.util.Log.e(TAG, "Route → loadExtractor: $embedUrl")
                 loadExtractor(embedUrl, mainUrl, subtitleCallback, callback)
             }
         }
@@ -407,19 +411,19 @@ class Film1kProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean = coroutineScope {
 
-        android.util.Log.d(TAG, "=== loadLinks START: $data ===")
+        android.util.Log.e(TAG, "=== loadLinks START: $data ===")
 
         val doc = try {
-            app.get(data, verify = false, cacheTime = 0).document
+            app.get(data, headers = browserHeaders, verify = false, cacheTime = 0).document
         } catch (e: Exception) {
-            android.util.Log.e(TAG, "Failed to fetch detail page", e)
+            android.util.Log.e(TAG, "loadLinks: fetch FAILED", e)
             return@coroutineScope false
         }
-        android.util.Log.d(TAG, "Detail page fetched, html len=${doc.html().length}")
+        android.util.Log.e(TAG, "loadLinks: doc len=${doc.html().length}")
 
         val collectedLinks = mutableListOf<ExtractorLink>()
         val collectingCallback: (ExtractorLink) -> Unit = { link ->
-            android.util.Log.d(TAG, ">>> Link collected: ${link.url} type=${link.type}")
+            android.util.Log.e(TAG, ">>> LINK COLLECTED: ${link.url}")
             collectedLinks.add(link)
         }
 
@@ -432,17 +436,16 @@ class Film1kProvider : MainAPI() {
 
         val postId = doc.selectFirst("[data-ide]")?.attr("data-ide")
             ?: Regex("""data-ide=["'](\d+)["']""").find(doc.html())?.groupValues?.get(1)
-        android.util.Log.d(TAG, "postId=$postId")
+        android.util.Log.e(TAG, "loadLinks: postId=$postId")
 
         val embedUrls = mutableListOf<String>()
 
-        // Static extraction
         doc.select("#my-video > source").forEach { source ->
             val src = getImageUrl(source)
             if (!src.isNullOrBlank()) {
                 val fixed = fixUrl(src)
                 embedUrls.add(fixed)
-                android.util.Log.d(TAG, "Static <source>: $fixed")
+                android.util.Log.e(TAG, "static <source>: $fixed")
             }
         }
         doc.select("#video-op-a > div > iframe").forEach { iframe ->
@@ -450,7 +453,7 @@ class Film1kProvider : MainAPI() {
             if (!src.isNullOrBlank()) {
                 val fixed = fixUrl(src)
                 embedUrls.add(fixed)
-                android.util.Log.d(TAG, "Static <iframe>: $fixed")
+                android.util.Log.e(TAG, "static <iframe>: $fixed")
             }
         }
         doc.select("#Eroz > div > ul > li > a").forEach { aTag ->
@@ -458,13 +461,12 @@ class Film1kProvider : MainAPI() {
             if (href.isNotBlank()) {
                 val fixed = fixUrl(href)
                 embedUrls.add(fixed)
-                android.util.Log.d(TAG, "Static <a>: $fixed")
+                android.util.Log.e(TAG, "static <a>: $fixed")
             }
         }
 
-        // AJAX extraction for keys 0..3
         if (postId != null) {
-            android.util.Log.d(TAG, "Calling AJAX for keys 0..3")
+            android.util.Log.e(TAG, "loadLinks: calling AJAX for keys 0..3")
             val ajaxResults = (0..3).map { key ->
                 async { key to fetchServerEmbed(postId, key, data) }
             }.awaitAll()
@@ -472,36 +474,36 @@ class Film1kProvider : MainAPI() {
             ajaxResults.forEach { (key, url) ->
                 if (url != null && !embedUrls.contains(url)) {
                     embedUrls.add(url)
-                    android.util.Log.d(TAG, "AJAX added key=$key url=$url")
+                    android.util.Log.e(TAG, "loadLinks: AJAX key=$key added $url")
                 }
             }
         } else {
-            android.util.Log.w(TAG, "No postId — AJAX extraction skipped")
+            android.util.Log.e(TAG, "loadLinks: NO postId — AJAX skipped")
         }
 
-        android.util.Log.d(TAG, "Total embedUrls=${embedUrls.size}")
-        embedUrls.forEachIndexed { i, u -> android.util.Log.d(TAG, "  [$i] $u") }
+        android.util.Log.e(TAG, "loadLinks: total embedUrls=${embedUrls.size}")
+        embedUrls.forEachIndexed { i, u -> android.util.Log.e(TAG, "  [$i] $u") }
 
         embedUrls.map { videoUrl ->
             async {
                 try {
                     routeToExtractor(videoUrl, subtitleCallback, collectingCallback)
                 } catch (e: Exception) {
-                    android.util.Log.e(TAG, "Route failed for $videoUrl", e)
+                    android.util.Log.e(TAG, "route FAILED for $videoUrl", e)
                 }
             }
         }.awaitAll()
 
         subtitleJob.await().forEach { subtitleCallback(it) }
 
-        android.util.Log.d(TAG, "Total collected links=${collectedLinks.size}")
+        android.util.Log.e(TAG, "loadLinks: total collected=${collectedLinks.size}")
         val sortedLinks = collectedLinks.sortedByDescending { it.type == ExtractorLinkType.M3U8 }
         sortedLinks.firstOrNull()?.let {
-            android.util.Log.d(TAG, ">>> Emitting link: ${it.url}")
+            android.util.Log.e(TAG, ">>> EMITTING: ${it.url}")
             callback.invoke(it)
-        } ?: android.util.Log.w(TAG, "No links collected — nothing to emit")
+        } ?: android.util.Log.e(TAG, "loadLinks: NO LINKS TO EMIT")
 
-        android.util.Log.d(TAG, "=== loadLinks END ===")
+        android.util.Log.e(TAG, "=== loadLinks END ===")
 
         return@coroutineScope collectedLinks.isNotEmpty()
     }
