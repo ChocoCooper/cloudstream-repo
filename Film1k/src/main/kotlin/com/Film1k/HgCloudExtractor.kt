@@ -26,8 +26,9 @@ class HgCloudExtractor : ExtractorApi() {
 
         try {
             val resolver = WebViewResolver(
+                // Broader pattern to catch tokenized HLS URLs
                 interceptUrl = Regex(
-                    """\.m3u8(\?|$)|\.mp4(\?|$)|\.ts(\?|$)|master\.m3u8|/hls/""",
+                    """\.m3u8(\?|$)|\.mp4(\?|$)|\.ts(\?|$)|master\.m3u8|/hls/|/playlist/|/manifest""",
                     RegexOption.IGNORE_CASE
                 ),
                 additionalUrls = emptyList(),
@@ -37,107 +38,64 @@ class HgCloudExtractor : ExtractorApi() {
                 useOkhttp = false,
                 script = """
                     (function(){
-                        function report(msg) {
+                        function tryClick(sel) {
                             try {
-                                if (window.CloudstreamCallback &&
-                                    typeof window.CloudstreamCallback.postMessage === 'function') {
-                                    window.CloudstreamCallback.postMessage('[HgCloud] ' + msg);
-                                }
+                                var el = document.querySelector(sel);
+                                if (el) { el.click(); return true; }
                             } catch(e) {}
+                            return false;
                         }
-                        report('script injected, url=' + window.location.href +
-                               ' readyState=' + document.readyState +
-                               ' title=' + document.title);
-
-                        window.addEventListener('error', function(ev){
-                            report('JS_ERROR: ' + (ev.message || ev) + ' @ ' +
-                                   (ev.filename||'?') + ':' + (ev.lineno||'?'));
-                        }, true);
-
-                        var lastUrl = window.location.href;
-                        var ticks = 0;
-                        setInterval(function(){
-                            ticks++;
-                            if (window.location.href !== lastUrl) {
-                                report('REDIRECT → ' + window.location.href);
-                                lastUrl = window.location.href;
-                            }
-                            if (ticks === 1 || ticks % 4 === 0) {
-                                report('tick_' + ticks + ' url=' + window.location.href +
-                                       ' title=' + document.title +
-                                       ' playerEl=' + (!!document.querySelector('.jwplayer, #vplayer')));
-                            }
-                        }, 500);
-
-                        var reported = {};
-                        setInterval(function(){
-                            var v = document.querySelector('video');
-                            if (v) {
-                                var key = 'v_' + (v.src || 'nosrc');
-                                if (!reported[key]) {
-                                    reported[key] = true;
-                                    report('VIDEO_FOUND src=' + (v.src || '(none)') +
-                                           ' readyState=' + v.readyState +
-                                           ' networkState=' + v.networkState +
-                                           ' duration=' + v.duration);
-                                }
-                                if (v.error && !reported['verr_' + v.error.code]) {
-                                    reported['verr_' + v.error.code] = true;
-                                    report('VIDEO_ERROR code=' + v.error.code +
-                                           ' msg=' + (v.error.message || '?'));
-                                }
-                            }
-                            var iframe = document.querySelector('iframe');
-                            if (iframe && iframe.src && !reported['if_' + iframe.src]) {
-                                reported['if_' + iframe.src] = true;
-                                report('IFRAME src=' + iframe.src);
-                            }
-                        }, 1000);
-
-                        var tries = 0;
-                        var iv = setInterval(function(){
-                            tries++;
+                        function tryPlay() {
                             try {
-                                var display = document.querySelector(
-                                    '.jw-display-icon-container, ' +
-                                    '.jw-display-icon-display, ' +
-                                    '.jw-icon-display'
-                                );
-                                if (display) display.click();
                                 var v = document.querySelector('video');
                                 if (v) {
                                     v.muted = true;
                                     var p = v.play();
-                                    if (p && p.catch) p.catch(function(e){
-                                        report('PLAY_REJECT try ' + tries + ': ' + (e.message || e));
-                                    });
+                                    if (p && p.catch) p.catch(function(){});
+                                    return true;
                                 }
-                            } catch(e) {
-                                report('PLAY_ERR try ' + tries + ': ' + (e.message || e));
+                            } catch(e) {}
+                            return false;
+                        }
+                        var selectors = [
+                            '.jw-display-icon-container',
+                            '.jw-display-icon-display',
+                            '.jw-icon-display',
+                            '.jw-media',
+                            '.jwplayer',
+                            '.play-button',
+                            '[class*="play"]',
+                            '[class*="Play"]'
+                        ];
+                        var tries = 0;
+                        var iv = setInterval(function(){
+                            tries++;
+                            for (var i = 0; i < selectors.length; i++) {
+                                tryClick(selectors[i]);
                             }
-                            if (tries > 20) {
-                                clearInterval(iv);
-                                report('STOPPED clicking after 20 tries');
-                            }
-                        }, 1500);
+                            tryPlay();
+                            if (tries > 40) clearInterval(iv);
+                        }, 1000);
                     })();
                 """.trimIndent(),
                 scriptCallback = { msg ->
                     android.util.Log.e(TAG, "HgCloud.WebView → $msg")
                 },
-                timeout = 30_000L
+                timeout = 45_000L
             )
 
-            android.util.Log.e(TAG, "HgCloud resolver built, calling resolveUsingWebView...")
-            val resolveStart = System.currentTimeMillis()
             val (interceptedRequest, extraRequests) = resolver.resolveUsingWebView(
                 url = url,
                 referer = referer
             )
+
             android.util.Log.e(
                 TAG,
-                "HgCloud resolveUsingWebView returned in ${System.currentTimeMillis() - resolveStart}ms"
+                "HgCloud intercepted=${interceptedRequest?.url} extras=${extraRequests.size}"
             )
+            extraRequests.forEachIndexed { i, r ->
+                android.util.Log.e(TAG, "HgCloud extra[$i]=${r.url}")
+            }
 
             val candidates = buildList {
                 interceptedRequest?.url?.toString()?.let { add(it) }
