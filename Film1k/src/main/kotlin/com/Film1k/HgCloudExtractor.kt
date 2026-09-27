@@ -7,7 +7,6 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
-import java.net.URI
 
 class HgCloudExtractor : ExtractorApi() {
     override var mainUrl = "https://hgcloud.to"
@@ -15,16 +14,6 @@ class HgCloudExtractor : ExtractorApi() {
     override val requiresReferer = true
 
     private val TAG = "Film1kDebug"
-
-    private fun originOf(url: String): String? {
-        return try {
-            val u = URI(url)
-            val port = if (u.port > 0) ":${u.port}" else ""
-            "${u.scheme}://${u.host}$port/"
-        } catch (_: Throwable) {
-            null
-        }
-    }
 
     override suspend fun getUrl(
         url: String,
@@ -48,28 +37,14 @@ class HgCloudExtractor : ExtractorApi() {
                 useOkhttp = false,
                 script = """
                     (function(){
-                        function cb(msg) {
+                        function report(msg) {
                             try {
-                                if (typeof window.CloudstreamCallback === 'function') {
-                                    window.CloudstreamCallback(msg);
-                                    return;
-                                }
-                                if (window.CloudstreamCallback) {
-                                    if (typeof window.CloudstreamCallback.postMessage === 'function') {
-                                        window.CloudstreamCallback.postMessage(msg); return;
-                                    }
-                                    if (typeof window.CloudstreamCallback.log === 'function') {
-                                        window.CloudstreamCallback.log(msg); return;
-                                    }
-                                    if (typeof window.CloudstreamCallback.done === 'function') {
-                                        window.CloudstreamCallback.done(msg); return;
-                                    }
+                                if (window.CloudstreamCallback &&
+                                    typeof window.CloudstreamCallback.postMessage === 'function') {
+                                    window.CloudstreamCallback.postMessage('[HgCloud] ' + msg);
                                 }
                             } catch(e) {}
                         }
-
-                        function report(msg) { cb('[HgCloud] ' + msg); }
-
                         report('script injected, url=' + window.location.href +
                                ' readyState=' + document.readyState +
                                ' title=' + document.title);
@@ -80,17 +55,17 @@ class HgCloudExtractor : ExtractorApi() {
                         }, true);
 
                         var lastUrl = window.location.href;
-                        var redirectChecks = 0;
+                        var ticks = 0;
                         setInterval(function(){
-                            redirectChecks++;
+                            ticks++;
                             if (window.location.href !== lastUrl) {
                                 report('REDIRECT → ' + window.location.href);
                                 lastUrl = window.location.href;
                             }
-                            if (redirectChecks === 1 || redirectChecks % 5 === 0) {
-                                report('url_check_' + redirectChecks + ': ' +
-                                       window.location.href +
-                                       ' (title=' + document.title + ')');
+                            if (ticks === 1 || ticks % 4 === 0) {
+                                report('tick_' + ticks + ' url=' + window.location.href +
+                                       ' title=' + document.title +
+                                       ' playerEl=' + (!!document.querySelector('.jwplayer, #vplayer')));
                             }
                         }, 500);
 
@@ -116,12 +91,6 @@ class HgCloudExtractor : ExtractorApi() {
                             if (iframe && iframe.src && !reported['if_' + iframe.src]) {
                                 reported['if_' + iframe.src] = true;
                                 report('IFRAME src=' + iframe.src);
-                            }
-                            var playerEl = document.querySelector('.jwplayer, #vplayer');
-                            if (playerEl && !reported['player_el']) {
-                                reported['player_el'] = true;
-                                report('PLAYER_ELEMENT found: ' + playerEl.id +
-                                       ' / ' + playerEl.className);
                             }
                         }, 1000);
 
@@ -170,14 +139,6 @@ class HgCloudExtractor : ExtractorApi() {
                 "HgCloud resolveUsingWebView returned in ${System.currentTimeMillis() - resolveStart}ms"
             )
 
-            android.util.Log.e(
-                TAG,
-                "HgCloud intercepted=${interceptedRequest?.url} extras=${extraRequests.size}"
-            )
-            extraRequests.forEachIndexed { i, r ->
-                android.util.Log.e(TAG, "HgCloud extra[$i]=${r.url}")
-            }
-
             val candidates = buildList {
                 interceptedRequest?.url?.toString()?.let { add(it) }
                 extraRequests.forEach { add(it.url.toString()) }
@@ -193,12 +154,10 @@ class HgCloudExtractor : ExtractorApi() {
                 }
 
             val isM3u8 = streamUrl.contains(".m3u8", ignoreCase = true)
-            // Use the CDN's own origin as Referer (hotlink protection bypass)
-            val streamOrigin = originOf(streamUrl) ?: "https://vibuxer.com/"
             android.util.Log.e(
                 TAG,
                 "HgCloud EMITTING [${if (isM3u8) "M3U8" else "MP4"}] $streamUrl " +
-                "referer=$streamOrigin (total ${System.currentTimeMillis() - start}ms)"
+                "(total ${System.currentTimeMillis() - start}ms)"
             )
 
             callback.invoke(
@@ -208,7 +167,7 @@ class HgCloudExtractor : ExtractorApi() {
                     url = streamUrl,
                     type = if (isM3u8) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                 ) {
-                    this.referer = streamOrigin
+                    this.referer = "https://vibuxer.com/"
                     this.quality = Qualities.Unknown.value
                 }
             )
