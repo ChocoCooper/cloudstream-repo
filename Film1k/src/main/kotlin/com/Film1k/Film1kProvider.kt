@@ -59,12 +59,12 @@ class Film1kProvider : MainAPI() {
     override val hasMainPage = true
     override val supportedTypes = setOf(TvType.NSFW)
 
+    private val TAG = "Film1kDebug"
+
     private val cinemetaBaseUrl = "https://v3-cinemeta.strem.io/meta/movie"
     private val openSubtitlesBaseUrl = "https://opensubtitles-v3.strem.io/subtitles/movie"
     private val openSubtitlesMaxResults = 10
     private val isHorizontalImages = false
-
-    // AJAX endpoint used by the theme's server-switching mechanism
     private val ajaxUrl = "$mainUrl/wp-admin/admin-ajax.php"
 
     override val mainPage = mainPageOf(
@@ -307,19 +307,9 @@ class Film1kProvider : MainAPI() {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Server URL fetch via the confirmed AJAX mechanism
-    // ------------------------------------------------------------------
-
     /**
-     * Calls the theme's action_change_player_eroz endpoint for the given
-     * server key (0-3), and extracts the iframe src from the returned
-     * HTML fragment.
-     *
-     * Confirmed from the theme's JS (dump_theme_litespeed.js):
-     *   $.ajax({ url: erozPublic.url, method: 'POST',
-     *            data: { action: 'action_change_player_eroz',
-     *                    ide: ide, key: key } })
+     * POST to admin-ajax.php with action_change_player_eroz.
+     * Logs everything for diagnostics.
      */
     private suspend fun fetchServerEmbed(
         postId: String,
@@ -334,53 +324,62 @@ class Film1kProvider : MainAPI() {
                     "ide" to postId,
                     "key" to key.toString()
                 ),
-                headers = mapOf("X-Requested-With" to "XMLHttpRequest"),
+                headers = mapOf(
+                    "X-Requested-With" to "XMLHttpRequest",
+                    "Origin" to mainUrl,
+                    "Accept" to "application/json, text/javascript, */*; q=0.01"
+                ),
                 referer = referer,
                 verify = false
             )
 
-            val json = JSONObject(response.text)
-            val videoHtml = json.optString("video", "")
-            if (videoHtml.isBlank()) return null
+            val body = response.text
+            android.util.Log.d(TAG, "AJAX key=$key status=${response.code} len=${body.length}")
+            android.util.Log.d(TAG, "AJAX key=$key body=${body.take(400)}")
 
-            // Extract iframe src (case-insensitive to handle Option 4's
-            // uppercase <IFRAME SRC="...">)
-            Regex(
+            val json = JSONObject(body)
+            val videoHtml = json.optString("video", "")
+            if (videoHtml.isBlank()) {
+                android.util.Log.w(TAG, "AJAX key=$key: empty 'video' field")
+                return null
+            }
+
+            val src = Regex(
                 """<iframe[^>]+src\s*=\s*["']([^"']+)["']""",
                 RegexOption.IGNORE_CASE
             ).find(videoHtml)?.groupValues?.get(1)
+
+            android.util.Log.d(TAG, "AJAX key=$key: iframe src=$src")
+            src
         } catch (e: Exception) {
+            android.util.Log.e(TAG, "AJAX key=$key failed", e)
             null
         }
     }
 
-    /**
-     * Routes an embed URL to the appropriate extractor based on hostname.
-     */
     private suspend fun routeToExtractor(
         embedUrl: String,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
         when {
-            // Option 1 — Film1k native (already implemented)
             embedUrl.contains("film1k.xyz") -> {
+                android.util.Log.d(TAG, "Route → Film1kExtractor: $embedUrl")
                 Film1kExtractor().getUrl(embedUrl, mainUrl, subtitleCallback, callback)
             }
-            // Option 3 — TurboVidHLS (direct MP4 in HTML)
             embedUrl.contains("turbovidhls.com") -> {
+                android.util.Log.d(TAG, "Route → TurboVidHLSExtractor: $embedUrl")
                 TurboVidHLSExtractor().getUrl(embedUrl, mainUrl, subtitleCallback, callback)
             }
-            // Option 4 — HgCloud (WebViewResolver required)
             embedUrl.contains("hgcloud.to") -> {
+                android.util.Log.d(TAG, "Route → HgCloudExtractor: $embedUrl")
                 HgCloudExtractor().getUrl(embedUrl, mainUrl, subtitleCallback, callback)
             }
-            // Option 2 — AbyssPlayer (skipped)
             embedUrl.contains("abyssplayer.com") -> {
-                // Intentionally skipped per user request
+                android.util.Log.d(TAG, "Route → AbyssPlayer (skipped): $embedUrl")
             }
-            // Direct media fallback
             embedUrl.contains(".mp4") || embedUrl.contains(".m3u8") -> {
+                android.util.Log.d(TAG, "Route → Direct media: $embedUrl")
                 callback.invoke(
                     newExtractorLink(
                         name = "Film1k Direct",
@@ -394,8 +393,8 @@ class Film1kProvider : MainAPI() {
                     }
                 )
             }
-            // Let CloudStream's native extractor registry try
             else -> {
+                android.util.Log.d(TAG, "Route → loadExtractor: $embedUrl")
                 loadExtractor(embedUrl, mainUrl, subtitleCallback, callback)
             }
         }
@@ -408,18 +407,22 @@ class Film1kProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean = coroutineScope {
 
-        // 1. Fetch the detail page first — this establishes cookies needed
-        //    by the AJAX calls
+        android.util.Log.d(TAG, "=== loadLinks START: $data ===")
+
         val doc = try {
             app.get(data, verify = false, cacheTime = 0).document
         } catch (e: Exception) {
+            android.util.Log.e(TAG, "Failed to fetch detail page", e)
             return@coroutineScope false
         }
+        android.util.Log.d(TAG, "Detail page fetched, html len=${doc.html().length}")
 
         val collectedLinks = mutableListOf<ExtractorLink>()
-        val collectingCallback: (ExtractorLink) -> Unit = { link -> collectedLinks.add(link) }
+        val collectingCallback: (ExtractorLink) -> Unit = { link ->
+            android.util.Log.d(TAG, ">>> Link collected: ${link.url} type=${link.type}")
+            collectedLinks.add(link)
+        }
 
-        // 2. Kick off subtitle fetch in parallel
         val subtitleJob = async {
             val docText = doc.html()
             val imdbId = Regex("imdb\\.com/title/(tt\\d+)").find(docText)?.groupValues?.get(1)
@@ -427,47 +430,78 @@ class Film1kProvider : MainAPI() {
             if (imdbId != null) fetchOpenSubtitles(imdbId) else emptyList()
         }
 
-        // 3. Extract post ID (used by AJAX)
         val postId = doc.selectFirst("[data-ide]")?.attr("data-ide")
             ?: Regex("""data-ide=["'](\d+)["']""").find(doc.html())?.groupValues?.get(1)
+        android.util.Log.d(TAG, "postId=$postId")
 
-        // 4. Collect embed URLs — both from static HTML and from AJAX
         val embedUrls = mutableListOf<String>()
 
-        // 4a. Static extraction (Option 1's direct source is often present)
+        // Static extraction
         doc.select("#my-video > source").forEach { source ->
             val src = getImageUrl(source)
-            if (!src.isNullOrBlank()) embedUrls.add(fixUrl(src))
+            if (!src.isNullOrBlank()) {
+                val fixed = fixUrl(src)
+                embedUrls.add(fixed)
+                android.util.Log.d(TAG, "Static <source>: $fixed")
+            }
         }
         doc.select("#video-op-a > div > iframe").forEach { iframe ->
             val src = getImageUrl(iframe)
-            if (!src.isNullOrBlank()) embedUrls.add(fixUrl(src))
+            if (!src.isNullOrBlank()) {
+                val fixed = fixUrl(src)
+                embedUrls.add(fixed)
+                android.util.Log.d(TAG, "Static <iframe>: $fixed")
+            }
         }
-
-        // 4b. AJAX-based extraction — iterate all 4 servers
-        if (postId != null) {
-            val ajaxResults = (0..3).map { key ->
-                async { fetchServerEmbed(postId, key, data) }
-            }.awaitAll()
-
-            ajaxResults.filterNotNull().forEach { url ->
-                if (!embedUrls.contains(url)) embedUrls.add(url)
+        doc.select("#Eroz > div > ul > li > a").forEach { aTag ->
+            val href = aTag.attr("href").ifBlank { aTag.attr("data-link") }
+            if (href.isNotBlank()) {
+                val fixed = fixUrl(href)
+                embedUrls.add(fixed)
+                android.util.Log.d(TAG, "Static <a>: $fixed")
             }
         }
 
-        // 5. Route each embed URL to the correct extractor
+        // AJAX extraction for keys 0..3
+        if (postId != null) {
+            android.util.Log.d(TAG, "Calling AJAX for keys 0..3")
+            val ajaxResults = (0..3).map { key ->
+                async { key to fetchServerEmbed(postId, key, data) }
+            }.awaitAll()
+
+            ajaxResults.forEach { (key, url) ->
+                if (url != null && !embedUrls.contains(url)) {
+                    embedUrls.add(url)
+                    android.util.Log.d(TAG, "AJAX added key=$key url=$url")
+                }
+            }
+        } else {
+            android.util.Log.w(TAG, "No postId — AJAX extraction skipped")
+        }
+
+        android.util.Log.d(TAG, "Total embedUrls=${embedUrls.size}")
+        embedUrls.forEachIndexed { i, u -> android.util.Log.d(TAG, "  [$i] $u") }
+
         embedUrls.map { videoUrl ->
             async {
-                routeToExtractor(videoUrl, subtitleCallback, collectingCallback)
+                try {
+                    routeToExtractor(videoUrl, subtitleCallback, collectingCallback)
+                } catch (e: Exception) {
+                    android.util.Log.e(TAG, "Route failed for $videoUrl", e)
+                }
             }
         }.awaitAll()
 
-        // 6. Emit subtitles
         subtitleJob.await().forEach { subtitleCallback(it) }
 
-        // 7. Emit the best link (M3U8 first, then others)
+        android.util.Log.d(TAG, "Total collected links=${collectedLinks.size}")
         val sortedLinks = collectedLinks.sortedByDescending { it.type == ExtractorLinkType.M3U8 }
-        sortedLinks.firstOrNull()?.let { callback.invoke(it) }
+        sortedLinks.firstOrNull()?.let {
+            android.util.Log.d(TAG, ">>> Emitting link: ${it.url}")
+            callback.invoke(it)
+        } ?: android.util.Log.w(TAG, "No links collected — nothing to emit")
+
+        android.util.Log.d(TAG, "=== loadLinks END ===")
 
         return@coroutineScope collectedLinks.isNotEmpty()
     }
