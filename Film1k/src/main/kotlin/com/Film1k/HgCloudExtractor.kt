@@ -24,16 +24,42 @@ class HgCloudExtractor : ExtractorApi() {
         android.util.Log.e(TAG, "HgCloud.getUrl: $url")
         try {
             val resolver = WebViewResolver(
+                // Strict media pattern. Do not include ".mp4" without boundary
+                // because vibuxer serves poster images on some CDNs.
                 interceptUrl = Regex(
-                    """\.m3u8|\.mp4|\.ts|master\.m3u8|/hls/|/playlist/|/stream/""",
+                    """\.m3u8(\?|$)|\.mp4(\?|$)|\.ts(\?|$)|master\.m3u8|/hls/""",
                     RegexOption.IGNORE_CASE
                 ),
                 additionalUrls = emptyList(),
-                userAgent = null,
+                userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36",
                 useOkhttp = false,
-                script = null,
+                // 1. The redirect chain (hgcloud.to -> vibuxer.com) takes a few
+                //    seconds to complete via main.js.
+                // 2. Then the vibuxer JW Player loads and needs a user gesture
+                //    to start playback (which triggers the .m3u8 request).
+                // This script waits 10s for the redirect, then continuously
+                // tries to click/play until the resolver intercepts the stream.
+                script = """
+                    (function(){
+                        var tries = 0;
+                        var iv = setInterval(function(){
+                            tries++;
+                            try {
+                                var display = document.querySelector('.jw-display-icon-container, .jw-display-icon-display, .jw-icon-display');
+                                if (display) display.click();
+                                var v = document.querySelector('video');
+                                if (v) {
+                                    v.muted = true;
+                                    var p = v.play();
+                                    if (p && p.catch) p.catch(function(){});
+                                }
+                            } catch(e) {}
+                            if (tries > 60) clearInterval(iv);
+                        }, 1500);
+                    })();
+                """.trimIndent(),
                 scriptCallback = null,
-                timeout = 60_000L
+                timeout = 120_000L
             )
 
             val (interceptedRequest, extraRequests) = resolver.resolveUsingWebView(
@@ -42,13 +68,19 @@ class HgCloudExtractor : ExtractorApi() {
             )
 
             android.util.Log.e(TAG, "HgCloud intercepted=${interceptedRequest?.url} extras=${extraRequests.size}")
-
-            val streamUrl = interceptedRequest?.url?.toString() ?: run {
-                android.util.Log.e(TAG, "HgCloud: NO intercepted request")
-                return
+            extraRequests.forEachIndexed { i, r ->
+                android.util.Log.e(TAG, "HgCloud extra[$i]=${r.url}")
             }
+
+            val streamUrl = interceptedRequest?.url?.toString()
+                ?: extraRequests.firstOrNull { it.url.toString().contains(".m3u8", ignoreCase = true) }?.url?.toString()
+                ?: run {
+                    android.util.Log.e(TAG, "HgCloud: NO stream URL")
+                    return
+                }
+
             val isM3u8 = streamUrl.contains(".m3u8", ignoreCase = true)
-            android.util.Log.e(TAG, "HgCloud emitting: $streamUrl")
+            android.util.Log.e(TAG, "HgCloud EMITTING: $streamUrl")
 
             callback.invoke(
                 newExtractorLink(
