@@ -17,19 +17,9 @@ import java.security.interfaces.ECPublicKey
 import java.security.spec.ECGenParameterSpec
 import java.util.Base64
 
-/**
- * Full no-browser resolver for film1k's embed player, built from a
- * fully validated reverse-engineering pass:
- *  - PoW hash (custom ChaCha-mixed digest): validated against a real
- *    server-accepted nonce/solution pair (exact match).
- *  - AES-256-GCM key derivation + decrypt: validated against a real
- *    /playback response (decrypts to the exact working .m3u8 URL).
- *  - /attest wire format: known exactly from a captured real request.
- *
- * Flow: details -> settings -> challenge -> attest -> [captcha -> verify
- * if required] -> playback -> decrypt.
- */
 object Film1kResolver {
+
+    private const val TAG = "Film1kDebug"
 
     private fun b64UrlEncode(bytes: ByteArray): String =
         Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
@@ -42,7 +32,6 @@ object Film1kResolver {
         return out
     }
 
-    // Minimal DER(SEQUENCE{INTEGER r, INTEGER s}) parser -> raw r||s (WebCrypto format)
     private fun derSignatureToRawRS(der: ByteArray): ByteArray {
         var offset = 0
         require(der[offset] == 0x30.toByte()) { "not a DER sequence" }
@@ -56,13 +45,13 @@ object Film1kResolver {
         }
         require(der[offset] == 0x02.toByte()) { "expected INTEGER (r)" }
         offset++
-        var rLen = der[offset].toInt() and 0xFF
+        val rLen = der[offset].toInt() and 0xFF
         offset++
         val r = BigInteger(1, der.copyOfRange(offset, offset + rLen))
         offset += rLen
         require(der[offset] == 0x02.toByte()) { "expected INTEGER (s)" }
         offset++
-        var sLen = der[offset].toInt() and 0xFF
+        val sLen = der[offset].toInt() and 0xFF
         offset++
         val s = BigInteger(1, der.copyOfRange(offset, offset + sLen))
         return fixedLength(r, 32) + fixedLength(s, 32)
@@ -77,7 +66,6 @@ object Film1kResolver {
         val pub = pair.public as ECPublicKey
         val x = fixedLength(pub.w.affineX, 32)
         val y = fixedLength(pub.w.affineY, 32)
-
         val jwk = JSONObject().apply {
             put("crv", "P-256")
             put("ext", true)
@@ -86,7 +74,6 @@ object Film1kResolver {
             put("x", b64UrlEncode(x))
             put("y", b64UrlEncode(y))
         }
-
         val signFn: (String) -> String = { nonce ->
             val sig = Signature.getInstance("SHA256withECDSA")
             sig.initSign(pair.private)
@@ -94,14 +81,9 @@ object Film1kResolver {
             val der = sig.sign()
             b64UrlEncode(derSignatureToRawRS(der))
         }
-
         return Keypair(pair.private, jwk, signFn)
     }
 
-    // Plausible, internally-consistent client telemetry. The real captured
-    // example got confidence=0.75 (accepted) despite being an automated
-    // Chromium under SwiftShader software rendering, so exact realism isn't
-    // required — just a well-formed, consistent-looking payload.
     private fun buildClientInfo(): JSONObject = JSONObject().apply {
         put("user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36")
         put("architecture", "x86")
@@ -153,8 +135,6 @@ object Film1kResolver {
             }
         }
 
-    // Matches the real /challenge request exactly: zero-length body, no
-    // Content-Type header at all (confirmed from a real captured request).
     private suspend fun postEmpty(url: String, headers: Map<String, String> = emptyMap()): JSONObject =
         withContext(Dispatchers.IO) {
             val requestBody = ByteArray(0).toRequestBody(null)
@@ -167,30 +147,28 @@ object Film1kResolver {
             }
         }
 
-    /**
-     * Runs the full flow for one embed code and returns the decrypted
-     * playback JSON (containing "sources": [{url, ...}]) as a JSONObject,
-     * or null if anything along the way fails.
-     */
     suspend fun resolvePlayback(apiBaseUrl: String, embedParent: String, code: String, mode: String = "embed"): JSONObject? {
         return try {
             val base = apiBaseUrl.trimEnd('/')
             val commonHeaders = mapOf("X-Embed-Parent" to embedParent)
 
-            // 1. settings (mainly to check captcha_required; safe to ignore failures here)
+            android.util.Log.e(TAG, "Resolver[1/4] settings GET $base/api/videos/$code/$mode/settings")
             val captchaRequired = try {
                 val settingsResp = app.get("$base/api/videos/$code/$mode/settings", headers = commonHeaders, verify = false)
+                android.util.Log.e(TAG, "Resolver[1/4] settings status=${settingsResp.code} body=${settingsResp.text.take(300)}")
                 JSONObject(settingsResp.text).optBoolean("captcha_required", false)
             } catch (e: Exception) {
-                true // assume worst case if we can't tell
+                android.util.Log.e(TAG, "Resolver[1/4] settings FAILED", e)
+                true
             }
+            android.util.Log.e(TAG, "Resolver[1/4] captchaRequired=$captchaRequired")
 
-            // 2. fingerprint attestation (always required)
             val keypair = generateKeypair()
             val challenge = postEmpty("$base/api/videos/access/challenge", commonHeaders)
             val nonce = challenge.getString("nonce")
             val challengeId = challenge.getString("challenge_id")
             val signature = keypair.sign(nonce)
+            android.util.Log.e(TAG, "Resolver[2/4] challenge OK nonce=${nonce.take(20)}...")
 
             val attestBody = JSONObject().apply {
                 put("viewer_id", "")
@@ -204,6 +182,7 @@ object Film1kResolver {
                 put("attributes", JSONObject().apply { put("entropy", "high") })
             }
             val attestResp = postJson("$base/api/videos/access/attest", attestBody, commonHeaders)
+            android.util.Log.e(TAG, "Resolver[2/4] attest OK confidence=${attestResp.optDouble("confidence")}")
 
             val fingerprint = JSONObject().apply {
                 put("token", attestResp.getString("token"))
@@ -212,7 +191,6 @@ object Film1kResolver {
                 put("confidence", attestResp.getDouble("confidence"))
             }
 
-            // 3. captcha (PoW), only if required
             var captchaToken: String? = null
             if (captchaRequired) {
                 val captchaStart = postJson(
@@ -223,9 +201,15 @@ object Film1kResolver {
                 val powNonce = captchaStart.getString("pow_nonce")
                 val powDifficulty = captchaStart.getInt("pow_difficulty")
                 val powToken = captchaStart.getString("pow_token")
+                android.util.Log.e(TAG, "Resolver[3/4] PoW difficulty=$powDifficulty nonce=$powNonce")
 
+                val t0 = System.currentTimeMillis()
                 val solution = Film1kCrypto.solvePow(powNonce, powDifficulty, timeoutMs = 30_000L)
-                    ?: return null // couldn't solve in time
+                android.util.Log.e(TAG, "Resolver[3/4] PoW solution=$solution elapsed=${System.currentTimeMillis() - t0}ms")
+                if (solution == null) {
+                    android.util.Log.e(TAG, "Resolver[3/4] PoW TIMEOUT — aborting")
+                    return null
+                }
 
                 val verifyResp = postJson(
                     "$base/api/videos/$code/$mode/captcha/verify",
@@ -236,14 +220,12 @@ object Film1kResolver {
                     },
                     commonHeaders
                 )
+                android.util.Log.e(TAG, "Resolver[3/4] verify status=${verifyResp.optString("status")} body=${verifyResp.toString().take(200)}")
                 if (verifyResp.optString("status") != "ok") return null
                 captchaToken = verifyResp.getString("token")
             }
 
-            // 4. playback
-            val playbackHeaders = commonHeaders + if (captchaToken != null) {
-                mapOf("X-Captcha-Token" to captchaToken)
-            } else emptyMap()
+            val playbackHeaders = commonHeaders + if (captchaToken != null) mapOf("X-Captcha-Token" to captchaToken) else emptyMap()
             val playbackResp = postJson(
                 "$base/api/videos/$code/$mode/playback",
                 JSONObject().apply { put("fingerprint", fingerprint) },
@@ -255,10 +237,13 @@ object Film1kResolver {
             val keyParts = pb.getJSONArray("key_parts").let { arr -> (0 until arr.length()).map { arr.getString(it) } }
             val iv = pb.getString("iv")
             val payload = pb.getString("payload")
+            android.util.Log.e(TAG, "Resolver[4/4] playback version=$version keyParts=${keyParts.size} iv=${iv.take(16)}...")
 
             val decryptedJson = Film1kCrypto.decryptPlayback(version, keyParts, iv, payload)
+            android.util.Log.e(TAG, "Resolver[4/4] decrypt OK (${decryptedJson.length} chars)")
             JSONObject(decryptedJson)
         } catch (e: Exception) {
+            android.util.Log.e(TAG, "Resolver FAILED", e)
             null
         }
     }
