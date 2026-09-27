@@ -21,7 +21,7 @@ class TurboVidHLSExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        android.util.Log.d(TAG, "TurboVidHLS getUrl: $url")
+        android.util.Log.e(TAG, "TurboVidHLS.getUrl: $url")
         try {
             val resolver = WebViewResolver(
                 interceptUrl = Regex(
@@ -41,15 +41,14 @@ class TurboVidHLSExtractor : ExtractorApi() {
                 referer = referer ?: "$mainUrl/"
             )
 
-            android.util.Log.d(TAG, "TurboVidHLS: intercepted=${interceptedRequest?.url} extras=${extraRequests.size}")
+            android.util.Log.e(TAG, "TurboVidHLS intercepted=${interceptedRequest?.url} extras=${extraRequests.size}")
 
             val streamUrl = interceptedRequest?.url?.toString() ?: run {
-                android.util.Log.w(TAG, "TurboVidHLS: no intercepted request")
+                android.util.Log.e(TAG, "TurboVidHLS: NO intercepted request")
                 return
             }
             val isM3u8 = streamUrl.contains(".m3u8", ignoreCase = true)
-
-            android.util.Log.d(TAG, "TurboVidHLS: emitting $streamUrl")
+            android.util.Log.e(TAG, "TurboVidHLS emitting: $streamUrl")
 
             callback.invoke(
                 newExtractorLink(
@@ -63,7 +62,7 @@ class TurboVidHLSExtractor : ExtractorApi() {
                 }
             )
         } catch (e: Exception) {
-            android.util.Log.e(TAG, "TurboVidHLS failed", e)
+            android.util.Log.e(TAG, "TurboVidHLS FAILED", e)
         }
     }
 }
