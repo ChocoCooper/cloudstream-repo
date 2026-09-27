@@ -11,26 +11,17 @@ import com.lagradost.cloudstream3.utils.newExtractorLink
 /**
  * HgCloud (Option 4) extractor.
  *
- * Confirmed behavior from full reverse-engineering:
- *   1. https://hgcloud.to/e/<code> is an 819-byte page that loads main.js.
- *   2. main.js is a 71 KB obfuscator.io-protected redirector with an
- *      anti-tamper array-rotation loop. It computes window.location.href
- *      dynamically from an obfuscated domain list.
- *   3. The redirect lands on https://vibuxer.com/e/<code>.
- *   4. vibuxer.com serves a JW Player 8.36.3 page with the player
- *      configuration embedded in a P.A.C.K.E.R.-obfuscated inline script.
- *   5. The signed .m3u8 URL is only available after JW Player initializes
- *      AND the user clicks play (JW Player defers the HLS request until
- *      playback starts).
+ * Chains: hgcloud.to (JS redirector) → vibuxer.com (JW Player 8) → m3u8.
  *
- * WebViewResolver executes everything and intercepts the .m3u8 request.
- * The injected script auto-clicks the JW Player play button repeatedly.
+ * Uses WebViewResolver + auto-click script. Enhanced analytics capture
+ * every stage: redirect, player init, play click, video element state,
+ * SSL errors, and the final intercepted request.
  *
- * NOTE: In observed logs, this extractor has a low success rate against
- * vibuxer's JW Player because the WebView's TLS handshake to some CDN
- * endpoints fails (SSL error -202 = ERR_CERT_AUTHORITY_INVALID inside
- * Chromium). The 30s timeout makes it fail fast so it does not block
- * the user from receiving other extractors' links.
+ * Confirmed from prior logs:
+ *  - Chromium inside the WebView reports `SSL error -202`
+ *    (ERR_CERT_AUTHORITY_INVALID) for some CDN endpoints. This is a
+ *    device WebView CA-bundle limitation, not a code issue.
+ *  - The 30s timeout fails fast so it doesn't block the user.
  */
 class HgCloudExtractor : ExtractorApi() {
     override var mainUrl = "https://hgcloud.to"
@@ -45,11 +36,11 @@ class HgCloudExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        android.util.Log.e(TAG, "HgCloud.getUrl: $url")
+        val start = System.currentTimeMillis()
+        android.util.Log.e(TAG, "HgCloud.getUrl → url=$url referer=$referer")
+
         try {
             val resolver = WebViewResolver(
-                // Strict media pattern. Do NOT include ".mp4" without a
-                // trailing boundary because vibuxer serves poster images.
                 interceptUrl = Regex(
                     """\.m3u8(\?|$)|\.mp4(\?|$)|\.ts(\?|$)|master\.m3u8|/hls/""",
                     RegexOption.IGNORE_CASE
@@ -59,11 +50,68 @@ class HgCloudExtractor : ExtractorApi() {
                             "AppleWebKit/537.36 (KHTML, like Gecko) " +
                             "Chrome/127.0.0.0 Safari/537.36",
                 useOkhttp = false,
-                // Auto-click JW Player's play button repeatedly. JW Player
-                // only requests the .m3u8 after playback starts, so without
-                // this script the WebView would sit on the poster forever.
                 script = """
                     (function(){
+                        function report(msg) {
+                            try {
+                                if (window.CloudstreamCallback && window.CloudstreamCallback.log) {
+                                    window.CloudstreamCallback.log('[HgCloud] ' + msg);
+                                }
+                            } catch(e) {}
+                        }
+                        report('script injected, url=' + window.location.href);
+                        report('readyState=' + document.readyState + ' title=' + document.title);
+
+                        window.addEventListener('error', function(ev){
+                            report('JS_ERROR: ' + (ev.message || ev) + ' @ ' +
+                                   (ev.filename||'?') + ':' + (ev.lineno||'?'));
+                        }, true);
+
+                        var lastUrl = window.location.href;
+                        var redirectChecks = 0;
+                        setInterval(function(){
+                            redirectChecks++;
+                            if (window.location.href !== lastUrl) {
+                                report('REDIRECT → ' + window.location.href);
+                                lastUrl = window.location.href;
+                            }
+                            if (redirectChecks === 1 || redirectChecks % 5 === 0) {
+                                report('url_check_' + redirectChecks + ': ' +
+                                       window.location.href +
+                                       ' (title=' + document.title + ')');
+                            }
+                        }, 500);
+
+                        var reported = {};
+                        setInterval(function(){
+                            var v = document.querySelector('video');
+                            if (v) {
+                                var key = 'v_' + (v.src || 'nosrc');
+                                if (!reported[key]) {
+                                    reported[key] = true;
+                                    report('VIDEO_FOUND src=' + (v.src || '(none)') +
+                                           ' readyState=' + v.readyState +
+                                           ' networkState=' + v.networkState +
+                                           ' duration=' + v.duration);
+                                }
+                                if (v.error && !reported['verr_' + v.error.code]) {
+                                    reported['verr_' + v.error.code] = true;
+                                    report('VIDEO_ERROR code=' + v.error.code +
+                                           ' msg=' + (v.error.message || '?'));
+                                }
+                            }
+                            var iframe = document.querySelector('iframe');
+                            if (iframe && iframe.src && !reported['if_' + iframe.src]) {
+                                reported['if_' + iframe.src] = true;
+                                report('IFRAME src=' + iframe.src);
+                            }
+                            var playerEl = document.querySelector('.jwplayer, #vplayer');
+                            if (playerEl && !reported['player_el']) {
+                                reported['player_el'] = true;
+                                report('PLAYER_ELEMENT found: ' + playerEl.id + ' / ' + playerEl.className);
+                            }
+                        }, 1000);
+
                         var tries = 0;
                         var iv = setInterval(function(){
                             tries++;
@@ -73,27 +121,48 @@ class HgCloudExtractor : ExtractorApi() {
                                     '.jw-display-icon-display, ' +
                                     '.jw-icon-display'
                                 );
-                                if (display) display.click();
+                                if (display) {
+                                    display.click();
+                                    if (!reported['click_' + tries]) {
+                                        reported['click_' + tries] = true;
+                                        report('CLICK display try ' + tries);
+                                    }
+                                }
                                 var v = document.querySelector('video');
                                 if (v) {
                                     v.muted = true;
                                     var p = v.play();
-                                    if (p && p.catch) p.catch(function(){});
+                                    if (p && p.catch) {
+                                        p.catch(function(e){
+                                            report('PLAY_REJECT try ' + tries + ': ' + (e.message || e));
+                                        });
+                                    }
                                 }
-                            } catch(e) {}
-                            if (tries > 20) clearInterval(iv);
+                            } catch(e) {
+                                report('PLAY_ERR try ' + tries + ': ' + (e.message || e));
+                            }
+                            if (tries > 20) {
+                                clearInterval(iv);
+                                report('STOPPED clicking after 20 tries');
+                            }
                         }, 1500);
                     })();
                 """.trimIndent(),
-                scriptCallback = null,
-                // 30 seconds — fail fast. HgCloud is unreliable on mobile
-                // WebView due to TLS handshake failures against its CDNs.
+                scriptCallback = { msg ->
+                    android.util.Log.e(TAG, "HgCloud.WebView → $msg")
+                },
                 timeout = 30_000L
             )
 
+            android.util.Log.e(TAG, "HgCloud resolver built, calling resolveUsingWebView...")
+            val resolveStart = System.currentTimeMillis()
             val (interceptedRequest, extraRequests) = resolver.resolveUsingWebView(
                 url = url,
                 referer = referer
+            )
+            android.util.Log.e(
+                TAG,
+                "HgCloud resolveUsingWebView returned in ${System.currentTimeMillis() - resolveStart}ms"
             )
 
             android.util.Log.e(
@@ -104,22 +173,30 @@ class HgCloudExtractor : ExtractorApi() {
                 android.util.Log.e(TAG, "HgCloud extra[$i]=${r.url}")
             }
 
-            // Build candidate list from intercepted + extras
             val candidates = buildList {
                 interceptedRequest?.url?.toString()?.let { add(it) }
                 extraRequests.forEach { add(it.url.toString()) }
             }.distinct()
 
-            // Prefer M3U8, then any MP4
+            android.util.Log.e(TAG, "HgCloud candidates (${candidates.size}): $candidates")
+
             val streamUrl = candidates.firstOrNull { it.contains(".m3u8", ignoreCase = true) }
                 ?: candidates.firstOrNull { it.contains(".mp4", ignoreCase = true) }
                 ?: run {
-                    android.util.Log.e(TAG, "HgCloud: NO stream URL")
+                    android.util.Log.e(
+                        TAG,
+                        "HgCloud NO STREAM — resolve complete but no candidate. " +
+                        "Check WebView log above for redirect/video/SSL status."
+                    )
                     return
                 }
 
             val isM3u8 = streamUrl.contains(".m3u8", ignoreCase = true)
-            android.util.Log.e(TAG, "HgCloud EMITTING: $streamUrl")
+            android.util.Log.e(
+                TAG,
+                "HgCloud EMITTING [${if (isM3u8) "M3U8" else "MP4"}] $streamUrl " +
+                "(total ${System.currentTimeMillis() - start}ms)"
+            )
 
             callback.invoke(
                 newExtractorLink(
@@ -133,12 +210,16 @@ class HgCloudExtractor : ExtractorApi() {
                 }
             )
         } catch (e: kotlinx.coroutines.CancellationException) {
-            // Timeout from WebViewResolver — log and exit cleanly.
-            // This is a CancellationException, so we must NOT re-throw it
-            // in a way that would cancel the parent supervisor scope.
-            android.util.Log.e(TAG, "HgCloud CANCELLED (timeout): ${e.message}")
+            android.util.Log.e(
+                TAG,
+                "HgCloud CANCELLED after ${System.currentTimeMillis() - start}ms: ${e.message}"
+            )
         } catch (e: Throwable) {
-            android.util.Log.e(TAG, "HgCloud FAILED", e)
+            android.util.Log.e(
+                TAG,
+                "HgCloud FAILED after ${System.currentTimeMillis() - start}ms",
+                e
+            )
         }
     }
 }
