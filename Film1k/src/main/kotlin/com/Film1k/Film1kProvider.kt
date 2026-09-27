@@ -5,6 +5,7 @@ import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
 import org.json.JSONObject
@@ -450,9 +451,20 @@ class Film1kProvider : MainAPI() {
     // ------------------------------------------------------------------
     // loadLinks — orchestrates the full extraction pipeline
     //
-    // Uses supervisorScope so a timeout in one extractor does NOT cancel
-    // the others. Emits links immediately as they arrive so the user can
-    // start playing before slow extractors finish.
+    // CRITICAL DESIGN NOTES:
+    //
+    //  * Uses `supervisorScope` so a failure in one extractor does NOT
+    //    cancel the others.
+    //
+    //  * Collects every `launch { }` Job into a list and calls
+    //    `jobs.joinAll()` before checking the emitted count. Without this,
+    //    supervisorScope returns as soon as the block body completes,
+    //    causing `loadLinks` to return false BEFORE the extractors finish.
+    //    CloudStream then reports "no links found" even when extractors
+    //    successfully emitted links (observed in the 20:08:02 log).
+    //
+    //  * Emits each link immediately as it arrives so the user can start
+    //    playing as soon as the first extractor finishes.
     // ------------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
@@ -514,7 +526,8 @@ class Film1kProvider : MainAPI() {
 
         val embedUrls = mutableListOf<String>()
 
-        // Static extraction — skip film1k.xyz direct MP4 (redundant with m3u8)
+        // Static extraction — skip film1k.xyz direct MP4 (redundant with m3u8
+        // produced by Film1kExtractor) and skip self-referential hrefs.
         doc.select("#my-video > source").forEach { source ->
             val src = getImageUrl(source)
             if (!src.isNullOrBlank() &&
@@ -543,7 +556,8 @@ class Film1kProvider : MainAPI() {
             }
         }
 
-        // AJAX extraction for keys 0..3
+        // AJAX extraction for keys 0..3 — this is the confirmed server-list
+        // mechanism used by the theme's own player.
         if (postId != null) {
             val ajaxStart = System.currentTimeMillis()
             val ajaxResults = (0..3).map { key ->
@@ -574,7 +588,9 @@ class Film1kProvider : MainAPI() {
         android.util.Log.e(TAG, "loadLinks: total embedUrls=${embedUrls.size}")
         embedUrls.forEachIndexed { i, u -> android.util.Log.e(TAG, "  [$i] $u") }
 
-        embedUrls.forEach { videoUrl ->
+        // Launch every extractor as an independent job and keep the Job
+        // references so we can joinAll() them.
+        val jobs = embedUrls.map { videoUrl ->
             launch(Dispatchers.IO) {
                 val start = System.currentTimeMillis()
                 try {
@@ -598,7 +614,17 @@ class Film1kProvider : MainAPI() {
             }
         }
 
-        val subtitles = try { subtitleJob.await() } catch (e: Throwable) { emptyList() }
+        // *** CRITICAL *** Block until every launched extractor has either
+        // emitted a link or failed. Without joinAll(), supervisorScope would
+        // return immediately and loadLinks would report false prematurely.
+        jobs.joinAll()
+
+        val subtitles = try {
+            subtitleJob.await()
+        } catch (e: Throwable) {
+            android.util.Log.e(TAG, "subtitleJob await failed", e)
+            emptyList()
+        }
         subtitles.forEach { subtitleCallback(it) }
 
         val totalEmitted = emittedCount.get()
