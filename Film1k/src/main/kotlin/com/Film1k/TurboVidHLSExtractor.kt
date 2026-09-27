@@ -8,23 +8,12 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
 
-/**
- * TurboVidHLS (Option 3) extractor — CORRECTED.
- *
- * Previous approach (static regex for direct MP4) was WRONG because:
- *  - The MP4 URL (e08.etvp.cc/uploads/<code>.mp4) returns an error when
- *    opened without a Referer header.
- *  - The real stream is an HLS manifest (.m3u8) served from external CDNs
- *    such as b-hls-*.sacdnssedge.com and cdn3.turboviplay.com.
- *  - These M3U8 URLs are constructed at runtime by the JW Player.
- *
- * WebViewResolver executes the player's JavaScript and intercepts the
- * actual M3U8 request — the only reliable method.
- */
 class TurboVidHLSExtractor : ExtractorApi() {
     override var mainUrl = "https://turbovidhls.com"
     override var name = "TurboVidHLS"
     override val requiresReferer = true
+
+    private val TAG = "Film1kDebug"
 
     override suspend fun getUrl(
         url: String,
@@ -32,6 +21,7 @@ class TurboVidHLSExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
+        android.util.Log.d(TAG, "TurboVidHLS getUrl: $url")
         try {
             val resolver = WebViewResolver(
                 interceptUrl = Regex(
@@ -46,13 +36,20 @@ class TurboVidHLSExtractor : ExtractorApi() {
                 timeout = 60_000L
             )
 
-            val (interceptedRequest, _) = resolver.resolveUsingWebView(
+            val (interceptedRequest, extraRequests) = resolver.resolveUsingWebView(
                 url = url,
                 referer = referer ?: "$mainUrl/"
             )
 
-            val streamUrl = interceptedRequest?.url?.toString() ?: return
+            android.util.Log.d(TAG, "TurboVidHLS: intercepted=${interceptedRequest?.url} extras=${extraRequests.size}")
+
+            val streamUrl = interceptedRequest?.url?.toString() ?: run {
+                android.util.Log.w(TAG, "TurboVidHLS: no intercepted request")
+                return
+            }
             val isM3u8 = streamUrl.contains(".m3u8", ignoreCase = true)
+
+            android.util.Log.d(TAG, "TurboVidHLS: emitting $streamUrl")
 
             callback.invoke(
                 newExtractorLink(
@@ -66,7 +63,7 @@ class TurboVidHLSExtractor : ExtractorApi() {
                 }
             )
         } catch (e: Exception) {
-            // Fail silently
+            android.util.Log.e(TAG, "TurboVidHLS failed", e)
         }
     }
 }
