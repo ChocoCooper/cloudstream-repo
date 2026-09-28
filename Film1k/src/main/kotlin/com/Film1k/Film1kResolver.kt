@@ -2,6 +2,7 @@ package com.Film1k
 
 import com.lagradost.cloudstream3.app
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -16,10 +17,80 @@ import java.security.Signature
 import java.security.interfaces.ECPublicKey
 import java.security.spec.ECGenParameterSpec
 import java.util.Base64
+import java.util.concurrent.ConcurrentHashMap
 
 object Film1kResolver {
 
     private const val TAG = "Film1kDebug"
+
+    // ==================================================================
+    // 2.1 — Exponential-backoff retry helper
+    // ==================================================================
+    /**
+     * Retries the given suspend block up to [times] with exponential backoff.
+     *
+     * Returns the block's result, or null if every attempt threw.
+     * CancellationException is re-thrown immediately so coroutine cancellation
+     * (e.g. from a supervisor scope shutting down) is not swallowed.
+     */
+    suspend fun <T> retry(
+        times: Int = 3,
+        initialDelayMs: Long = 300,
+        block: suspend () -> T
+    ): T? {
+        var lastException: Throwable? = null
+        for (attempt in 0 until times) {
+            try {
+                return block()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                lastException = e
+                if (attempt < times - 1) {
+                    delay(initialDelayMs * (1L shl attempt))
+                }
+            }
+        }
+        if (lastException != null) {
+            android.util.Log.e(TAG, "retry: all $times attempts failed", lastException)
+        }
+        return null
+    }
+
+    // ==================================================================
+    // 1.2 — Details cache (pre-warmed by Film1kProvider.load())
+    // ==================================================================
+    private val detailsCache = ConcurrentHashMap<String, Pair<Long, String>>()
+    private const val DETAILS_TTL_MS = 60_000L
+
+    fun getCachedDetails(code: String): String? {
+        val entry = detailsCache[code] ?: return null
+        if (System.currentTimeMillis() - entry.first > DETAILS_TTL_MS) {
+            detailsCache.remove(code)
+            return null
+        }
+        return entry.second
+    }
+
+    fun putCachedDetails(code: String, text: String) {
+        detailsCache[code] = System.currentTimeMillis() to text
+    }
+
+    suspend fun prewarmDetails(code: String): String? {
+        getCachedDetails(code)?.let { return it }
+        return retry(times = 2, initialDelayMs = 400) {
+            val resp = app.get(
+                "https://film1k.xyz/api/videos/$code/embed/details",
+                verify = false
+            )
+            putCachedDetails(code, resp.text)
+            resp.text
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // HTTP helpers
+    // ---------------------------------------------------------------
 
     private fun b64UrlEncode(bytes: ByteArray): String =
         Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
@@ -57,7 +128,11 @@ object Film1kResolver {
         return fixedLength(r, 32) + fixedLength(s, 32)
     }
 
-    private data class Keypair(val privateKey: PrivateKey, val publicJwk: JSONObject, val sign: (String) -> String)
+    private data class Keypair(
+        val privateKey: PrivateKey,
+        val publicJwk: JSONObject,
+        val sign: (String) -> String
+    )
 
     private fun generateKeypair(): Keypair {
         val kpg = KeyPairGenerator.getInstance("EC")
@@ -147,20 +222,33 @@ object Film1kResolver {
             }
         }
 
-    suspend fun resolvePlayback(apiBaseUrl: String, embedParent: String, code: String, mode: String = "embed"): JSONObject? {
+    // ---------------------------------------------------------------
+    // Main flow
+    // ---------------------------------------------------------------
+
+    suspend fun resolvePlayback(
+        apiBaseUrl: String,
+        embedParent: String,
+        code: String,
+        mode: String = "embed"
+    ): JSONObject? {
         return try {
             val base = apiBaseUrl.trimEnd('/')
             val commonHeaders = mapOf("X-Embed-Parent" to embedParent)
 
             android.util.Log.e(TAG, "Resolver[1/4] settings GET $base/api/videos/$code/$mode/settings")
-            val captchaRequired = try {
-                val settingsResp = app.get("$base/api/videos/$code/$mode/settings", headers = commonHeaders, verify = false)
-                android.util.Log.e(TAG, "Resolver[1/4] settings status=${settingsResp.code} body=${settingsResp.text.take(300)}")
+
+            // 2.1 — retry the settings call (this is the one that timed out in your log)
+            val captchaRequired = retry(times = 3, initialDelayMs = 500) {
+                val settingsResp = app.get(
+                    "$base/api/videos/$code/$mode/settings",
+                    headers = commonHeaders,
+                    verify = false
+                )
+                android.util.Log.e(TAG, "Resolver[1/4] settings status=${settingsResp.code}")
                 JSONObject(settingsResp.text).optBoolean("captcha_required", false)
-            } catch (e: Exception) {
-                android.util.Log.e(TAG, "Resolver[1/4] settings FAILED", e)
-                true
-            }
+            } ?: true
+
             android.util.Log.e(TAG, "Resolver[1/4] captchaRequired=$captchaRequired")
 
             val keypair = generateKeypair()
@@ -204,8 +292,12 @@ object Film1kResolver {
                 android.util.Log.e(TAG, "Resolver[3/4] PoW difficulty=$powDifficulty nonce=$powNonce")
 
                 val t0 = System.currentTimeMillis()
+                // 1.4 — parallel PoW (suspend)
                 val solution = Film1kCrypto.solvePow(powNonce, powDifficulty, timeoutMs = 30_000L)
-                android.util.Log.e(TAG, "Resolver[3/4] PoW solution=$solution elapsed=${System.currentTimeMillis() - t0}ms")
+                android.util.Log.e(
+                    TAG,
+                    "Resolver[3/4] PoW solution=$solution elapsed=${System.currentTimeMillis() - t0}ms"
+                )
                 if (solution == null) {
                     android.util.Log.e(TAG, "Resolver[3/4] PoW TIMEOUT — aborting")
                     return null
@@ -220,12 +312,14 @@ object Film1kResolver {
                     },
                     commonHeaders
                 )
-                android.util.Log.e(TAG, "Resolver[3/4] verify status=${verifyResp.optString("status")} body=${verifyResp.toString().take(200)}")
+                android.util.Log.e(TAG, "Resolver[3/4] verify status=${verifyResp.optString("status")}")
                 if (verifyResp.optString("status") != "ok") return null
                 captchaToken = verifyResp.getString("token")
             }
 
-            val playbackHeaders = commonHeaders + if (captchaToken != null) mapOf("X-Captcha-Token" to captchaToken) else emptyMap()
+            val playbackHeaders = commonHeaders + if (captchaToken != null) {
+                mapOf("X-Captcha-Token" to captchaToken)
+            } else emptyMap()
             val playbackResp = postJson(
                 "$base/api/videos/$code/$mode/playback",
                 JSONObject().apply { put("fingerprint", fingerprint) },
@@ -234,10 +328,12 @@ object Film1kResolver {
 
             val pb = playbackResp.getJSONObject("playback")
             val version = pb.getString("version")
-            val keyParts = pb.getJSONArray("key_parts").let { arr -> (0 until arr.length()).map { arr.getString(it) } }
+            val keyParts = pb.getJSONArray("key_parts").let { arr ->
+                (0 until arr.length()).map { arr.getString(it) }
+            }
             val iv = pb.getString("iv")
             val payload = pb.getString("payload")
-            android.util.Log.e(TAG, "Resolver[4/4] playback version=$version keyParts=${keyParts.size} iv=${iv.take(16)}...")
+            android.util.Log.e(TAG, "Resolver[4/4] playback version=$version keyParts=${keyParts.size}")
 
             val decryptedJson = Film1kCrypto.decryptPlayback(version, keyParts, iv, payload)
             android.util.Log.e(TAG, "Resolver[4/4] decrypt OK (${decryptedJson.length} chars)")
