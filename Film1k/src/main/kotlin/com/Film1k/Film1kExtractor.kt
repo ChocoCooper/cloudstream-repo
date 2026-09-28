@@ -24,41 +24,51 @@ class Film1kExtractor : ExtractorApi() {
         callback: (ExtractorLink) -> Unit
     ) {
         try {
-            android.util.Log.e(TAG, "Film1kExtractor.getUrl: $url")
+            android.util.Log.e(TAG, "Film1k getUrl: $url")
             val code = Regex("""/e/([a-zA-Z0-9]+)""").find(url)?.groupValues?.get(1) ?: run {
-                android.util.Log.e(TAG, "Film1kExtractor: NO CODE in URL")
+                android.util.Log.w(TAG, "Film1k: no code in URL")
                 return
             }
             val embedParent = "https://film1k.xyz/e/$code"
 
-            val detailsResp = app.get(
-                "https://film1k.xyz/api/videos/$code/embed/details",
-                referer = embedParent,
-                verify = false
-            )
-            android.util.Log.e(TAG, "Film1kExtractor details status=${detailsResp.code} body=${detailsResp.text.take(300)}")
-            val details = JSONObject(detailsResp.text)
+            // 1.2 — read from cache if provider pre-warmed it, else fetch with retry
+            val detailsText = Film1kResolver.getCachedDetails(code) ?: run {
+                val resp = Film1kResolver.retry(times = 3, initialDelayMs = 500) {
+                    app.get(
+                        "https://film1k.xyz/api/videos/$code/embed/details",
+                        referer = embedParent,
+                        verify = false
+                    )
+                } ?: run {
+                    android.util.Log.e(TAG, "Film1k: details fetch failed after retries")
+                    return
+                }
+                Film1kResolver.putCachedDetails(code, resp.text)
+                resp.text
+            }
+            android.util.Log.e(TAG, "Film1k: details resolved (${detailsText.length} chars)")
+
+            val details = JSONObject(detailsText)
             val embedFrameUrl = details.getString("embed_frame_url")
             val uri = URI(embedFrameUrl)
             val apiBase = "${uri.scheme}://${uri.host}"
-            android.util.Log.e(TAG, "Film1kExtractor apiBase=$apiBase")
+            android.util.Log.e(TAG, "Film1k: apiBase=$apiBase")
 
             val decrypted = Film1kResolver.resolvePlayback(apiBase, embedParent, code) ?: run {
-                android.util.Log.e(TAG, "Film1kExtractor: resolvePlayback returned null")
+                android.util.Log.w(TAG, "Film1k: resolvePlayback returned null")
                 return
             }
             val sources = decrypted.optJSONArray("sources") ?: run {
-                android.util.Log.e(TAG, "Film1kExtractor: no 'sources' in decrypted JSON")
+                android.util.Log.w(TAG, "Film1k: no sources in decrypted payload")
                 return
             }
-            android.util.Log.e(TAG, "Film1kExtractor: found ${sources.length()} sources")
 
             for (i in 0 until sources.length()) {
                 val src = sources.getJSONObject(i)
                 val streamUrl = src.optString("url").takeIf { it.isNotBlank() } ?: continue
                 val mimeType = src.optString("mime_type")
                 val isM3u8 = streamUrl.contains(".m3u8") || mimeType.contains("mpegurl")
-                android.util.Log.e(TAG, "Film1kExtractor emitting: $streamUrl")
+                android.util.Log.e(TAG, "Film1k: emitting $streamUrl (m3u8=$isM3u8)")
 
                 callback.invoke(
                     newExtractorLink(
@@ -83,7 +93,7 @@ class Film1kExtractor : ExtractorApi() {
                 }
             }
         } catch (e: Exception) {
-            android.util.Log.e(TAG, "Film1kExtractor FAILED", e)
+            android.util.Log.e(TAG, "Film1k extractor failed", e)
         }
     }
 }
