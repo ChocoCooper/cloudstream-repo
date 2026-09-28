@@ -3,8 +3,13 @@ package com.Film1k
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
 import com.lagradost.cloudstream3.utils.AppUtils.tryParseJson
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.supervisorScope
@@ -12,7 +17,9 @@ import org.json.JSONObject
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import org.jsoup.nodes.TextNode
+import java.net.URI
 import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
 // --- Cinemeta Data Classes ---
@@ -65,6 +72,28 @@ class Film1kProvider : MainAPI() {
 
     private val TAG = "Film1kDebug"
 
+    // ==================================================================
+    // TOGGLE FLAGS
+    // ==================================================================
+    private val ENABLE_HGCLOUD = false
+
+    // ==================================================================
+    // CACHES & STATE (companion so they live for the process lifetime)
+    // ==================================================================
+    companion object {
+        // 1.3 — Persistent (session) Cinemeta cache
+        private val cinemetaCache = ConcurrentHashMap<String, CinemetaMeta>()
+
+        // 1.2 — Fire-and-forget scope for pre-warming
+        private val prewarmScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+        // 2.2 — Dead-host tracking
+        private class HostFailure(var count: Int, var lastFailureMs: Long)
+        private val deadHosts = ConcurrentHashMap<String, HostFailure>()
+        private const val DEAD_HOST_THRESHOLD = 3
+        private const val DEAD_HOST_TTL_MS = 5 * 60 * 1000L
+    }
+
     private val cinemetaBaseUrl = "https://v3-cinemeta.strem.io/meta/movie"
     private val openSubtitlesBaseUrl = "https://opensubtitles-v3.strem.io/subtitles/movie"
     private val openSubtitlesMaxResults = 10
@@ -88,6 +117,10 @@ class Film1kProvider : MainAPI() {
         "full movie online|movie poster watch online|watch movie online|watch tv online|watch series online|movie poster|watch online|film1k",
         RegexOption.IGNORE_CASE
     )
+
+    // ------------------------------------------------------------------
+    // Helpers
+    // ------------------------------------------------------------------
 
     private fun cleanTitle(raw: String): String {
         return raw
@@ -125,17 +158,64 @@ class Film1kProvider : MainAPI() {
         }
     }
 
+    // 2.2 — Dead host tracking
+    private fun getHost(url: String): String? = try {
+        URI(url).host
+    } catch (_: Throwable) {
+        null
+    }
+
+    private fun isHostDead(url: String): Boolean {
+        val host = getHost(url) ?: return false
+        val failure = deadHosts[host] ?: return false
+        if (System.currentTimeMillis() - failure.lastFailureMs > DEAD_HOST_TTL_MS) {
+            deadHosts.remove(host)
+            return false
+        }
+        return failure.count >= DEAD_HOST_THRESHOLD
+    }
+
+    private fun markHostFailure(url: String) {
+        val host = getHost(url) ?: return
+        val now = System.currentTimeMillis()
+        deadHosts.compute(host) { _, existing ->
+            if (existing == null) HostFailure(1, now)
+            else {
+                existing.count += 1
+                existing.lastFailureMs = now
+                existing
+            }
+        }
+        val count = deadHosts[host]?.count ?: 0
+        if (count >= DEAD_HOST_THRESHOLD) {
+            android.util.Log.e(TAG, "markHostFailure: $host marked DEAD (count=$count)")
+        }
+    }
+
+    private fun markHostSuccess(url: String) {
+        getHost(url)?.let {
+            deadHosts.remove(it)
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Homepage & search
+    // ------------------------------------------------------------------
+
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val url = "${request.data}&page=$page"
         android.util.Log.e(TAG, "getMainPage URL: $url")
-        val responseText = try {
+
+        // 2.1 — retry on transient network failures
+        val responseText = Film1kResolver.retry(times = 3, initialDelayMs = 500) {
             val r = app.get(url, headers = browserHeaders, verify = false)
             android.util.Log.e(TAG, "getMainPage status=${r.code} len=${r.text.length}")
             r.text
-        } catch (e: Exception) {
-            android.util.Log.e(TAG, "getMainPage FAILED", e)
+        } ?: run {
+            android.util.Log.e(TAG, "getMainPage FAILED after retries")
             return newHomePageResponse(emptyList())
         }
+
         val wpPosts = tryParseJson<List<WpPost>>(responseText) ?: run {
             android.util.Log.e(TAG, "getMainPage: JSON parse returned null")
             return newHomePageResponse(emptyList())
@@ -151,62 +231,77 @@ class Film1kProvider : MainAPI() {
     override suspend fun search(query: String): List<SearchResponse> {
         val apiUrl = "$mainUrl/wp-json/wp/v2/posts?search=$query&per_page=15&orderby=relevance"
         android.util.Log.e(TAG, "search URL: $apiUrl")
-        val responseText = try {
+
+        // 2.1 — retry (this was the exact call that timed out in your log)
+        val responseText = Film1kResolver.retry(times = 3, initialDelayMs = 500) {
             app.get(apiUrl, headers = browserHeaders, verify = false).text
-        } catch (e: Exception) {
-            android.util.Log.e(TAG, "search FAILED", e)
+        } ?: run {
+            android.util.Log.e(TAG, "search FAILED after retries")
             return emptyList()
         }
+
         val wpPosts = tryParseJson<List<WpPost>>(responseText) ?: return emptyList()
         return parseWpPosts(wpPosts)
     }
 
-    private fun parseWpPosts(wpPosts: List<WpPost>): List<SearchResponse> {
-        return wpPosts.take(8).mapNotNull { post ->
-            val mediaUrl = post.link?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
-            val rawName = post.title?.rendered ?: return@mapNotNull null
-            val mediaName = cleanTitle(rawName)
+    private suspend fun parseWpPosts(wpPosts: List<WpPost>): List<SearchResponse> = coroutineScope {
+        wpPosts.take(8).map { post ->
+            async(Dispatchers.IO) {
+                try {
+                    val mediaUrl = post.link?.takeIf { it.isNotBlank() } ?: return@async null
+                    val rawName = post.title?.rendered ?: return@async null
+                    val siteTitle = cleanTitle(rawName)
 
-            val imdbId = post.content?.rendered?.let { html ->
-                Regex("imdb\\.com/title/(tt\\d+)").find(html)?.groupValues?.get(1)
-                    ?: Regex("tt\\d{7,8}").find(html)?.value
+                    val imdbId = post.content?.rendered?.let { html ->
+                        Regex("imdb\\.com/title/(tt\\d+)").find(html)?.groupValues?.get(1)
+                            ?: Regex("tt\\d{7,8}").find(html)?.value
+                    }
+
+                    val cinemeta = if (imdbId != null) fetchCinemetaData(imdbId) else null
+                    val finalTitle = cinemeta?.name?.takeIf { it.isNotBlank() } ?: siteTitle
+
+                    val cinemetaPosterUrl = imdbId?.let {
+                        "https://images.metahub.space/poster/medium/$it/img"
+                    }
+                    val wpPosterUrl = post.meta?.fifu_image_url?.takeIf { it.isNotBlank() }
+                        ?: post.content?.rendered?.let { html ->
+                            Regex("src=\"([^\"]+)\"").find(html)?.groupValues?.get(1)
+                        }?.let { fixUrl(it) }
+
+                    val finalPosterUrl = cinemetaPosterUrl ?: wpPosterUrl
+                    val yearInt = cinemeta?.year?.toIntOrNull()
+                        ?: Regex("\\((\\d{4})\\)").find(rawName)?.groupValues?.get(1)?.toIntOrNull()
+
+                    newMovieSearchResponse(finalTitle, mediaUrl, TvType.NSFW) {
+                        this.posterUrl = finalPosterUrl
+                        this.year = yearInt
+                    }
+                } catch (e: Throwable) {
+                    android.util.Log.e(TAG, "parseWpPosts: entry FAILED", e)
+                    null
+                }
             }
-
-            val cinemetaPosterUrl = imdbId?.let {
-                "https://images.metahub.space/poster/medium/$it/img"
-            }
-
-            val wpPosterUrl = post.meta?.fifu_image_url?.takeIf { it.isNotBlank() }
-                ?: post.content?.rendered?.let { html ->
-                    Regex("src=\"([^\"]+)\"").find(html)?.groupValues?.get(1)
-                }?.let { fixUrl(it) }
-
-            val finalPosterUrl = cinemetaPosterUrl ?: wpPosterUrl
-            val yearInt = Regex("\\((\\d{4})\\)").find(rawName)?.groupValues?.get(1)?.toIntOrNull()
-
-            newMovieSearchResponse(mediaName, mediaUrl, TvType.NSFW) {
-                this.posterUrl = finalPosterUrl
-                this.year = yearInt
-            }
-        }
+        }.awaitAll().filterNotNull()
     }
 
+    // ------------------------------------------------------------------
+    // Cinemeta — 1.3 in-memory cache + 2.1 retry
+    // ------------------------------------------------------------------
     private suspend fun fetchCinemetaData(imdbId: String): CinemetaMeta? {
-        return try {
+        cinemetaCache[imdbId]?.let { return it }
+        val result = Film1kResolver.retry(times = 3, initialDelayMs = 400) {
             val responseText = app.get("$cinemetaBaseUrl/$imdbId.json", cacheTime = 1440).text
             tryParseJson<CinemetaResponse>(responseText)?.meta
-        } catch (e: Exception) {
-            null
         }
+        if (result != null) cinemetaCache[imdbId] = result
+        return result
     }
 
     private suspend fun fetchOpenSubtitles(imdbId: String): List<SubtitleFile> {
         val requestUrl = "$openSubtitlesBaseUrl/$imdbId.json"
-        val responseText = try {
+        val responseText = Film1kResolver.retry(times = 2, initialDelayMs = 400) {
             app.get(requestUrl, cacheTime = 1440).text
-        } catch (e: Exception) {
-            return emptyList()
-        }
+        } ?: return emptyList()
         val parsed = tryParseJson<StremioSubtitlesResponse>(responseText) ?: return emptyList()
         return parsed.subtitles
             ?.filter { it.lang.equals("eng", ignoreCase = true) || it.lang.equals("en", ignoreCase = true) }
@@ -220,8 +315,30 @@ class Film1kProvider : MainAPI() {
             ?: emptyList()
     }
 
+    // ------------------------------------------------------------------
+    // Detail page — includes 1.2 pre-warm
+    // ------------------------------------------------------------------
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url, headers = browserHeaders, verify = false, cacheTime = 1440).document
+
+        // 1.2 — fire-and-forget pre-warm of the Film1k resolver details cache.
+        // Find the film1k.xyz embed code from the static HTML (present as
+        // `<source src="https://film1k.xyz/e/<code>/...">`). The details fetch
+        // takes ~500 ms; by the time the user clicks Play, the cache is warm.
+        val embedCode = Regex("""film1k\.xyz/e/([a-zA-Z0-9]+)""")
+            .find(doc.html())?.groupValues?.get(1)
+        if (embedCode != null) {
+            android.util.Log.e(TAG, "load: pre-warming Film1k details for code=$embedCode")
+            prewarmScope.launch {
+                try {
+                    Film1kResolver.prewarmDetails(embedCode)
+                    android.util.Log.e(TAG, "load: pre-warm complete for code=$embedCode")
+                } catch (_: Throwable) {
+                    // ignore — pre-warm is best-effort
+                }
+            }
+        }
+
         val manualPosterUrl = extractDetailPoster(doc)?.let { fixUrl(it) }
 
         val manualRawName = doc.selectFirst("#Ez-Wp > div > div.Container > div > aside > div > div > img")?.attr("alt")?.takeIf { it.isNotBlank() }
@@ -329,24 +446,32 @@ class Film1kProvider : MainAPI() {
         }
     }
 
+    // ------------------------------------------------------------------
+    // AJAX — 2.1 retry
+    // ------------------------------------------------------------------
     private suspend fun fetchServerEmbed(postId: String, key: Int, referer: String): String? {
         return try {
-            val r = app.post(
-                ajaxUrl,
-                data = mapOf(
-                    "action" to "action_change_player_eroz",
-                    "ide" to postId,
-                    "key" to key.toString()
-                ),
-                headers = browserHeaders + mapOf(
-                    "X-Requested-With" to "XMLHttpRequest",
-                    "Origin" to mainUrl,
-                    "Accept" to "application/json, text/javascript, */*; q=0.01",
-                    "Content-Type" to "application/x-www-form-urlencoded; charset=UTF-8"
-                ),
-                referer = referer,
-                verify = false
-            )
+            val r = Film1kResolver.retry(times = 2, initialDelayMs = 400) {
+                app.post(
+                    ajaxUrl,
+                    data = mapOf(
+                        "action" to "action_change_player_eroz",
+                        "ide" to postId,
+                        "key" to key.toString()
+                    ),
+                    headers = browserHeaders + mapOf(
+                        "X-Requested-With" to "XMLHttpRequest",
+                        "Origin" to mainUrl,
+                        "Accept" to "application/json, text/javascript, */*; q=0.01",
+                        "Content-Type" to "application/x-www-form-urlencoded; charset=UTF-8"
+                    ),
+                    referer = referer,
+                    verify = false
+                )
+            } ?: run {
+                android.util.Log.e(TAG, "AJAX key=$key failed after retries")
+                return null
+            }
 
             android.util.Log.e(TAG, "AJAX key=$key status=${r.code} len=${r.text.length}")
 
@@ -370,93 +495,99 @@ class Film1kProvider : MainAPI() {
         }
     }
 
+    // ------------------------------------------------------------------
+    // Router — 2.2 dead host tracking
+    // ------------------------------------------------------------------
     private suspend fun routeToExtractor(
         embedUrl: String,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        // Specific handlers first
-        when {
-            embedUrl.contains("film1k.xyz") && embedUrl.contains("/e/") -> {
-                android.util.Log.e(TAG, "Route → Film1k: $embedUrl")
-                try {
-                    Film1kExtractor().getUrl(embedUrl, mainUrl, subtitleCallback, callback)
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    android.util.Log.e(TAG, "Film1k CANCELLED: ${e.message}")
-                } catch (e: Throwable) {
-                    android.util.Log.e(TAG, "Film1k FAILED", e)
-                }
-                return
-            }
-            embedUrl.contains("turbovidhls.com") -> {
-                android.util.Log.e(TAG, "Route → TurboVid: $embedUrl")
-                try {
-                    TurboVidHLSExtractor().getUrl(embedUrl, mainUrl, subtitleCallback, callback)
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    android.util.Log.e(TAG, "TurboVid CANCELLED: ${e.message}")
-                } catch (e: Throwable) {
-                    android.util.Log.e(TAG, "TurboVid FAILED", e)
-                }
-                return
-            }
-            embedUrl.contains("hgcloud.to") -> {
-                android.util.Log.e(TAG, "Route → HgCloud: $embedUrl")
-                try {
-                    HgCloudExtractor().getUrl(embedUrl, mainUrl, subtitleCallback, callback)
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    android.util.Log.e(TAG, "HgCloud CANCELLED: ${e.message}")
-                } catch (e: Throwable) {
-                    android.util.Log.e(TAG, "HgCloud FAILED", e)
-                }
-                return
-            }
-            embedUrl.contains("abyssplayer.com") -> {
-                android.util.Log.e(TAG, "Route → Abyss SKIPPED: $embedUrl")
-                return
-            }
-        }
-
-        // STRICT direct-media detection
-        val lower = embedUrl.lowercase()
-        val hasEmbedMarker =
-            lower.contains("/e/") ||
-            lower.contains("/embed/") ||
-            lower.contains("/v/") ||
-            lower.contains("?v=") ||
-            lower.contains("/player") ||
-            lower.contains("/watch")
-
-        val endsWithMediaExt =
-            lower.contains(".mp4") || lower.contains(".m3u8")
-
-        if (embedUrl.startsWith("http") && endsWithMediaExt && !hasEmbedMarker) {
-            android.util.Log.e(TAG, "Route → Direct media: $embedUrl")
-            callback.invoke(
-                newExtractorLink(
-                    name = "Direct",
-                    source = "Direct",
-                    url = embedUrl,
-                    type = if (lower.contains(".m3u8"))
-                        ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                ) {
-                    this.referer = mainUrl
-                    this.quality = Qualities.Unknown.value
-                }
-            )
+        // 2.2 — short-circuit known-dead hosts
+        if (isHostDead(embedUrl)) {
+            android.util.Log.e(TAG, "Route → SKIPPED (dead host): $embedUrl")
             return
         }
 
-        // Generic WebView fallback
-        android.util.Log.e(TAG, "Route → GenericEmbed: $embedUrl")
+        // Track whether the extractor produces any links for host health
+        val emitted = AtomicInteger(0)
+        val wrappedCallback: (ExtractorLink) -> Unit = { link ->
+            emitted.incrementAndGet()
+            callback.invoke(link)
+        }
+
         try {
-            GenericEmbedExtractor().getUrl(embedUrl, mainUrl, subtitleCallback, callback)
+            when {
+                embedUrl.contains("film1k.xyz") && embedUrl.contains("/e/") -> {
+                    android.util.Log.e(TAG, "Route → Film1k: $embedUrl")
+                    Film1kExtractor().getUrl(embedUrl, mainUrl, subtitleCallback, wrappedCallback)
+                }
+                embedUrl.contains("turbovidhls.com") -> {
+                    android.util.Log.e(TAG, "Route → TurboVid: $embedUrl")
+                    TurboVidHLSExtractor().getUrl(embedUrl, mainUrl, subtitleCallback, wrappedCallback)
+                }
+                embedUrl.contains("hgcloud.to") -> {
+                    if (!ENABLE_HGCLOUD) {
+                        android.util.Log.e(TAG, "Route → HgCloud SKIPPED (disabled): $embedUrl")
+                        return
+                    }
+                    android.util.Log.e(TAG, "Route → HgCloud: $embedUrl")
+                    HgCloudExtractor().getUrl(embedUrl, mainUrl, subtitleCallback, wrappedCallback)
+                }
+                embedUrl.contains("abyssplayer.com") -> {
+                    android.util.Log.e(TAG, "Route → Abyss SKIPPED: $embedUrl")
+                    return
+                }
+                else -> {
+                    // Strict direct-media detection
+                    val lower = embedUrl.lowercase()
+                    val hasEmbedMarker =
+                        lower.contains("/e/") ||
+                        lower.contains("/embed/") ||
+                        lower.contains("/v/") ||
+                        lower.contains("?v=") ||
+                        lower.contains("/player") ||
+                        lower.contains("/watch")
+                    val endsWithMediaExt = lower.contains(".mp4") || lower.contains(".m3u8")
+
+                    if (embedUrl.startsWith("http") && endsWithMediaExt && !hasEmbedMarker) {
+                        android.util.Log.e(TAG, "Route → Direct media: $embedUrl")
+                        callback.invoke(
+                            newExtractorLink(
+                                name = "Direct",
+                                source = "Direct",
+                                url = embedUrl,
+                                type = if (lower.contains(".m3u8"))
+                                    ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                            ) {
+                                this.referer = mainUrl
+                                this.quality = Qualities.Unknown.value
+                            }
+                        )
+                        emitted.incrementAndGet()
+                    } else {
+                        android.util.Log.e(TAG, "Route → GenericEmbed: $embedUrl")
+                        GenericEmbedExtractor().getUrl(embedUrl, mainUrl, subtitleCallback, wrappedCallback)
+                    }
+                }
+            }
         } catch (e: kotlinx.coroutines.CancellationException) {
-            android.util.Log.e(TAG, "GenericEmbed CANCELLED: ${e.message}")
+            throw e
         } catch (e: Throwable) {
-            android.util.Log.e(TAG, "GenericEmbed FAILED", e)
+            android.util.Log.e(TAG, "routeToExtractor FAILED for $embedUrl", e)
+        }
+
+        // 2.2 — update host health
+        if (emitted.get() > 0) {
+            markHostSuccess(embedUrl)
+        } else {
+            markHostFailure(embedUrl)
         }
     }
 
+    // ------------------------------------------------------------------
+    // loadLinks — 1.1 interleaved routing (static starts before AJAX finishes)
+    // ------------------------------------------------------------------
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -515,10 +646,19 @@ class Film1kProvider : MainAPI() {
             ?: Regex("""data-ide=["'](\d+)["']""").find(doc.html())?.groupValues?.get(1)
         android.util.Log.e(TAG, "loadLinks: postId=$postId")
 
-        val embedUrls = mutableListOf<String>()
+        // 1.1 — Fire AJAX immediately, but don't await it yet
+        val ajaxDeferred = if (postId != null) {
+            (0..3).map { key ->
+                async(Dispatchers.IO) { key to fetchServerEmbed(postId, key, data) }
+            }
+        } else {
+            android.util.Log.e(TAG, "loadLinks: NO postId — AJAX skipped")
+            emptyList()
+        }
 
-        // Static extraction — skip film1k.xyz direct MP4 (redundant with m3u8
-        // produced by Film1kExtractor) and skip self-referential hrefs.
+        // 1.1 — Start routing static URLs right away, in parallel with AJAX
+        val staticRoutingJobs = mutableListOf<Job>()
+
         doc.select("#my-video > source").forEach { source ->
             val src = getImageUrl(source)
             if (!src.isNullOrBlank() &&
@@ -527,10 +667,12 @@ class Film1kProvider : MainAPI() {
                 !(src.contains("film1k.xyz") && src.endsWith(".mp4"))
             ) {
                 val fixed = fixUrl(src)
-                if (!embedUrls.contains(fixed)) {
-                    embedUrls.add(fixed)
-                    android.util.Log.e(TAG, "static <source>: $fixed")
-                }
+                android.util.Log.e(TAG, "static <source>: $fixed")
+                staticRoutingJobs.add(
+                    launch(Dispatchers.IO) {
+                        routeToExtractor(fixed, subtitleCallback, emittingCallback)
+                    }
+                )
             }
         }
         doc.select("#video-op-a > div > iframe").forEach { iframe ->
@@ -540,70 +682,41 @@ class Film1kProvider : MainAPI() {
                 !src.contains("about:blank")
             ) {
                 val fixed = fixUrl(src)
-                if (!embedUrls.contains(fixed)) {
-                    embedUrls.add(fixed)
-                    android.util.Log.e(TAG, "static <iframe>: $fixed")
-                }
+                android.util.Log.e(TAG, "static <iframe>: $fixed")
+                staticRoutingJobs.add(
+                    launch(Dispatchers.IO) {
+                        routeToExtractor(fixed, subtitleCallback, emittingCallback)
+                    }
+                )
             }
         }
 
-        // AJAX extraction for keys 0..3 — this is the confirmed server-list
-        // mechanism used by the theme's own player.
-        if (postId != null) {
-            val ajaxStart = System.currentTimeMillis()
-            val ajaxResults = (0..3).map { key ->
-                async(Dispatchers.IO) { key to fetchServerEmbed(postId, key, data) }
-            }.mapNotNull { deferred ->
-                try {
-                    deferred.await()
-                } catch (e: Throwable) {
-                    android.util.Log.e(TAG, "AJAX await failed", e)
-                    null
-                }
-            }
-            android.util.Log.e(
-                TAG,
-                "loadLinks: AJAX complete in ${System.currentTimeMillis() - ajaxStart}ms"
-            )
-
-            ajaxResults.forEach { (key, url) ->
-                if (url != null && url.startsWith("http") && !embedUrls.contains(url)) {
-                    embedUrls.add(url)
-                    android.util.Log.e(TAG, "loadLinks: AJAX key=$key added $url")
-                }
-            }
-        } else {
-            android.util.Log.e(TAG, "loadLinks: NO postId — AJAX skipped")
-        }
-
-        android.util.Log.e(TAG, "loadLinks: total embedUrls=${embedUrls.size}")
-        embedUrls.forEachIndexed { i, u -> android.util.Log.e(TAG, "  [$i] $u") }
-
-        val jobs = embedUrls.map { videoUrl ->
-            launch(Dispatchers.IO) {
-                val start = System.currentTimeMillis()
-                try {
-                    routeToExtractor(videoUrl, subtitleCallback, emittingCallback)
-                    android.util.Log.e(
-                        TAG,
-                        "route DONE for $videoUrl in ${System.currentTimeMillis() - start}ms"
-                    )
-                } catch (e: kotlinx.coroutines.CancellationException) {
-                    android.util.Log.e(
-                        TAG,
-                        "route CANCELLED for $videoUrl after ${System.currentTimeMillis() - start}ms: ${e.message}"
-                    )
-                } catch (e: Throwable) {
-                    android.util.Log.e(
-                        TAG,
-                        "route FAILED for $videoUrl after ${System.currentTimeMillis() - start}ms",
-                        e
-                    )
-                }
+        // Now await AJAX results (they've been running in parallel)
+        val ajaxStart = System.currentTimeMillis()
+        val ajaxResults = ajaxDeferred.mapNotNull { deferred ->
+            try {
+                deferred.await()
+            } catch (e: Throwable) {
+                android.util.Log.e(TAG, "AJAX await failed", e)
+                null
             }
         }
+        android.util.Log.e(
+            TAG,
+            "loadLinks: AJAX complete in ${System.currentTimeMillis() - ajaxStart}ms"
+        )
 
-        jobs.joinAll()
+        val ajaxRoutingJobs = ajaxResults.mapNotNull { (key, url) ->
+            if (url != null && url.startsWith("http")) {
+                android.util.Log.e(TAG, "loadLinks: AJAX key=$key routing $url")
+                launch(Dispatchers.IO) {
+                    routeToExtractor(url, subtitleCallback, emittingCallback)
+                }
+            } else null
+        }
+
+        // Wait for all extractors
+        (staticRoutingJobs + ajaxRoutingJobs).joinAll()
 
         val subtitles = try {
             subtitleJob.await()
