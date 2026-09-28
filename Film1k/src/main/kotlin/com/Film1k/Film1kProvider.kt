@@ -73,11 +73,6 @@ class Film1kProvider : MainAPI() {
     private val TAG = "Film1kDebug"
 
     // ==================================================================
-    // TOGGLE FLAGS
-    // ==================================================================
-    private val ENABLE_HGCLOUD = false
-
-    // ==================================================================
     // CACHES & STATE (companion so they live for the process lifetime)
     // ==================================================================
     companion object {
@@ -322,9 +317,6 @@ class Film1kProvider : MainAPI() {
         val doc = app.get(url, headers = browserHeaders, verify = false, cacheTime = 1440).document
 
         // 1.2 — fire-and-forget pre-warm of the Film1k resolver details cache.
-        // Find the film1k.xyz embed code from the static HTML (present as
-        // `<source src="https://film1k.xyz/e/<code>/...">`). The details fetch
-        // takes ~500 ms; by the time the user clicks Play, the cache is warm.
         val embedCode = Regex("""film1k\.xyz/e/([a-zA-Z0-9]+)""")
             .find(doc.html())?.groupValues?.get(1)
         if (embedCode != null) {
@@ -525,14 +517,6 @@ class Film1kProvider : MainAPI() {
                 embedUrl.contains("turbovidhls.com") -> {
                     android.util.Log.e(TAG, "Route → TurboVid: $embedUrl")
                     TurboVidHLSExtractor().getUrl(embedUrl, mainUrl, subtitleCallback, wrappedCallback)
-                }
-                embedUrl.contains("hgcloud.to") -> {
-                    if (!ENABLE_HGCLOUD) {
-                        android.util.Log.e(TAG, "Route → HgCloud SKIPPED (disabled): $embedUrl")
-                        return
-                    }
-                    android.util.Log.e(TAG, "Route → HgCloud: $embedUrl")
-                    HgCloudExtractor().getUrl(embedUrl, mainUrl, subtitleCallback, wrappedCallback)
                 }
                 embedUrl.contains("abyssplayer.com") -> {
                     android.util.Log.e(TAG, "Route → Abyss SKIPPED: $embedUrl")
