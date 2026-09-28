@@ -10,7 +10,6 @@ class Film1kPlugin : Plugin() {
         registerMainAPI(Film1kProvider())
         registerExtractorAPI(Film1kExtractor())
         registerExtractorAPI(TurboVidHLSExtractor())
-        registerExtractorAPI(HgCloudExtractor())
         registerExtractorAPI(GenericEmbedExtractor())
     }
 }
