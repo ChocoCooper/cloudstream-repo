@@ -1,9 +1,12 @@
 package com.tamilbulb
 
-import com.lagradost.cloudstream3.*
+import com.lagradost.cloudstream3.SubtitleFile
+import com.lagradost.cloudstream3.app
+import com.lagradost.cloudstream3.utils.ExtractorApi
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.newExtractorLink
 import org.json.JSONObject
 import java.util.Base64
 import javax.crypto.Cipher
@@ -34,29 +37,32 @@ class N1mwqExtractor : ExtractorApi() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        // URL forms: https://byseraguci.com/e/<code>
-        //            https://filemoon.to/e/<code>
-        //            https://n1mwq.org/<random>/<code>
+        // URL forms:
+        //   https://byseraguci.com/e/<code>
+        //   https://filemoon.to/e/<code>
+        //   https://n1mwq.org/<random>/<code>
         val code = url.trimEnd('/').substringAfterLast('/')
         if (code.isBlank()) return
 
         val headers = mapOf(
             "User-Agent" to ua,
-            "Referer"    to (referer ?: "https://tamilbulb.cc/")
+            "Referer"    to (referer ?: "https://tamilbulb.cc/"),
+            "Accept"     to "application/json"
         )
 
-        // 1. Ask the SPA's own API for the encrypted playback envelope
+        // 1. Fetch encrypted playback envelope from the SPA's API
         val api = "https://n1mwq.org/api/videos/$code"
         val raw = app.get(api, headers = headers).text
         val root = JSONObject(raw)
         val pb   = root.optJSONObject("playback") ?: root
 
-        val version  = pb.optString("version")
-        val ivB64    = pb.optString("iv")
-        val ctB64    = pb.optString("payload")
-        val kpArr    = pb.optJSONArray("key_parts") ?: return
+        val version = pb.optString("version")
+        val ivB64   = pb.optString("iv")
+        val ctB64   = pb.optString("payload")
+        val kpArr   = pb.optJSONArray("key_parts") ?: return
 
-        // 2. Derive the AES-256 key: key_parts[v-1] || key_parts[(31-v)-1]
+        // 2. Key derivation (from Qa/Ea in the JS bundle):
+        //    for version V, key = base64url(key_parts[V-1]) || base64url(key_parts[(31-V)-1])
         val v = version.toIntOrNull() ?: return
         if (v < 1 || v > 20) return
         val b = 31 - v
@@ -76,7 +82,7 @@ class N1mwqExtractor : ExtractorApi() {
         )
         val plain = cipher.doFinal(b64u(ctB64)).toString(Charsets.UTF_8)
 
-        // 4. The plaintext is JSON. Look for the m3u8 in common fields.
+        // 4. The plaintext is JSON. Find the m3u8.
         val m3u8 = runCatching {
             val j = JSONObject(plain)
             j.optString("url").takeIf { it.isNotBlank() }
