@@ -1,5 +1,6 @@
 package com.tamilbulb
 
+import android.util.Log
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
@@ -21,89 +22,84 @@ class N1mwqExtractor : ExtractorApi() {
     private val ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
+    private fun log(msg: String) = Log.d("TamilBulb", "[n1mwq] $msg")
+
     override suspend fun getUrl(
-        url: String,
-        referer: String?,
+        url: String, referer: String?,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
-    ) {
-        extract(url, referer, name, subtitleCallback, callback)
-    }
+    ) = extract(url, referer, name, subtitleCallback, callback)
 
     suspend fun extract(
-        url: String,
-        referer: String?,
-        label: String,
+        url: String, referer: String?, label: String,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        // URL forms:
-        //   https://byseraguci.com/e/<code>
-        //   https://filemoon.to/e/<code>
-        //   https://n1mwq.org/<random>/<code>
+        log("extract url=$url")
         val code = url.trimEnd('/').substringAfterLast('/')
-        if (code.isBlank()) return
+        if (code.isBlank()) { log("✗ empty code"); return }
+        log("code=$code")
 
-        val headers = mapOf(
-            "User-Agent" to ua,
-            "Referer"    to (referer ?: "https://tamilbulb.cc/"),
-            "Accept"     to "application/json"
-        )
-
-        // 1. Fetch encrypted playback envelope from the SPA's API
         val api = "https://n1mwq.org/api/videos/$code"
-        val raw = app.get(api, headers = headers).text
+        val raw = try {
+            val resp = app.get(api, headers = mapOf(
+                "User-Agent" to ua,
+                "Referer"    to (referer ?: "https://tamilbulb.cc/"),
+                "Accept"     to "application/json"
+            ))
+            log("API HTTP ${resp.code} (${resp.text.length} bytes)")
+            resp.text
+        } catch (e: Exception) {
+            Log.e("TamilBulb", "[n1mwq] API fetch failed", e); return
+        }
+
         val root = JSONObject(raw)
-        val pb   = root.optJSONObject("playback") ?: root
+        val pb = root.optJSONObject("playback") ?: root
 
         val version = pb.optString("version")
         val ivB64   = pb.optString("iv")
         val ctB64   = pb.optString("payload")
-        val kpArr   = pb.optJSONArray("key_parts") ?: return
+        val kpArr   = pb.optJSONArray("key_parts")
+        log("version=$version iv=${ivB64.take(12)}… ct=${ctB64.length}B kp=${kpArr?.length()}")
+        if (kpArr == null) { log("✗ no key_parts"); return }
 
-        // 2. Key derivation (from Qa/Ea in the JS bundle):
-        //    for version V, key = base64url(key_parts[V-1]) || base64url(key_parts[(31-V)-1])
         val v = version.toIntOrNull() ?: return
         if (v < 1 || v > 20) return
         val b = 31 - v
         val parts = ArrayList<String>(kpArr.length())
         for (i in 0 until kpArr.length()) parts.add(kpArr.optString(i))
-        if (v > parts.size || b > parts.size) return
+        if (v > parts.size || b > parts.size) { log("✗ index out of range"); return }
 
         val key = b64u(parts[v - 1]) + b64u(parts[b - 1])
+        log("key len=${key.size}")
         if (key.size != 32) return
 
-        // 3. AES-256-GCM decrypt
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(
-            Cipher.DECRYPT_MODE,
-            SecretKeySpec(key, "AES"),
-            GCMParameterSpec(128, b64u(ivB64))
-        )
-        val plain = cipher.doFinal(b64u(ctB64)).toString(Charsets.UTF_8)
+        val plain = try {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"),
+                        GCMParameterSpec(128, b64u(ivB64)))
+            cipher.doFinal(b64u(ctB64)).toString(Charsets.UTF_8)
+        } catch (e: Exception) {
+            Log.e("TamilBulb", "[n1mwq] decrypt failed", e); return
+        }
+        log("plaintext=${plain.take(200)}…")
 
-        // 4. The plaintext is JSON. Find the m3u8.
         val m3u8 = runCatching {
             val j = JSONObject(plain)
             j.optString("url").takeIf { it.isNotBlank() }
                 ?: j.optString("file").takeIf { it.isNotBlank() }
                 ?: j.optString("m3u8").takeIf { it.isNotBlank() }
-                ?: Regex("""https?://[^\s"']+?\.m3u8[^\s"']*""").find(plain)?.value
         }.getOrNull()
             ?: Regex("""https?://[^\s"']+?\.m3u8[^\s"']*""").find(plain)?.value
-            ?: return
+        if (m3u8.isNullOrBlank()) { log("✗ no m3u8 in plaintext"); return }
+        log("→ emitting $m3u8")
 
-        callback.invoke(
-            newExtractorLink(
-                source = name,
-                name   = label,
-                url    = m3u8,
-                type   = ExtractorLinkType.M3U8
-            ) {
-                this.referer = referer ?: url
-                this.quality = Qualities.Unknown.value
-            }
-        )
+        callback.invoke(newExtractorLink(
+            source = name, name = label, url = m3u8, type = ExtractorLinkType.M3U8
+        ) {
+            this.referer = referer ?: url
+            this.quality = Qualities.Unknown.value
+        })
     }
 
     private fun b64u(s: String): ByteArray {
