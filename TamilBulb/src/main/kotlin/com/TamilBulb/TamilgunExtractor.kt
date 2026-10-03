@@ -19,21 +19,15 @@ class TamilgunExtractor : ExtractorApi() {
 
     private fun log(msg: String) = Log.d("TamilBulb", "[tamilgun] $msg")
 
-    /**
-     * Full browser-iframe headers. The `Sec-Fetch-*` trio is what makes
-     * Cloudflare treat this as a real iframe navigation instead of a bot.
-     */
-    private fun browserHeaders(referer: String?): Map<String, String> = mapOf(
+    private fun browserHeaders(referer: String?) = mapOf(
         "User-Agent"                to ua,
-        "Accept"                    to "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept"                    to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language"           to "en-US,en;q=0.9",
         "Referer"                   to (referer ?: "$mainUrl/"),
         "Sec-Fetch-Dest"            to "iframe",
         "Sec-Fetch-Mode"            to "navigate",
         "Sec-Fetch-Site"            to "cross-site",
-        "Upgrade-Insecure-Requests" to "1",
-        "Cache-Control"             to "no-cache",
-        "Pragma"                    to "no-cache"
+        "Upgrade-Insecure-Requests" to "1"
     )
 
     override suspend fun getUrl(
@@ -45,78 +39,50 @@ class TamilgunExtractor : ExtractorApi() {
     suspend fun extract(
         url: String, referer: String?, label: String,
         subtitleCallback: (SubtitleFile) -> Unit,
-        callback: (ExtractorLink) -> Unit
+        callback: (ExtractorLink) -> Unit,
+        mainUrlOverride: String? = null          // ← NEW: reuse on cdnbulb, cdntamil, etc.
     ) {
-        log("extract url=$url referer=$referer")
+        val effectiveMain = mainUrlOverride ?: mainUrl
+        log("extract url=$url  mainUrl=$effectiveMain")
 
         val html = try {
-            val resp = app.get(
-                url,
-                headers = browserHeaders(referer),
-                timeout = 30L
-            )
+            val resp = app.get(url, headers = browserHeaders(referer), timeout = 30L)
             log("HTTP ${resp.code} (${resp.text.length} bytes)")
             resp.text
         } catch (e: Exception) {
-            Log.e("TamilBulb", "[tamilgun] fetch failed with ${e.javaClass.simpleName}", e)
-            // Retry once — sometimes Cloudflare's edge is just slow
-            try {
-                log("retrying after 2s delay...")
-                kotlinx.coroutines.delay(2000)
-                val resp = app.get(url, headers = browserHeaders(referer), timeout = 45L)
-                log("retry HTTP ${resp.code} (${resp.text.length} bytes)")
-                resp.text
-            } catch (e2: Exception) {
-                Log.e("TamilBulb", "[tamilgun] retry failed too", e2)
-                return
-            }
+            Log.e("TamilBulb", "[tamilgun] fetch failed", e); return
         }
 
-        // Bail if we got a Cloudflare challenge page instead of the player
-        if (html.contains("Just a moment", true) ||
-            html.contains("cf-challenge", true) ||
-            html.contains("Attention Required", true)) {
-            log("⚠️ Cloudflare challenge page detected — cannot extract")
-            return
+        if (html.contains("Just a moment", true) || html.contains("cf-challenge", true)) {
+            log("⚠️ Cloudflare challenge page"); return
         }
 
-        val decoded = PackardDecoder.decode(html).also {
-            if (it == null) log("⚠️ PACKER decode failed, using raw HTML")
-        } ?: html
+        val decoded = PackardDecoder.decode(html) ?: html.also { log("PACKER decode failed") }
         log("decoded length=${decoded.length}")
 
-        // Priority: hls4 → hls2 → any master.m3u8
         val hls4    = Regex(""""hls4"\s*:\s*"([^"]+\.m3u8[^"]*)"""").find(decoded)?.groupValues?.get(1)
         val hls2    = Regex(""""hls2"\s*:\s*"([^"]+\.m3u8[^"]*)"""").find(decoded)?.groupValues?.get(1)
-        val generic = Regex("""(https?://[^\s"']+?master\.m3u8[^\s"']*)""").find(decoded)?.groupValues?.get(1)
+        val generic = Regex("""(https?://[^\s"']+?\.m3u8[^\s"']*)""").find(decoded)?.groupValues?.get(1)
         log("hls4=$hls4")
-        log("hls2=$hls2")
-        log("generic=$generic")
+        log("hls2=${hls2?.take(80)}…")
+        log("generic=${generic?.take(80)}…")
 
         val m3u8 = hls4 ?: hls2 ?: generic
         if (m3u8.isNullOrBlank()) {
-            log("✗ no m3u8 found in decoded JS — dumping first 500 chars of decoded:")
-            log("decoded preview: ${decoded.take(500).replace("\n", " ")}")
+            log("✗ no m3u8 — dumping 300 chars: ${decoded.take(300)}")
             return
         }
 
-        val fullUrl = if (m3u8.startsWith("/")) "$mainUrl$m3u8" else m3u8
+        // Use the OVERRIDDEN origin for relative URLs (important for cdnbulb reuse)
+        val fullUrl = if (m3u8.startsWith("/")) "$effectiveMain$m3u8" else m3u8
         log("→ emitting $fullUrl")
 
-        callback.invoke(
-            newExtractorLink(
-                source = name,
-                name   = label,
-                url    = fullUrl,
-                type   = ExtractorLinkType.M3U8
-            ) {
-                this.referer = referer ?: url
-                this.quality = Qualities.Unknown.value
-            }
-        )
+        callback.invoke(newExtractorLink(name, label, fullUrl, ExtractorLinkType.M3U8) {
+            this.referer = referer ?: url
+            this.quality = Qualities.Unknown.value
+        })
 
-        // Subtitles if present in the decoded script
-        Regex("""file\s*:\s*"(https?://[^"]+\.vtt)"""")
+        Regex("""file\s*:\s*"([^"]+\.vtt)"""")
             .findAll(decoded)
             .forEach { m -> subtitleCallback.invoke(SubtitleFile("English", m.groupValues[1])) }
     }
