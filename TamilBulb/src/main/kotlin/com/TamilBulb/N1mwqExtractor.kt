@@ -24,7 +24,7 @@ class N1mwqExtractor : ExtractorApi() {
 
     private fun log(msg: String) = Log.d("TamilBulb", "[n1mwq] $msg")
 
-    private fun browserHeaders(referer: String?): Map<String, String> = mapOf(
+    private fun browserHeaders(referer: String?) = mapOf(
         "User-Agent"      to ua,
         "Accept"          to "application/json, text/plain, */*",
         "Accept-Language" to "en-US,en;q=0.9",
@@ -47,7 +47,11 @@ class N1mwqExtractor : ExtractorApi() {
         callback: (ExtractorLink) -> Unit
     ) {
         log("extract url=$url")
-        val code = url.trimEnd('/').substringAfterLast('/')
+
+        // Some players wrap the filemoon code inside a query param:
+        //   https://bulbmoviehd.online/r/?id=https://filemoon.to/d/y687uhvor9zx
+        // Grab the last segment as the code either way.
+        val code = url.trimEnd('/').substringAfterLast('/').substringAfterLast('=')
         if (code.isBlank()) { log("✗ empty code"); return }
         log("code=$code")
 
@@ -57,8 +61,7 @@ class N1mwqExtractor : ExtractorApi() {
             log("API HTTP ${resp.code} (${resp.text.length} bytes)")
             resp.text
         } catch (e: Exception) {
-            Log.e("TamilBulb", "[n1mwq] API fetch failed", e)
-            return
+            Log.e("TamilBulb", "[n1mwq] API fetch failed", e); return
         }
 
         val root = JSONObject(raw)
@@ -95,21 +98,60 @@ class N1mwqExtractor : ExtractorApi() {
         }
         log("plaintext=${plain.take(200)}…")
 
-        val m3u8 = runCatching {
+        // ── THE FIX: parse JSON so `\u0026` gets decoded to `&` ──
+        val m3u8 = try {
             val j = JSONObject(plain)
-            j.optString("url").takeIf { it.isNotBlank() }
-                ?: j.optString("file").takeIf { it.isNotBlank() }
-                ?: j.optString("m3u8").takeIf { it.isNotBlank() }
-        }.getOrNull()
-            ?: Regex("""https?://[^\s"']+?\.m3u8[^\s"']*""").find(plain)?.value
-        if (m3u8.isNullOrBlank()) { log("✗ no m3u8 in plaintext"); return }
-        log("→ emitting $m3u8")
 
+            // Try top-level fields first (older format)
+            j.optString("url").takeIf  { it.startsWith("http") }?.let { return emit(it, referer, url, label, callback) }
+            j.optString("file").takeIf { it.startsWith("http") }?.let { return emit(it, referer, url, label, callback) }
+            j.optString("m3u8").takeIf { it.startsWith("http") }?.let { return emit(it, referer, url, label, callback) }
+
+            // Standard format: { "sources": [ { "url": "...", "label": "480p" }, ... ] }
+            val sources = j.optJSONArray("sources")
+            if (sources != null && sources.length() > 0) {
+                // Prefer the highest-quality entry that has a .m3u8 URL
+                var best: String? = null
+                var bestScore = -1
+                for (i in 0 until sources.length()) {
+                    val src = sources.optJSONObject(i) ?: continue
+                    val u = src.optString("url").takeIf { it.startsWith("http") } ?: continue
+                    val q = src.optString("label").filter { it.isDigit() }.toIntOrNull() ?: 0
+                    if (q > bestScore) { bestScore = q; best = u }
+                }
+                if (best != null) {
+                    log("picked source label=${bestScore}p")
+                    return emit(best, referer, url, label, callback)
+                }
+            }
+            null
+        } catch (e: Exception) {
+            log("JSON parse failed: ${e.message}")
+            null
+        }
+
+        // Regex fallback with the fix: exclude `\` from the URL character class
+        val fallback = Regex("""https?://[^\s"'\\]+?\.m3u8[^\s"'\\]*""").find(plain)?.value
+        if (fallback != null) {
+            log("regex fallback URL=${fallback.take(100)}…")
+            emit(fallback, referer, url, label, callback)
+        } else {
+            log("✗ no m3u8 found")
+        }
+    }
+
+    private fun emit(
+        m3u8: String, referer: String?, sourceUrl: String, label: String,
+        callback: (ExtractorLink) -> Unit
+    ) {
+        // Sanity: strip any residual escapes just in case
+        val clean = m3u8.replace("\\u0026", "&").replace("\\/", "/")
+        log("→ emitting ${clean.take(120)}…")
         callback.invoke(
             newExtractorLink(
-                source = name, name = label, url = m3u8, type = ExtractorLinkType.M3U8
+                source = name, name = label, url = clean, type = ExtractorLinkType.M3U8
             ) {
-                this.referer = referer ?: url
+                this.referer = referer ?: sourceUrl
                 this.quality = Qualities.Unknown.value
             }
         )
