@@ -1,5 +1,6 @@
 package com.tamilbulb
 
+import android.util.Log
 import com.lagradost.cloudstream3.HomePageList
 import com.lagradost.cloudstream3.HomePageResponse
 import com.lagradost.cloudstream3.LoadResponse
@@ -32,61 +33,44 @@ class TamilbulbProvider : MainAPI() {
     private val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
-    /**
-     * In-memory map: detail URL → the exact mediatitle shown on the homepage/search card.
-     * Populated during getMainPage() and search(). Read in load() so the load page
-     * title matches the card title exactly.
-     *
-     * ConcurrentHashMap survives concurrent coroutines.
-     */
+    /** In-memory title cache: detail URL → exact card title from list pages. */
     private val titleCache = ConcurrentHashMap<String, String>()
 
-    // ===================================================================
-    // LOGGING HELPER — every log line starts with "TamilBulb:" so you can
-    // filter with:  adb logcat -s System.out | grep TamilBulb
-    // ===================================================================
-    private fun log(tag: String, msg: String) {
-        println("TamilBulb: [$tag] $msg")
-    }
+    // ============ LOGGING — tag "TamilBulb" (visible in logcat as TamilBulb:V) ============
+    private fun log(tag: String, msg: String) = Log.d("TamilBulb", "[$tag] $msg")
     private fun logEx(tag: String, e: Throwable) {
-        println("TamilBulb: [$tag] EXCEPTION: ${e.javaClass.simpleName}: ${e.message}")
-        e.stackTrace.take(6).forEach { println("TamilBulb: [$tag]   at $it") }
+        Log.e("TamilBulb", "[$tag] EXCEPTION: ${e.javaClass.simpleName}: ${e.message}", e)
     }
 
     // ===================================================================
-    // HOME PAGE
+    // HOME
     // ===================================================================
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        log("home", "getMainPage(page=$page, request=${request.name})")
+        log("home", "getMainPage(page=$page, name='${request.name}')")
         val home = mutableListOf<HomePageList>()
-        val categories = listOf(
+        listOf(
             "New Movies" to "/video-category/new1movies/",
             "HD Movies"  to "/video-category/movies/",
             "Dubbed"     to "/video-category/dmovie/",
             "Trending"   to "/video-category/trending/",
             "CAM"        to "/video-category/cam/",
-        )
-        for ((label, path) in categories) {
+        ).forEach { (label, path) ->
             val items = fetchCategoryPage(path, page)
             log("home", "  section '$label' → ${items.size} items")
-            if (items.isNotEmpty()) {
-                home.add(HomePageList(label, items, isHorizontalImages = true))
-            }
+            if (items.isNotEmpty()) home.add(HomePageList(label, items, isHorizontalImages = true))
         }
-        log("home", "getMainPage() done → ${home.size} sections total")
+        log("home", "getMainPage done → ${home.size} sections")
         return newHomePageResponse(home, hasNext = true)
     }
 
     private suspend fun fetchCategoryPage(path: String, page: Int): List<SearchResponse> {
         val url = if (page <= 1) "$mainUrl$path" else "$mainUrl$path/page/$page/"
-        log("category", "fetchCategoryPage url=$url")
         return try {
-            val doc = app.get(url, headers = mapOf("User-Agent" to UA)).document
-            val cards = doc.select("article.post-item")
-            log("category", "  found ${cards.size} article.post-item cards")
-            val results = cards.mapNotNull { it.toSearchCard() }
-            log("category", "  parsed ${results.size} valid cards")
-            results
+            val resp = app.get(url, headers = mapOf("User-Agent" to UA))
+            log("category", "GET $url → HTTP ${resp.code} (${resp.text.length} bytes)")
+            val cards = resp.document.select("article.post-item")
+            log("category", "  ${cards.size} cards found")
+            cards.mapNotNull { it.toSearchCard() }
         } catch (e: Exception) {
             logEx("category", e)
             emptyList()
@@ -94,17 +78,17 @@ class TamilbulbProvider : MainAPI() {
     }
 
     // ===================================================================
-    // SEARCH — crawls detail pages to replace AVIF thumbnails with the
-    // site's real (TMDB) JPEG poster. Also caches titles.
+    // SEARCH
     // ===================================================================
     override suspend fun search(query: String): List<SearchResponse> {
-        log("search", "search(query='$query')")
+        log("search", "search('$query')")
         val url = "$mainUrl/?s=${query.replace(" ", "+")}"
         val doc = try {
-            app.get(url, headers = mapOf("User-Agent" to UA)).document
+            val resp = app.get(url, headers = mapOf("User-Agent" to UA))
+            log("search", "GET $url → HTTP ${resp.code} (${resp.text.length} bytes)")
+            resp.document
         } catch (e: Exception) {
-            logEx("search", e)
-            return emptyList()
+            logEx("search", e); return emptyList()
         }
 
         val cards = doc.select("article.post-item").mapNotNull { el ->
@@ -115,21 +99,20 @@ class TamilbulbProvider : MainAPI() {
         }
         log("search", "found ${cards.size} raw cards")
 
-        return coroutineScope {
+        val out = coroutineScope {
             cards.map { (title, href, thumb) ->
                 async {
                     val poster = fetchDetailPoster(href) ?: thumb
-                    log("search", "  → '$title'  poster=${poster?.take(60)}…")
                     titleCache[href] = title
-                    newMovieSearchResponse(title, href, TvType.Movie) {
-                        this.posterUrl = poster
-                    }
+                    log("search", "  → '$title'")
+                    newMovieSearchResponse(title, href, TvType.Movie) { this.posterUrl = poster }
                 }
             }.awaitAll()
-        }.also { log("search", "search() done → ${it.size} results, cache=${titleCache.size}") }
+        }
+        log("search", "search done → ${out.size} results (cache=${titleCache.size})")
+        return out
     }
 
-    /** Fast path: pick a JPG/WebP from `data-srcset`, avoiding `.avif`. */
     private fun extractCardPoster(el: Element): String? {
         val img = el.selectFirst("img.blog-img") ?: return null
         val srcset = img.attr("data-srcset")
@@ -141,101 +124,62 @@ class TamilbulbProvider : MainAPI() {
         return img.attr("data-src").ifBlank { img.attr("src") }.ifBlank { null }
     }
 
-    /** Crawl the detail page → grab the poster from the TMDB image the site actually uses. */
     private suspend fun fetchDetailPoster(url: String): String? = try {
         val doc = app.get(url, headers = mapOf("User-Agent" to UA)).document
         doc.selectFirst("main article > header.entry-header .pp-image img")?.attr("src")
             ?.takeIf { it.isNotBlank() }
-            ?: doc.selectFirst("meta[property=og:image]")?.attr("content")
-                ?.takeIf { it.isNotBlank() }
-    } catch (e: Exception) {
-        logEx("poster-crawl", e)
-        null
-    }
+            ?: doc.selectFirst("meta[property=og:image]")?.attr("content")?.takeIf { it.isNotBlank() }
+    } catch (e: Exception) { logEx("poster", e); null }
 
     // ===================================================================
-    // LOAD — very detailed logging + title cache lookup
+    // LOAD
     // ===================================================================
     override suspend fun load(url: String): LoadResponse? {
-        log("load", "load(url=$url)")
+        log("load", "load($url)")
         val html = try {
-            app.get(url, headers = mapOf("User-Agent" to UA)).text
-        } catch (e: Exception) {
-            logEx("load", e)
-            return null
-        }
-        log("load", "html size=${html.length}")
+            val resp = app.get(url, headers = mapOf("User-Agent" to UA))
+            log("load", "GET → HTTP ${resp.code} (${resp.text.length} bytes)")
+            resp.text
+        } catch (e: Exception) { logEx("load", e); return null }
 
         val doc = Jsoup.parse(html)
 
-        // ---- Title ----
-        // Prefer: cached title from search/home (matches the card exactly)
-        // Fallback 1: h1.entry-title inside main .beeteam368-single-meta (WP post title)
-        // Fallback 2: h2.entry-title inside the TMDB banner (has colon — TMDB title)
         val cachedTitle = titleCache[url]
-        val wpTitle    = doc.selectFirst("main .beeteam368-single-meta header.single-post-title h1.entry-title")
+        val wpTitle = doc.selectFirst("main .beeteam368-single-meta header.single-post-title h1.entry-title")
             ?.text()?.trim()?.takeIf { it.isNotBlank() }
-        val tmdbTitle  = doc.selectFirst("main article > header.entry-header h2.entry-title")
+        val tmdbTitle = doc.selectFirst("main article > header.entry-header h2.entry-title")
             ?.text()?.trim()?.takeIf { it.isNotBlank() }
-        val genericTitle = doc.selectFirst("h1.entry-title, meta[property=og:title]")
-            ?.let {
-                if (it.tagName() == "meta") it.attr("content").substringBefore(" - ")
-                else it.text().trim()
-            }?.takeIf { it.isNotBlank() }
+        val genericTitle = doc.selectFirst("h1.entry-title")
+            ?.text()?.trim()?.takeIf { it.isNotBlank() }
         val title = cachedTitle ?: wpTitle ?: tmdbTitle ?: genericTitle
-        log("load", "  title: cache=$cachedTitle | wp=$wpTitle | tmdb=$tmdbTitle | generic=$genericTitle")
-        log("load", "  → chosen title = $title")
-        if (title.isNullOrBlank()) {
-            log("load", "  ✗ no title found, aborting")
-            return null
-        }
+        log("load", "  title: cache=$cachedTitle wp=$wpTitle tmdb=$tmdbTitle")
+        if (title.isNullOrBlank()) { log("load", "✗ no title"); return null }
 
-        // ---- Poster ----
         val poster = doc.selectFirst("main article > header.entry-header .pp-image img")?.attr("src")
             ?.takeIf { it.isNotBlank() }
-            ?: doc.selectFirst("meta[property=og:image]")?.attr("content")?.takeIf { it.isNotBlank() }
-        log("load", "  poster = $poster")
-
-        // ---- Plot ----
-        // XPath: /main[1]/article[1]/div[2] — 2nd <div> child of <article>
+            ?: doc.selectFirst("meta[property=og:image]")?.attr("content")
         val plot = doc.selectFirst("main article > div:nth-of-type(2)")
             ?.text()?.trim()?.takeIf { it.isNotBlank() }
-        log("load", "  plot = ${plot?.take(120)}…")
-
-        // ---- Release year ----
         val yearText = doc.selectFirst(
             "main article > header.entry-header .pp-content-wrapper > .ft-post-meta .post-footer-item:nth-of-type(2) .item-text"
         )?.text()?.trim()
         val year = Regex("""(19|20)\d{2}""").find(yearText ?: "")?.value?.toIntOrNull()
-        log("load", "  year: raw='$yearText' → parsed=$year")
-
-        // ---- Genres ----
         val genres = doc.select(
             "main article > header.entry-header .pp-content-wrapper > .ft-post-meta:nth-of-type(2) .post-footer-item .item-text"
         ).map { it.text().trim() }.filter { it.isNotBlank() }
-        log("load", "  genres = $genres")
-
-        // ---- Background ----
         val backgroundUrl = doc.selectFirst("main article > header.entry-header")?.attr("style")
             ?.let { Regex("""url\(["']?([^)"']+)["']?\)""").find(it)?.groupValues?.get(1) }
-        log("load", "  background = $backgroundUrl")
-
-        // ---- Fallback genre tags ----
         val fallbackTags = doc.select("a.category-item").map { it.text().trim() }
             .filter { it.isNotBlank() }.distinct()
-        log("load", "  fallback tags = $fallbackTags")
 
-        val response = newMovieLoadResponse(title, url, TvType.Movie, url) {
+        log("load", "  poster=${poster?.take(60)}… year=$year genres=$genres")
+        return newMovieLoadResponse(title, url, TvType.Movie, url) {
             this.posterUrl = poster
             this.plot = plot
             this.year = year
             this.tags = genres.ifEmpty { fallbackTags }
-            if (backgroundUrl != null) {
-                this.backgroundPosterUrl = backgroundUrl
-            }
+            if (backgroundUrl != null) this.backgroundPosterUrl = backgroundUrl
         }
-        log("load", "  ✓ LoadResponse built for '$title'")
-        return response
     }
 
     // ===================================================================
@@ -247,112 +191,101 @@ class TamilbulbProvider : MainAPI() {
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        log("links", "══════════════════════════════════════════════")
-        log("links", "loadLinks() data=$data isCasting=$isCasting")
+        log("links", "════════ loadLinks() data=$data")
+        var any = false
 
-        // ---- 1. Fetch the detail page ----
+        // 1. Fetch detail page
         val detailHtml = try {
-            app.get(data, headers = mapOf("User-Agent" to UA)).text
-        } catch (e: Exception) {
-            logEx("links", e)
-            return false
-        }
-        log("links", "detail html size=${detailHtml.length}")
+            val resp = app.get(data, headers = mapOf("User-Agent" to UA))
+            log("links", "detail page: HTTP ${resp.code} (${resp.text.length} bytes)")
+            resp.text
+        } catch (e: Exception) { logEx("links", e); return false }
 
-        // ---- 2. Extract stream_id ----
+        // 2. Extract stream_id
         val streamId = extractStreamId(detailHtml)
         if (streamId == null) {
-            log("links", "✗ FAILED to extract stream_id")
+            log("links", "✗ FAILED to extract stream_id — see [sid] logs above")
             return false
         }
         log("links", "stream_id=$streamId")
 
-        // ---- 3. Build the embed URL ----
+        // 3. Build the embed URL with URL-safe base64 WITHOUT padding  ← FIX
         val ts = System.currentTimeMillis() / 1000
-        val b64 = Base64.getEncoder().encodeToString("$streamId$ts".toByteArray())
-        val embedUrl = "$mainUrl/embed/$b64"
+        val rawPayload = "$streamId$ts"
+        val urlSafe = Base64.getUrlEncoder().withoutPadding().encodeToString(rawPayload.toByteArray())
+        val embedUrl = "$mainUrl/embed/$urlSafe"
+        log("links", "raw payload='$rawPayload'  →  base64url='$urlSafe'")
         log("links", "embedUrl=$embedUrl")
 
-        // ---- 4. Fetch the embed page ----
+        // 4. Fetch embed page
         val embedHtml = try {
-            app.get(embedUrl, headers = mapOf("User-Agent" to UA)).text
-        } catch (e: Exception) {
-            logEx("links", e)
-            return false
+            val resp = app.get(embedUrl, headers = mapOf(
+                "User-Agent" to UA,
+                "Referer"    to data
+            ))
+            log("links", "embed page: HTTP ${resp.code} (${resp.text.length} bytes)")
+            resp.text
+        } catch (e: Exception) { logEx("links", e); return false }
+
+        // 4b. Detect Cloudflare challenge / error page
+        if (embedHtml.contains("Just a moment", true) ||
+            embedHtml.contains("cf-challenge", true) ||
+            embedHtml.length < 5000) {
+            log("links", "⚠️ embed page looks like a challenge/error page (${embedHtml.length} bytes)")
+            log("links", "   preview: ${embedHtml.take(300).replace("\n", " ")}")
         }
-        log("links", "embed html size=${embedHtml.length}")
 
         val embedDoc = Jsoup.parse(embedHtml)
-
-        // ---- 4b. Pre-dump all #playerN ids on the page for context ----
-        val playerIds = (1..20).mapNotNull { n ->
-            embedDoc.selectFirst("#player$n")?.let { n }
-        }
-        log("links", "detected player IDs: $playerIds")
+        val playerIds = (1..20).filter { embedDoc.selectFirst("#player$it") != null }
+        log("links", "players detected: $playerIds")
         if (playerIds.isEmpty()) {
-            log("links", "✗ no #playerN elements found — the embed page may be an error/consent page")
-            val preview = embedHtml.take(400).replace("\n", " ")
-            log("links", "embed preview: $preview…")
+            log("links", "✗ no #playerN elements — embed page is wrong")
             return false
         }
 
-        // ---- 5. Enumerate and extract ----
-        var any = false
+        // 5. Enumerate players
         for (n in playerIds) {
             val player = embedDoc.selectFirst("#player$n") ?: continue
-            val iframeUrl = player.selectFirst(".player-wrapper iframe")
-                ?.attr("src")?.takeIf { it.isNotBlank() }
+            val iframeUrl = player.selectFirst(".player-wrapper iframe")?.attr("src")
+                ?.takeIf { it.isNotBlank() }
             if (iframeUrl == null) {
                 log("links", "  player$n has no iframe src")
                 continue
             }
             val playerName = player.selectFirst(".player-name")?.text()?.trim() ?: "Player $n"
-            val domain = try { java.net.URI(iframeUrl).host } catch (_: Exception) { "?" }
-            log("links", "  player$n [$playerName] domain=$domain → $iframeUrl")
+            log("links", "  player$n [$playerName] → $iframeUrl")
 
             try {
                 when {
                     iframeUrl.contains("tamilgun.space") || iframeUrl.contains("vidhide") -> {
-                        log("links", "    ↳ dispatching to TamilgunExtractor")
-                        TamilgunExtractor().extract(
-                            iframeUrl, embedUrl, playerName, subtitleCallback, callback
-                        )
+                        log("links", "    ↳ TamilgunExtractor")
+                        TamilgunExtractor().extract(iframeUrl, embedUrl, playerName, subtitleCallback, callback)
                         any = true
-                        log("links", "    ↳ TamilgunExtractor done")
                     }
                     iframeUrl.contains("byseraguci.com") ||
                     iframeUrl.contains("filemoon")      ||
                     iframeUrl.contains("n1mwq.org") -> {
-                        log("links", "    ↳ dispatching to N1mwqExtractor")
-                        N1mwqExtractor().extract(
-                            iframeUrl, embedUrl, playerName, subtitleCallback, callback
-                        )
+                        log("links", "    ↳ N1mwqExtractor")
+                        N1mwqExtractor().extract(iframeUrl, embedUrl, playerName, subtitleCallback, callback)
                         any = true
-                        log("links", "    ↳ N1mwqExtractor done")
                     }
                     else -> {
-                        log("links", "    ↳ dispatching to loadExtractor (generic)")
+                        log("links", "    ↳ loadExtractor (generic)")
                         loadExtractor(iframeUrl, embedUrl, subtitleCallback, callback)
                         any = true
                     }
                 }
-            } catch (e: Exception) {
-                logEx("links", e)
-            }
+            } catch (e: Exception) { logEx("links", e) }
         }
 
-        log("links", if (any) "✓ loadLinks() finished — links emitted" else "✗ no links produced")
-        log("links", "══════════════════════════════════════════════")
+        log("links", if (any) "✓ loadLinks finished — links emitted" else "✗ no links produced")
+        log("links", "════════════════════════════════════════════")
         return any
     }
 
-    /**
-     * Extract stream_id from the detail HTML.
-     * Strategies (in order):
-     *   1. Normalize HTML entities then run 3 regexes
-     *   2. Jsoup-parse the whole page and read any <script> that mentions beeteam368
-     *   3. Regex the raw bytes as a last resort
-     */
+    // ===================================================================
+    // STREAM_ID EXTRACTION
+    // ===================================================================
     private fun extractStreamId(html: String): String? {
         val normalized = html
             .replace("&quot;", "\"")
@@ -360,29 +293,22 @@ class TamilbulbProvider : MainAPI() {
             .replace("&#39;", "'")
             .replace("\\\"", "\"")
 
-        // Strategy 1 — raw `index.php?id=`
         Regex("""index\.php\?id=([A-Za-z0-9_\-]+)""")
             .find(normalized)?.groupValues?.get(1)?.let {
-                log("sid", "strategy 1 (raw index.php?id=) hit: $it")
-                return it
+                log("sid", "hit strategy 1 (index.php?id=): $it"); return it
             }
 
-        // Strategy 2 — JSON config regex
         Regex("""beeteam368_pro_player\(\{.*?"video_url":"[^"]*?[?&]id=([A-Za-z0-9_\-]+)""",
               RegexOption.DOT_MATCHES_ALL)
             .find(normalized)?.groupValues?.get(1)?.let {
-                log("sid", "strategy 2 (JSON config) hit: $it")
-                return it
+                log("sid", "hit strategy 2 (JSON config): $it"); return it
             }
 
-        // Strategy 3 — streambulb.site URL
         Regex("""streambulb\.site[^"'\s]*?[?&]id=([A-Za-z0-9_\-]+)""")
             .find(normalized)?.groupValues?.get(1)?.let {
-                log("sid", "strategy 3 (streambulb URL) hit: $it")
-                return it
+                log("sid", "hit strategy 3 (streambulb URL): $it"); return it
             }
 
-        // Strategy 4 — Jsoup + script scan
         try {
             val doc = Jsoup.parse(html)
             for (script in doc.select("script")) {
@@ -390,22 +316,19 @@ class TamilbulbProvider : MainAPI() {
                 if (body.contains("beeteam368_pro_player") || body.contains("index.php")) {
                     Regex("""index\.php\?id=([A-Za-z0-9_\-]+)""")
                         .find(body)?.groupValues?.get(1)?.let {
-                            log("sid", "strategy 4 (Jsoup script scan) hit: $it")
-                            return it
+                            log("sid", "hit strategy 4 (Jsoup script): $it"); return it
                         }
                 }
             }
-        } catch (e: Exception) {
-            logEx("sid", e)
-        }
+        } catch (e: Exception) { logEx("sid", e) }
 
         // Debug dump
         val idx = normalized.indexOf("beeteam368_pro_player")
         if (idx >= 0) {
             val end = minOf(normalized.length, idx + 800)
-            log("sid", "DEBUG beeteam368 block: ${normalized.substring(maxOf(0, idx - 40), end)}")
+            log("sid", "DEBUG block: ${normalized.substring(maxOf(0, idx - 40), end)}")
         } else {
-            log("sid", "DEBUG no beeteam368_pro_player in HTML — dumping any 'iframe' lines:")
+            log("sid", "DEBUG no beeteam368_pro_player — scanning for iframe:")
             Regex("""<iframe[^>]{0,200}""").findAll(normalized).take(3).forEach {
                 log("sid", "  ${it.value}")
             }
@@ -414,20 +337,14 @@ class TamilbulbProvider : MainAPI() {
     }
 
     // ===================================================================
-    // CARD → SearchResponse
+    // CARD
     // ===================================================================
     private fun Element.toSearchCard(): SearchResponse? {
-        val a = selectFirst("h3.entry-title a.post-listing-title") ?: run {
-            log("card", "no title anchor found on: ${outerHtml().take(120)}")
-            return null
-        }
+        val a = selectFirst("h3.entry-title a.post-listing-title") ?: return null
         val href = a.attr("href").takeIf { it.isNotBlank() } ?: return null
         val title = (a.attr("title").ifBlank { a.text() }).trim().ifBlank { return null }
         val poster = extractCardPoster(this)
-        // Populate the cache so load() can restore the exact card title
         titleCache[href] = title
-        return newMovieSearchResponse(title, href, TvType.Movie) {
-            this.posterUrl = poster
-        }
+        return newMovieSearchResponse(title, href, TvType.Movie) { this.posterUrl = poster }
     }
 }
