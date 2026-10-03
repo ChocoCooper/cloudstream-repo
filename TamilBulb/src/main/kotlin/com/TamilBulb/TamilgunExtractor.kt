@@ -1,5 +1,6 @@
 package com.tamilbulb
 
+import android.util.Log
 import com.lagradost.cloudstream3.SubtitleFile
 import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorApi
@@ -13,66 +14,60 @@ class TamilgunExtractor : ExtractorApi() {
     override var mainUrl = "https://tamilgun.space"
     override val requiresReferer = true
 
+    private val ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+                     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+    private fun log(msg: String) = Log.d("TamilBulb", "[tamilgun] $msg")
+
     override suspend fun getUrl(
-        url: String,
-        referer: String?,
+        url: String, referer: String?,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
-    ) {
-        extract(url, referer, name, subtitleCallback, callback)
-    }
+    ) = extract(url, referer, name, subtitleCallback, callback)
 
     suspend fun extract(
-        url: String,
-        referer: String?,
-        label: String,
+        url: String, referer: String?, label: String,
         subtitleCallback: (SubtitleFile) -> Unit,
         callback: (ExtractorLink) -> Unit
     ) {
-        val ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-
-        // 1. Fetch embed page with the referer that was confirmed working
-        val html = app.get(
-            url,
-            headers = mapOf(
+        log("extract url=$url referer=$referer")
+        val html = try {
+            val resp = app.get(url, headers = mapOf(
                 "User-Agent" to ua,
                 "Referer"    to (referer ?: "")
-            )
-        ).text
+            ))
+            log("HTTP ${resp.code} (${resp.text.length} bytes)")
+            resp.text
+        } catch (e: Exception) {
+            Log.e("TamilBulb", "[tamilgun] fetch failed", e); return
+        }
 
-        // 2. PACKER decode (base-36 simple variant)
-        val decoded = PackardDecoder.decode(html) ?: html
+        val decoded = PackardDecoder.decode(html) ?: html.also { log("⚠️ PACKER decode failed, using raw") }
+        log("decoded length=${decoded.length}")
 
-        // 3. Extract hls4 → hls2 → generic master.m3u8
-        val m3u8 = Regex(""""hls4"\s*:\s*"([^"]+\.m3u8[^"]*)"""")
-            .find(decoded)?.groupValues?.get(1)
-            ?: Regex(""""hls2"\s*:\s*"([^"]+\.m3u8[^"]*)"""")
-                .find(decoded)?.groupValues?.get(1)
-            ?: Regex("""(https?://[^\s"']+?master\.m3u8[^\s"']*)""")
-                .find(decoded)?.groupValues?.get(1)
-            ?: return
+        val hls4 = Regex(""""hls4"\s*:\s*"([^"]+\.m3u8[^"]*)"""").find(decoded)?.groupValues?.get(1)
+        val hls2 = Regex(""""hls2"\s*:\s*"([^"]+\.m3u8[^"]*)"""").find(decoded)?.groupValues?.get(1)
+        val generic = Regex("""(https?://[^\s"']+?master\.m3u8[^\s"']*)""").find(decoded)?.groupValues?.get(1)
+        log("hls4=$hls4")
+        log("hls2=$hls2")
+        log("generic=$generic")
 
-        // 4. Prepend origin if the URL is relative (hls4 form)
+        val m3u8 = hls4 ?: hls2 ?: generic ?: run {
+            log("✗ no m3u8 in decoded JS")
+            return
+        }
         val fullUrl = if (m3u8.startsWith("/")) "$mainUrl$m3u8" else m3u8
+        log("→ emitting $fullUrl")
 
-        callback.invoke(
-            newExtractorLink(
-                source = name,
-                name   = label,
-                url    = fullUrl,
-                type   = ExtractorLinkType.M3U8
-            ) {
-                this.referer = referer ?: url
-                this.quality = Qualities.Unknown.value
-            }
-        )
+        callback.invoke(newExtractorLink(
+            source = name, name = label, url = fullUrl, type = ExtractorLinkType.M3U8
+        ) {
+            this.referer = referer ?: url
+            this.quality = Qualities.Unknown.value
+        })
 
-        // 5. Optional subtitles if present in the decoded script
         Regex("""file\s*:\s*"(https?://[^"]+\.vtt)"""")
             .findAll(decoded)
-            .forEach { m ->
-                subtitleCallback.invoke(SubtitleFile("English", m.groupValues[1]))
-            }
+            .forEach { m -> subtitleCallback.invoke(SubtitleFile("English", m.groupValues[1])) }
     }
 }
