@@ -204,81 +204,85 @@ class TamilbulbProvider : MainAPI() {
         // 2. Extract stream_id
         val streamId = extractStreamId(detailHtml)
         if (streamId == null) {
-            log("links", "✗ FAILED to extract stream_id — see [sid] logs above")
+            log("links", "✗ FAILED to extract stream_id")
             return false
         }
         log("links", "stream_id=$streamId")
 
-        // 3. Build the embed URL with URL-safe base64 WITHOUT padding  ← FIX
+        // 3. Build embed URL
         val ts = System.currentTimeMillis() / 1000
-        val rawPayload = "$streamId$ts"
-        val urlSafe = Base64.getUrlEncoder().withoutPadding().encodeToString(rawPayload.toByteArray())
+        val urlSafe = Base64.getUrlEncoder().withoutPadding()
+            .encodeToString("$streamId$ts".toByteArray())
         val embedUrl = "$mainUrl/embed/$urlSafe"
-        log("links", "raw payload='$rawPayload'  →  base64url='$urlSafe'")
         log("links", "embedUrl=$embedUrl")
 
         // 4. Fetch embed page
         val embedHtml = try {
             val resp = app.get(embedUrl, headers = mapOf(
-                "User-Agent" to UA,
-                "Referer"    to data
+                "User-Agent" to UA, "Referer" to data
             ))
             log("links", "embed page: HTTP ${resp.code} (${resp.text.length} bytes)")
             resp.text
         } catch (e: Exception) { logEx("links", e); return false }
 
-        // 4b. Detect Cloudflare challenge / error page
-        if (embedHtml.contains("Just a moment", true) ||
-            embedHtml.contains("cf-challenge", true) ||
-            embedHtml.length < 5000) {
-            log("links", "⚠️ embed page looks like a challenge/error page (${embedHtml.length} bytes)")
-            log("links", "   preview: ${embedHtml.take(300).replace("\n", " ")}")
-        }
-
         val embedDoc = Jsoup.parse(embedHtml)
         val playerIds = (1..20).filter { embedDoc.selectFirst("#player$it") != null }
         log("links", "players detected: $playerIds")
         if (playerIds.isEmpty()) {
-            log("links", "✗ no #playerN elements — embed page is wrong")
+            log("links", "✗ no #playerN elements")
             return false
         }
 
-        // 5. Enumerate players
+        // 5. Enumerate players — track success per player via a wrapped callback
         for (n in playerIds) {
             val player = embedDoc.selectFirst("#player$n") ?: continue
             val iframeUrl = player.selectFirst(".player-wrapper iframe")?.attr("src")
-                ?.takeIf { it.isNotBlank() }
-            if (iframeUrl == null) {
-                log("links", "  player$n has no iframe src")
-                continue
-            }
+                ?.takeIf { it.isNotBlank() } ?: continue
             val playerName = player.selectFirst(".player-name")?.text()?.trim() ?: "Player $n"
             log("links", "  player$n [$playerName] → $iframeUrl")
+
+            // Wrap the callback so we know if a link was actually emitted
+            var emittedForThisPlayer = false
+            val trackCallback: (ExtractorLink) -> Unit = { link ->
+                emittedForThisPlayer = true
+                callback.invoke(link)
+            }
 
             try {
                 when {
                     iframeUrl.contains("tamilgun.space") || iframeUrl.contains("vidhide") -> {
                         log("links", "    ↳ TamilgunExtractor")
-                        TamilgunExtractor().extract(iframeUrl, embedUrl, playerName, subtitleCallback, callback)
-                        any = true
+                        TamilgunExtractor().extract(
+                            iframeUrl, embedUrl, playerName, subtitleCallback, trackCallback
+                        )
                     }
                     iframeUrl.contains("byseraguci.com") ||
                     iframeUrl.contains("filemoon")      ||
                     iframeUrl.contains("n1mwq.org") -> {
                         log("links", "    ↳ N1mwqExtractor")
-                        N1mwqExtractor().extract(iframeUrl, embedUrl, playerName, subtitleCallback, callback)
-                        any = true
+                        N1mwqExtractor().extract(
+                            iframeUrl, embedUrl, playerName, subtitleCallback, trackCallback
+                        )
                     }
                     else -> {
-                        log("links", "    ↳ loadExtractor (generic)")
-                        loadExtractor(iframeUrl, embedUrl, subtitleCallback, callback)
-                        any = true
+                        log("links", "    ↳ loadExtractor (generic) — may not support this host")
+                        loadExtractor(iframeUrl, embedUrl, subtitleCallback, trackCallback)
                     }
                 }
-            } catch (e: Exception) { logEx("links", e) }
+            } catch (e: Exception) {
+                logEx("links", e)
+            }
+
+            if (emittedForThisPlayer) {
+                log("links", "    ✓ player$n emitted a link")
+                any = true
+            } else {
+                log("links", "    ✗ player$n produced no link")
+            }
         }
 
-        log("links", if (any) "✓ loadLinks finished — links emitted" else "✗ no links produced")
+        log("links", if (any) "✓ loadLinks finished — ${if (any) "links emitted" else "no links"}"
+            else "✗ no links produced")
         log("links", "════════════════════════════════════════════")
         return any
     }
