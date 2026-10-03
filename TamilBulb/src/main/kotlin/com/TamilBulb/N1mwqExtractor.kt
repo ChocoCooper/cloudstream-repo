@@ -9,6 +9,7 @@ import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import org.json.JSONObject
+import java.net.URLDecoder
 import java.util.Base64
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
@@ -48,17 +49,15 @@ class N1mwqExtractor : ExtractorApi() {
     ) {
         log("extract url=$url")
 
-        // Handle both:
-        //   https://filemoon.to/e/<code>
-        //   https://bulbmoviehd.online/r/?id=https://filemoon.to/d/<code>
-        val code = url.trimEnd('/').substringAfterLast('/').substringAfterLast('=')
-        if (code.isBlank()) { log("✗ empty code"); return }
+        val code = extractCode(url)
+        if (code.isNullOrBlank()) { log("✗ empty code from url=$url"); return }
         log("code=$code")
 
         val api = "https://n1mwq.org/api/videos/$code"
         val raw = try {
             val resp = app.get(api, headers = browserHeaders(referer), timeout = 30L)
             log("API HTTP ${resp.code} (${resp.text.length} bytes)")
+            if (resp.code != 200) return
             resp.text
         } catch (e: Exception) {
             Log.e("TamilBulb", "[n1mwq] API fetch failed", e); return
@@ -75,15 +74,15 @@ class N1mwqExtractor : ExtractorApi() {
         if (kpArr == null) { log("✗ no key_parts"); return }
 
         val v = version.toIntOrNull() ?: return
-        if (v < 1 || v > 20) return
+        if (v < 1 || v > 20) { log("✗ version out of range"); return }
         val b = 31 - v
         val parts = ArrayList<String>(kpArr.length())
         for (i in 0 until kpArr.length()) parts.add(kpArr.optString(i))
-        if (v > parts.size || b > parts.size) { log("✗ index out of range"); return }
+        if (v > parts.size || b > parts.size) { log("✗ key_parts index out of range"); return }
 
         val key = b64u(parts[v - 1]) + b64u(parts[b - 1])
         log("key len=${key.size}")
-        if (key.size != 32) return
+        if (key.size != 32) { log("✗ key not 32 bytes"); return }
 
         val plain = try {
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
@@ -98,16 +97,13 @@ class N1mwqExtractor : ExtractorApi() {
         }
         log("plaintext=${plain.take(200)}…")
 
-        // Parse the plaintext JSON. JSONObject auto-decodes `\u0026` → `&`.
         val m3u8: String? = try {
             val j = JSONObject(plain)
 
-            // 1) top-level simple fields (older formats)
             val simple = sequenceOf("url", "file", "m3u8")
                 .map { j.optString(it) }
                 .firstOrNull { it.startsWith("http") }
 
-            // 2) standard format: sources: [ { url, label, ... }, ... ]
             val fromSources: String? = run {
                 val sources = j.optJSONArray("sources") ?: return@run null
                 var bestUrl: String? = null
@@ -124,34 +120,52 @@ class N1mwqExtractor : ExtractorApi() {
 
             simple ?: fromSources
         } catch (e: Exception) {
-            log("JSON parse failed: ${e.message}")
-            null
+            log("JSON parse failed: ${e.message}"); null
         }
 
-        // Regex fallback — exclude backslash from URL char class to avoid `\u0026`
         val fallback = Regex("""https?://[^\s"'\\]+?\.m3u8[^\s"'\\]*""").find(plain)?.value
-
         val chosen = m3u8 ?: fallback
-        if (chosen.isNullOrBlank()) {
-            log("✗ no m3u8 found in plaintext")
-            return
-        }
+        if (chosen.isNullOrBlank()) { log("✗ no m3u8 found"); return }
 
-        // Belt-and-suspenders: strip any residual escapes
         val clean = chosen.replace("\\u0026", "&").replace("\\/", "/")
-        log("→ emitting ${clean.take(120)}…")
+        log("→ emitting ${clean.take(140)}…")
 
         callback.invoke(
             newExtractorLink(
-                source = name,
-                name   = label,
-                url    = clean,
-                type   = ExtractorLinkType.M3U8
+                source = name, name = label, url = clean, type = ExtractorLinkType.M3U8
             ) {
                 this.referer = referer ?: url
                 this.quality = Qualities.Unknown.value
             }
         )
+    }
+
+    /**
+     * Extracts the video code from all known URL shapes:
+     *
+     *   https://filemoon.to/e/y687uhvor9zx
+     *   https://byseraguci.com/e/j540ey878j2u/the-end-of-oak-street-2026-hq-...
+     *   https://bulbmoviehd.online/r/?id=https://filemoon.to/d/y687uhvor9zx
+     *   https://filemoon.to/d/y687uhvor9zx
+     */
+    private fun extractCode(url: String): String? {
+        // Shape A: ?id=<embedded URL>  → recurse on the decoded value
+        val idParam = Regex("""[?&]id=([^&]+)""").find(url)?.groupValues?.get(1)
+        if (idParam != null) {
+            val decoded = try { URLDecoder.decode(idParam, "UTF-8") } catch (_: Exception) { idParam }
+            if (decoded != idParam || decoded.contains("/e/") || decoded.contains("/d/")) {
+                extractCode(decoded)?.let { return it }
+            }
+        }
+
+        // Shape B: /e/<code> or /d/<code> — code is right after the marker
+        Regex("""/(?:e|d|v)/([A-Za-z0-9]{6,})""").find(url)?.groupValues?.get(1)?.let {
+            return it
+        }
+
+        // Shape C: last segment (fallback)
+        val last = url.trimEnd('/').substringAfterLast('/')
+        return last.takeIf { it.length in 6..24 && it.all { c -> c.isLetterOrDigit() } }
     }
 
     private fun b64u(s: String): ByteArray {
