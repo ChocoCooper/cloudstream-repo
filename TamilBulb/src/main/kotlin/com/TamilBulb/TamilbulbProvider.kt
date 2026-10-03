@@ -32,7 +32,7 @@ class TamilbulbProvider : MainAPI() {
                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
     // ===================================================================
-    // HOME PAGE
+    // HOME PAGE — every section uses isHorizontalImages = true
     // ===================================================================
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val home = mutableListOf<HomePageList>()
@@ -46,8 +46,7 @@ class TamilbulbProvider : MainAPI() {
         for ((label, path) in categories) {
             val items = fetchCategoryPage(path, page)
             if (items.isNotEmpty()) {
-                // horizontalImages = true → poster is wide (16:9)
-                home.add(HomePageList(label, items, horizontalImages = true))
+                home.add(HomePageList(label, items, isHorizontalImages = true))
             }
         }
         return newHomePageResponse(home, hasNext = true)
@@ -137,14 +136,13 @@ class TamilbulbProvider : MainAPI() {
             ?: doc.selectFirst("meta[property=og:image]")?.attr("content")
 
         // --- Plot ---
-        // XPath: /main[1]/article[1]/div[2]  (the first .cast-variant-items-wrapper)
+        // XPath: /main[1]/article[1]/div[2]
         val plot = article.children()
             .firstOrNull { it.hasClass("cast-variant-items-wrapper") }
             ?.text()?.trim()?.takeIf { it.isNotBlank() }
 
         // --- Release year ---
         // XPath: .../header[1]/div[1]/div[2]/div[1]/div[1]/span[2]/span[1]
-        // = the 2nd .post-footer-item in the 1st .ft-post-meta
         val yearText = article.selectFirst(
             "header.entry-header .pp-content-wrapper > .ft-post-meta .post-footer-item:nth-of-type(2) .item-text"
         )?.text()
@@ -152,7 +150,6 @@ class TamilbulbProvider : MainAPI() {
 
         // --- Genres ---
         // XPath: .../header[1]/div[1]/div[2]/div[2]/div[1]/span/span
-        // = the 2nd .ft-post-meta block
         val genres = article.select(
             "header.entry-header .pp-content-wrapper > .ft-post-meta:nth-of-type(2) .post-footer-item .item-text"
         ).map { it.text().trim() }.filter { it.isNotBlank() }
@@ -162,7 +159,7 @@ class TamilbulbProvider : MainAPI() {
         val backgroundUrl = article.selectFirst("header.entry-header")?.attr("style")
             ?.let { Regex("""url\(["']?([^)"']+)["']?\)""").find(it)?.groupValues?.get(1) }
 
-        // Fallback genre tags from the breadcrumb category links
+        // Fallback genre tags from breadcrumb category links
         val fallbackTags = doc.select("a.category-item").map { it.text().trim() }
             .filter { it.isNotBlank() }
 
@@ -171,7 +168,6 @@ class TamilbulbProvider : MainAPI() {
             this.plot = plot
             this.year = year
             this.tags = genres.ifEmpty { fallbackTags }
-            // backgroundPosterUrl is only used if your SDK version supports it
             if (backgroundUrl != null) {
                 this.backgroundPosterUrl = backgroundUrl
             }
