@@ -2,18 +2,6 @@ package com.tamilbulb
 
 import android.util.Log
 
-/**
- * Port of the "compact" Dean Edwards P.A.C.K.E.R variant used by
- * VidHide / tamilgun.space:
- *
- *   eval(function(p,a,c,k,e,d){
- *     while(c--) if(k[c]) p = p.replace(new RegExp('\\b'+c.toString(a)+'\\b','g'), k[c]);
- *     return p;
- *   }('...', 36, 610, '...'.split('|')))
- *
- * Uses a permissive `.*?` for the function body so escaping differences
- * between HTML sources don't break the match.
- */
 object PackardDecoder {
 
     private val HEAD = Regex(
@@ -36,13 +24,43 @@ object PackardDecoder {
         Log.d("TamilBulb", "[packer] matched: payload=${payload.length}B " +
             "base=$base count=$count keys=${keys.size}")
 
-        // Replace tokens `count-1 .. 0` (descending) with keyword strings
+        // i from count-1 down to 0 — matches the JS `while(c--)` loop order
         for (i in count - 1 downTo 0) {
-            val key = i.toString(base)
+            val key  = toBaseN(i, base)
             val repl = keys.getOrNull(i).orEmpty()
             if (repl.isEmpty()) continue
             payload = payload.replace(Regex("""\b${Regex.escape(key)}\b"""), repl)
         }
         return payload
+    }
+
+    /**
+     * Exact port of the PACKER's JS `e` function:
+     *
+     *   e = function(c) {
+     *       return (c < a ? '' : e(parseInt(c / a))) +
+     *              ((c = c % a) > 35 ? String.fromCharCode(c + 29) : c.toString(36));
+     *   }
+     *
+     * Alphabet for base ≤ 62:
+     *   digits 0-9   → '0'..'9'
+     *   digits 10-35 → 'a'..'z'  (from `digit.toString(36)`)
+     *   digits 36-61 → 'A'..'Z'  (from `String.fromCharCode(digit + 29)`)
+     */
+    private fun toBaseN(num: Int, base: Int): String {
+        if (num == 0) return "0"
+        val sb = StringBuilder()
+        var x = num
+        while (x > 0) {
+            val digit = x % base
+            val ch = when {
+                digit < 10 -> ('0'.code + digit).toChar()
+                digit < 36 -> ('a'.code + digit - 10).toChar()
+                else       -> ('A'.code + digit - 36).toChar()
+            }
+            sb.insert(0, ch)
+            x /= base
+        }
+        return sb.toString()
     }
 }
