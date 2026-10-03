@@ -24,6 +24,17 @@ class N1mwqExtractor : ExtractorApi() {
 
     private fun log(msg: String) = Log.d("TamilBulb", "[n1mwq] $msg")
 
+    private fun browserHeaders(referer: String?): Map<String, String> = mapOf(
+        "User-Agent"      to ua,
+        "Accept"          to "application/json, text/plain, */*",
+        "Accept-Language" to "en-US,en;q=0.9",
+        "Referer"         to (referer ?: "https://tamilbulb.cc/"),
+        "Origin"          to "https://n1mwq.org",
+        "Sec-Fetch-Dest"  to "empty",
+        "Sec-Fetch-Mode"  to "cors",
+        "Sec-Fetch-Site"  to "cross-site"
+    )
+
     override suspend fun getUrl(
         url: String, referer: String?,
         subtitleCallback: (SubtitleFile) -> Unit,
@@ -42,15 +53,12 @@ class N1mwqExtractor : ExtractorApi() {
 
         val api = "https://n1mwq.org/api/videos/$code"
         val raw = try {
-            val resp = app.get(api, headers = mapOf(
-                "User-Agent" to ua,
-                "Referer"    to (referer ?: "https://tamilbulb.cc/"),
-                "Accept"     to "application/json"
-            ))
+            val resp = app.get(api, headers = browserHeaders(referer), timeout = 30L)
             log("API HTTP ${resp.code} (${resp.text.length} bytes)")
             resp.text
         } catch (e: Exception) {
-            Log.e("TamilBulb", "[n1mwq] API fetch failed", e); return
+            Log.e("TamilBulb", "[n1mwq] API fetch failed", e)
+            return
         }
 
         val root = JSONObject(raw)
@@ -76,8 +84,11 @@ class N1mwqExtractor : ExtractorApi() {
 
         val plain = try {
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-            cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"),
-                        GCMParameterSpec(128, b64u(ivB64)))
+            cipher.init(
+                Cipher.DECRYPT_MODE,
+                SecretKeySpec(key, "AES"),
+                GCMParameterSpec(128, b64u(ivB64))
+            )
             cipher.doFinal(b64u(ctB64)).toString(Charsets.UTF_8)
         } catch (e: Exception) {
             Log.e("TamilBulb", "[n1mwq] decrypt failed", e); return
@@ -94,12 +105,14 @@ class N1mwqExtractor : ExtractorApi() {
         if (m3u8.isNullOrBlank()) { log("✗ no m3u8 in plaintext"); return }
         log("→ emitting $m3u8")
 
-        callback.invoke(newExtractorLink(
-            source = name, name = label, url = m3u8, type = ExtractorLinkType.M3U8
-        ) {
-            this.referer = referer ?: url
-            this.quality = Qualities.Unknown.value
-        })
+        callback.invoke(
+            newExtractorLink(
+                source = name, name = label, url = m3u8, type = ExtractorLinkType.M3U8
+            ) {
+                this.referer = referer ?: url
+                this.quality = Qualities.Unknown.value
+            }
+        )
     }
 
     private fun b64u(s: String): ByteArray {
