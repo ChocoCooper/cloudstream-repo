@@ -48,9 +48,9 @@ class N1mwqExtractor : ExtractorApi() {
     ) {
         log("extract url=$url")
 
-        // Some players wrap the filemoon code inside a query param:
-        //   https://bulbmoviehd.online/r/?id=https://filemoon.to/d/y687uhvor9zx
-        // Grab the last segment as the code either way.
+        // Handle both:
+        //   https://filemoon.to/e/<code>
+        //   https://bulbmoviehd.online/r/?id=https://filemoon.to/d/<code>
         val code = url.trimEnd('/').substringAfterLast('/').substringAfterLast('=')
         if (code.isBlank()) { log("✗ empty code"); return }
         log("code=$code")
@@ -98,60 +98,57 @@ class N1mwqExtractor : ExtractorApi() {
         }
         log("plaintext=${plain.take(200)}…")
 
-        // ── THE FIX: parse JSON so `\u0026` gets decoded to `&` ──
-        val m3u8 = try {
+        // Parse the plaintext JSON. JSONObject auto-decodes `\u0026` → `&`.
+        val m3u8: String? = try {
             val j = JSONObject(plain)
 
-            // Try top-level fields first (older format)
-            j.optString("url").takeIf  { it.startsWith("http") }?.let { return emit(it, referer, url, label, callback) }
-            j.optString("file").takeIf { it.startsWith("http") }?.let { return emit(it, referer, url, label, callback) }
-            j.optString("m3u8").takeIf { it.startsWith("http") }?.let { return emit(it, referer, url, label, callback) }
+            // 1) top-level simple fields (older formats)
+            val simple = sequenceOf("url", "file", "m3u8")
+                .map { j.optString(it) }
+                .firstOrNull { it.startsWith("http") }
 
-            // Standard format: { "sources": [ { "url": "...", "label": "480p" }, ... ] }
-            val sources = j.optJSONArray("sources")
-            if (sources != null && sources.length() > 0) {
-                // Prefer the highest-quality entry that has a .m3u8 URL
-                var best: String? = null
+            // 2) standard format: sources: [ { url, label, ... }, ... ]
+            val fromSources: String? = run {
+                val sources = j.optJSONArray("sources") ?: return@run null
+                var bestUrl: String? = null
                 var bestScore = -1
                 for (i in 0 until sources.length()) {
                     val src = sources.optJSONObject(i) ?: continue
                     val u = src.optString("url").takeIf { it.startsWith("http") } ?: continue
                     val q = src.optString("label").filter { it.isDigit() }.toIntOrNull() ?: 0
-                    if (q > bestScore) { bestScore = q; best = u }
+                    if (q > bestScore) { bestScore = q; bestUrl = u }
                 }
-                if (best != null) {
-                    log("picked source label=${bestScore}p")
-                    return emit(best, referer, url, label, callback)
-                }
+                if (bestUrl != null) log("picked source label=${bestScore}p")
+                bestUrl
             }
-            null
+
+            simple ?: fromSources
         } catch (e: Exception) {
             log("JSON parse failed: ${e.message}")
             null
         }
 
-        // Regex fallback with the fix: exclude `\` from the URL character class
+        // Regex fallback — exclude backslash from URL char class to avoid `\u0026`
         val fallback = Regex("""https?://[^\s"'\\]+?\.m3u8[^\s"'\\]*""").find(plain)?.value
-        if (fallback != null) {
-            log("regex fallback URL=${fallback.take(100)}…")
-            emit(fallback, referer, url, label, callback)
-        } else {
-            log("✗ no m3u8 found")
-        }
-    }
 
-    private fun emit(
-        m3u8: String, referer: String?, sourceUrl: String, label: String,
-        callback: (ExtractorLink) -> Unit
-    ) {
-        // Sanity: strip any residual escapes just in case
-        val clean = m3u8.replace("\\u0026", "&").replace("\\/", "/")
+        val chosen = m3u8 ?: fallback
+        if (chosen.isNullOrBlank()) {
+            log("✗ no m3u8 found in plaintext")
+            return
+        }
+
+        // Belt-and-suspenders: strip any residual escapes
+        val clean = chosen.replace("\\u0026", "&").replace("\\/", "/")
         log("→ emitting ${clean.take(120)}…")
+
         callback.invoke(
             newExtractorLink(
-                source = name, name = label, url = clean, type = ExtractorLinkType.M3U8
+                source = name,
+                name   = label,
+                url    = clean,
+                type   = ExtractorLinkType.M3U8
             ) {
-                this.referer = referer ?: sourceUrl
+                this.referer = referer ?: url
                 this.quality = Qualities.Unknown.value
             }
         )
