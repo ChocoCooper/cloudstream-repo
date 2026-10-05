@@ -137,7 +137,9 @@ class JavHubProvider : MainAPI() {
         val cards = document.select("#search div.card-container a.video-link")
 
         for (card in cards) {
-            val href = card.attr("href").ifBlank { continue }
+            val href = card.attr("href")
+            if (href.isBlank()) continue
+
             val fullUrl = if (href.startsWith("http")) href else "$mainUrl$href"
 
             // Title: <p class="card-text title mb-0 vid-title">...</p>
