@@ -1,8 +1,8 @@
 package com.JavHub
 
 import android.util.Base64
-import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
 import org.jsoup.parser.Parser
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
@@ -66,16 +66,7 @@ class JavHubProvider : MainAPI() {
         "Madonna" to "Madonna"
     )
 
-    // ==================== Title / code helpers ====================
-
-    private fun cleanTitleText(raw: String?): String? {
-        if (raw.isNullOrBlank()) return null
-        return raw
-            .trim('-', '_', '|', ' ', '[', ']')
-            .replace(Regex("""\s{2,}"""), " ")
-            .trim()
-            .ifBlank { null }
-    }
+    // ==================== Helpers ====================
 
     private fun extractCode(text: String?): String? {
         if (text.isNullOrBlank()) return null
@@ -83,19 +74,21 @@ class JavHubProvider : MainAPI() {
         return regex.find(text)?.value?.uppercase()
     }
 
-    private fun extractContentIdFromUrl(url: String): String? {
-        return Regex("""/video/([a-zA-Z0-9]+)""").find(url)?.groupValues?.get(1)
-    }
-
-    // ==================== Lazy-load image helper ====================
-    // JavTrailers uses lazy loading: real URL is in `data-src`,
-    // `src` holds a base64 placeholder (data:image/gif;base64,...).
-    // We ONLY read data-src — never the src placeholder.
-    private fun lazyImageSrc(img: org.jsoup.nodes.Element?): String? {
+    // JavTrailers is inconsistent about lazy loading:
+    //   - Video page (#thumbnailContainer img): real URL is in `src`, `data-src` is empty.
+    //   - Search cards (img.card-img-top.video-image): real URL is in `data-src`, `src` is base64.
+    // Strategy: pick whichever attribute holds a real (non-base64) URL, preferring `src`.
+    private fun realImageUrl(img: Element?): String? {
         if (img == null) return null
+        val src     = img.attr("src").trim()
         val dataSrc = img.attr("data-src").trim()
-        if (dataSrc.isBlank()) return null
-        return fixUrlNull(dataSrc)
+
+        val chosen = when {
+            src.isNotBlank() && !src.startsWith("data:") -> src
+            dataSrc.isNotBlank() && !dataSrc.startsWith("data:") -> dataSrc
+            else -> null
+        }
+        return fixUrlNull(chosen)
     }
 
     // ==================== MissAV description / cast extraction ====================
@@ -142,7 +135,6 @@ class JavHubProvider : MainAPI() {
 
     private fun parseSearchPage(document: Document): List<SearchResponse> {
         val results = mutableListOf<SearchResponse>()
-
         val cards = document.select("#search div.card-container a.video-link")
 
         for (card in cards) {
@@ -162,11 +154,8 @@ class JavHubProvider : MainAPI() {
             val imgEl = card.selectFirst("img.card-img-top.video-image")
                 ?: card.selectFirst("img")
 
-            // Lazy-load: only data-src (never the base64 src placeholder)
-            val posterUrl = lazyImageSrc(imgEl)
-
-            val displayTitle = rawTitle
-            val code = extractCode(rawTitle)
+            val posterUrl = realImageUrl(imgEl)
+            val code      = extractCode(rawTitle)
 
             val data = LoadData(
                 url = fullUrl,
@@ -175,7 +164,7 @@ class JavHubProvider : MainAPI() {
             ).toJson()
 
             results.add(
-                newMovieSearchResponse(displayTitle, data, TvType.NSFW) {
+                newMovieSearchResponse(rawTitle, data, TvType.NSFW) {
                     this.posterUrl = posterUrl
                 }
             )
@@ -187,8 +176,7 @@ class JavHubProvider : MainAPI() {
     // ==================== Home page ====================
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val query   = request.data
-        val encoded = URLEncoder.encode(query, "UTF-8")
+        val encoded = URLEncoder.encode(request.data, "UTF-8")
         val url     = if (page <= 1) {
             "$mainUrl/search/$encoded"
         } else {
@@ -229,12 +217,8 @@ class JavHubProvider : MainAPI() {
         val loadData = runCatching { parseJson<LoadData>(url) }.getOrNull()
         val videoUrl = loadData?.url ?: url
 
-        // Fetch the video page
         val document = app.get(videoUrl, headers = browserHeaders).document
 
-        val contentId = extractContentIdFromUrl(videoUrl)
-
-        // ---- Title from the video page ----
         val rawTitle = document.selectFirst("h1")?.text()?.trim()?.decodeHtmlEntities()
             ?: loadData?.code
             ?: "Unknown"
@@ -247,32 +231,12 @@ class JavHubProvider : MainAPI() {
 
         val cleanCode = dvdId?.lowercase()
 
-        // ============================================================
-        // ---- Background image ----
-        // Selector: #description > div:nth-child(3) > img
-        // Primary: read data-src (the lazy-load attribute, holds real URL).
-        // If that URL ends with .webp (which some CloudStream image
-        // loaders render as blank), we derive the .jpg equivalent on
-        // the DMM CDN, which is confirmed to work with all loaders.
-        // ============================================================
-        val bgImageRaw: String? = document
-            .selectFirst("#description > div:nth-child(3) > img")
-            ?.attr("data-src")
-            ?.trim()
-            ?.ifBlank { null }
-
-        val bgImage: String? = bgImageRaw?.let { raw ->
-            val absolute = fixUrlNull(raw) ?: return@let null
-
-            // If we have the JavTrailers webp, try deriving the DMM jpg
-            // using the same contentId embedded in the URL.
-            if (absolute.endsWith(".webp") && !contentId.isNullOrBlank()) {
-                val dmmJpg = "https://pics.dmm.co.jp/digital/video/$contentId/${contentId}pl.jpg"
-                dmmJpg
-            } else {
-                absolute
-            }
-        }
+        // ---- Background image (selector: #thumbnailContainer img) ----
+        // Real URL is in `src` for the video page (data-src is empty).
+        // .webp keeps file size small and loads fast.
+        val bgImage: String? = realImageUrl(
+            document.selectFirst("#thumbnailContainer img")
+        )
 
         // ---- MissAV enrichment: description + cast ----
         var fetchedDescription: String?    = null
@@ -300,16 +264,12 @@ class JavHubProvider : MainAPI() {
             }
         }
 
-        // ============================================================
-        // ---- Plot: displayTitle, blank line, description ----
-        // Uses "\n \n" (newline + space + newline). The single space on
-        // the middle line prevents the TextView from collapsing the
-        // empty line — guaranteed visible gap on every renderer.
-        // ============================================================
+        // ---- Plot: displayTitle + blank line + description ----
+        // The \u00A0 (non-breaking space) prevents TextView from collapsing
+        // the blank separator line.
         val cleanDesc = fetchedDescription?.trim().orEmpty()
-
         val plotText: String = if (cleanDesc.isNotEmpty()) {
-            displayTitle + "\n \n" + cleanDesc
+            displayTitle + "\n\u00A0\n" + cleanDesc
         } else {
             displayTitle
         }
@@ -319,6 +279,7 @@ class JavHubProvider : MainAPI() {
         return newMovieLoadResponse(displayTitle, videoUrl, TvType.NSFW, loadDataJson) {
             this.posterUrl           = bgImage
             this.backgroundPosterUrl = bgImage
+            this.posterHeaders       = browserHeaders + mapOf("Referer" to "$mainUrl/")
             this.plot                = plotText
             this.actors              = fetchedActors
         }
