@@ -243,14 +243,15 @@ class JavHubProvider : MainAPI() {
         // ============================================================
         // ---- Background / poster image ----
         // Selector: #description > div:nth-child(3) > img
-        // Example: https://images.javtrailers.com/digital/video/jums00162/jums00162ps.w360.webp
+        // No fallback — uses only the extracted image.
         // ============================================================
-        val bgImage = document.selectFirst("#description > div:nth-child(3) > img")?.let { img ->
-            // Prefer src, fallback to data-src for lazy-loaded images
-            val src = img.attr("src").ifBlank { null }
-                ?: img.attr("data-src").ifBlank { null }
-            fixUrlNull(src)
-        } ?: loadData?.poster  // Fallback to search poster if not found
+        val bgImage: String? = document
+            .selectFirst("#description > div:nth-child(3) > img")
+            ?.let { img ->
+                val src = img.attr("src").ifBlank { null }
+                    ?: img.attr("data-src").ifBlank { null }
+                fixUrlNull(src)
+            }
 
         // ---- MissAV enrichment: description + cast ----
         var fetchedDescription: String?    = null
@@ -282,10 +283,15 @@ class JavHubProvider : MainAPI() {
         val loadDataJson = LoadData(videoUrl, bgImage, dvdId).toJson()
 
         return newMovieLoadResponse(displayTitle, videoUrl, TvType.NSFW, loadDataJson) {
-            this.posterUrl           = bgImage
+            // posterUrl — vertical poster (used in search results / cards)
+            this.posterUrl = bgImage
+
+            // backgroundPosterUrl — horizontal hero image on details page
+            // Properly utilized: set to the extracted bg image.
             this.backgroundPosterUrl = bgImage
-            this.plot                = plotText
-            this.actors              = fetchedActors
+
+            this.plot    = plotText
+            this.actors  = fetchedActors
         }
     }
 
