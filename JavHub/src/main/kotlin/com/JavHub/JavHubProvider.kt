@@ -241,11 +241,11 @@ class JavHubProvider : MainAPI() {
         val cleanCode = dvdId?.lowercase()
 
         // ============================================================
-        // ---- Background / poster image from #thumbnailContainer > img ----
-        // Selector: #thumbnailContainer > img
+        // ---- Background / poster image ----
+        // Selector: #description > div:nth-child(3) > img
         // Example: https://images.javtrailers.com/digital/video/jums00162/jums00162ps.w360.webp
         // ============================================================
-        val bgImage = document.selectFirst("#thumbnailContainer > img")?.let { img ->
+        val bgImage = document.selectFirst("#description > div:nth-child(3) > img")?.let { img ->
             // Prefer src, fallback to data-src for lazy-loaded images
             val src = img.attr("src").ifBlank { null }
                 ?: img.attr("data-src").ifBlank { null }
