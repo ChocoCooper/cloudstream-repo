@@ -152,18 +152,17 @@ class JavHubProvider : MainAPI() {
 
     // ==================== MissAV description / cast extraction ====================
 
+    // STRICT: only the primary description selector.
+    // No fallback to meta[og:description] or other divs (which grab footer text).
     private fun extractMissAvDescription(doc: Document): String? {
         val descEl = doc.selectFirst("div.mb-1.text-secondary.break-all")
-            ?: doc.selectFirst("div.text-secondary.break-all")
-            ?: doc.selectFirst("meta[property=og:description]")
+            ?: return null
 
-        val text = if (descEl?.tagName() == "meta") {
-            descEl.attr("content")
-        } else {
-            descEl?.text()
-        }
-
-        return text?.trim()?.decodeHtmlEntities()?.trim()?.ifBlank { null }
+        return descEl.text()
+            ?.trim()
+            ?.decodeHtmlEntities()
+            ?.trim()
+            ?.ifBlank { null }
     }
 
     private fun extractMissAvActors(doc: Document): List<ActorData> {
@@ -330,19 +329,13 @@ class JavHubProvider : MainAPI() {
         }
 
         // ============================================================
-        // ---- Plot: displayTitle as first paragraph, description as second ----
-        //
-        // CloudStream's details TextView strips plain \n\n, so we use a
-        // visible Unicode box-drawing divider between the two paragraphs.
-        // This guarantees the two blocks render as separate paragraphs
-        // regardless of the TextView's whitespace handling.
-        //
-        // If MissAV has no description, the plot is just the title alone.
+        // ---- Plot: displayTitle, divider, description ----
+        // If MissAV has no description, plot is just the title.
         // ============================================================
         val cleanDesc = fetchedDescription?.trim().orEmpty()
 
         val plotText: String = if (cleanDesc.isNotEmpty()) {
-            "$displayTitle\n\n\n$cleanDesc"
+            "$displayTitle\n.\n$cleanDesc"
         } else {
             displayTitle
         }
