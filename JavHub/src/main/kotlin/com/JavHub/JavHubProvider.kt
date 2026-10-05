@@ -87,6 +87,16 @@ class JavHubProvider : MainAPI() {
         return Regex("""/video/([a-zA-Z0-9]+)""").find(url)?.groupValues?.get(1)
     }
 
+    // ==================== Lazy-load image helper ====================
+    // JavTrailers uses lazy loading: real URL is in `data-src`,
+    // while `src` holds a base64 placeholder (data:image/gif;base64,...).
+    // We ONLY read data-src — no fallback to src.
+    private fun lazyImageSrc(img: org.jsoup.nodes.Element?): String? {
+        if (img == null) return null
+        val dataSrc = img.attr("data-src").ifBlank { null }
+        return fixUrlNull(dataSrc)
+    }
+
     // ==================== MissAV description / cast extraction ====================
 
     private fun extractMissAvDescription(doc: Document): String? {
@@ -100,7 +110,7 @@ class JavHubProvider : MainAPI() {
             descEl?.text()
         }
 
-        return text?.trim()?.decodeHtmlEntities()?.ifBlank { null }
+        return text?.trim()?.decodeHtmlEntities()?.trim()?.ifBlank { null }
     }
 
     private fun extractMissAvActors(doc: Document): List<ActorData> {
@@ -151,14 +161,10 @@ class JavHubProvider : MainAPI() {
             val imgEl = card.selectFirst("img.card-img-top.video-image")
                 ?: card.selectFirst("img")
 
-            val posterUrl = imgEl?.let {
-                val src = it.attr("data-src").ifBlank { null }
-                    ?: it.attr("src").ifBlank { null }
-                fixUrlNull(src)
-            }
+            // Lazy-load: only data-src, no src fallback
+            val posterUrl = lazyImageSrc(imgEl)
 
             val displayTitle = rawTitle
-
             val code = extractCode(rawTitle)
 
             val data = LoadData(
@@ -243,15 +249,12 @@ class JavHubProvider : MainAPI() {
         // ============================================================
         // ---- Background / poster image ----
         // Selector: #description > div:nth-child(3) > img
-        // No fallback — uses only the extracted image.
+        // Lazy-load: real URL in data-src, src is base64 placeholder.
+        // Only data-src is used — no src fallback, no other fallback.
         // ============================================================
-        val bgImage: String? = document
-            .selectFirst("#description > div:nth-child(3) > img")
-            ?.let { img ->
-                val src = img.attr("src").ifBlank { null }
-                    ?: img.attr("data-src").ifBlank { null }
-                fixUrlNull(src)
-            }
+        val bgImage: String? = lazyImageSrc(
+            document.selectFirst("#description > div:nth-child(3) > img")
+        )
 
         // ---- MissAV enrichment: description + cast ----
         var fetchedDescription: String?    = null
@@ -280,14 +283,14 @@ class JavHubProvider : MainAPI() {
         }
 
         // ============================================================
-        // ---- Plot: media title on top, then blank line, then description ----
-        // Format:
-        //   {displayTitle}
-        //
-        //   {extracted description}
+        // ---- Plot: displayTitle + ONE blank line + description ----
+        // Use explicit "\n\n" (LF LF) to guarantee a visible blank line.
+        // Trim the description so no stray whitespace merges them.
         // ============================================================
-        val plotText: String = if (!fetchedDescription.isNullOrBlank()) {
-            "$displayTitle\n\n$fetchedDescription"
+        val cleanDesc = fetchedDescription?.trim().orEmpty()
+
+        val plotText: String = if (cleanDesc.isNotEmpty()) {
+            displayTitle + "\n\n" + cleanDesc
         } else {
             displayTitle
         }
@@ -295,15 +298,10 @@ class JavHubProvider : MainAPI() {
         val loadDataJson = LoadData(videoUrl, bgImage, dvdId).toJson()
 
         return newMovieLoadResponse(displayTitle, videoUrl, TvType.NSFW, loadDataJson) {
-            // posterUrl — vertical poster (used in search results / cards)
-            this.posterUrl = bgImage
-
-            // backgroundPosterUrl — horizontal hero image on details page
-            // Properly utilized: set to the extracted bg image.
+            this.posterUrl           = bgImage
             this.backgroundPosterUrl = bgImage
-
-            this.plot   = plotText
-            this.actors = fetchedActors
+            this.plot                = plotText
+            this.actors              = fetchedActors
         }
     }
 
