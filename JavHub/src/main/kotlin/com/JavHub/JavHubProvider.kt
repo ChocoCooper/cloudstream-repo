@@ -74,7 +74,7 @@ class JavHubProvider : MainAPI() {
         return regex.find(text)?.value?.uppercase()
     }
 
-    // Vertical poster (used on search cards).
+    // Vertical poster (used on search cards only).
     // JavTrailers is inconsistent about lazy loading:
     //   - Search cards (img.card-img-top.video-image): real URL is in `data-src`, `src` is base64.
     //   - Some cards put the real URL in `src`, `data-src` empty.
@@ -92,18 +92,71 @@ class JavHubProvider : MainAPI() {
         return fixUrlNull(chosen)
     }
 
-    // Horizontal poster (used as background on details page).
+    // Horizontal poster (used on details page).
     // Source: <meta property="og:image" content="...">
     private fun horizontalImageUrl(doc: Document): String? {
-        val fromOg = doc.selectFirst("meta[property=og:image]")?.attr("content")?.trim()
-        if (!fromOg.isNullOrBlank() && !fromOg.startsWith("data:")) {
-            return fixUrlNull(fromOg)
-        }
-        val fromTwitter = doc.selectFirst("meta[name=twitter:image]")?.attr("content")?.trim()
-        if (!fromTwitter.isNullOrBlank() && !fromTwitter.startsWith("data:")) {
-            return fixUrlNull(fromTwitter)
+        val url = doc.selectFirst("meta[property=og:image]")?.attr("content")?.trim()
+        if (url.isNullOrBlank() || url.startsWith("data:")) return null
+        return fixUrlNull(url)
+    }
+
+    // ==================== Label-based info-row extraction ====================
+    //
+    // The video page has #info-row containing <p> elements, each like:
+    //   <p class="mb-1">
+    //     <span class="font-weight-bold mr-3">Release Date:</span>
+    //     20 Feb 2026
+    //   </p>
+    //
+    // We locate the <p> whose leading <span> starts with the given label.
+    // If no such row exists, we return null and the field is simply skipped.
+    //
+    private fun findInfoRow(doc: Document, vararg labels: String): String? {
+        val normalizedLabels = labels.map { it.trim().lowercase().removeSuffix(":") }
+        for (p in doc.select("#info-row p")) {
+            val spanText = p.selectFirst("span")?.text()?.trim()?.lowercase()?.removeSuffix(":")
+                ?: continue
+            if (spanText in normalizedLabels) {
+                // Return full text with the label span removed
+                val labelSpan = p.selectFirst("span")
+                val fullText = p.text().trim()
+                val labelText = labelSpan?.text()?.trim().orEmpty()
+                val value = if (labelText.isNotEmpty() && fullText.startsWith(labelText)) {
+                    fullText.removePrefix(labelText).trim()
+                } else {
+                    fullText
+                }
+                return value.ifBlank { null }
+            }
         }
         return null
+    }
+
+    private fun extractReleaseYear(doc: Document): Int? {
+        val raw = findInfoRow(doc, "Release Date") ?: return null
+        return Regex("""\b(19|20)\d{2}\b""").find(raw)?.value?.toIntOrNull()
+    }
+
+    private fun extractDurationMinutes(doc: Document): Int? {
+        val raw = findInfoRow(doc, "Duration") ?: return null
+        return Regex("""(\d+)\s*min""", RegexOption.IGNORE_CASE)
+            .find(raw)?.groupValues?.get(1)?.toIntOrNull()
+    }
+
+    // Categories row contains multiple <a> badges. We take the first 3.
+    private fun extractGenres(doc: Document, max: Int = 3): List<String> {
+        // Find the <p> whose label span starts with "Categories"
+        for (p in doc.select("#info-row p")) {
+            val spanText = p.selectFirst("span")?.text()?.trim()?.lowercase()?.removeSuffix(":")
+                ?: continue
+            if (spanText == "categories") {
+                return p.select("a")
+                    .map { it.text().trim().decodeHtmlEntities() }
+                    .filter { it.isNotBlank() }
+                    .take(max)
+            }
+        }
+        return emptyList()
     }
 
     // ==================== MissAV description / cast extraction ====================
@@ -246,16 +299,14 @@ class JavHubProvider : MainAPI() {
 
         val cleanCode = dvdId?.lowercase()
 
-        // ---- Vertical poster (search cards) ----
-        // #thumbnailContainer img → src (real URL, data-src empty on video page)
-        val verticalPoster: String? = verticalImageUrl(
-            document.selectFirst("#thumbnailContainer img")
-        )
-
-        // ---- Horizontal background (details page hero) ----
+        // ---- Horizontal poster (used on details page) ----
         // <meta property="og:image"> → content
-        // Example: https://images.javtrailers.com/digital/video/jur00816/jur00816pl.w800.webp
         val horizontalPoster: String? = horizontalImageUrl(document)
+
+        // ---- Label-based info fields (skipped if label not found) ----
+        val releaseYear: Int?    = extractReleaseYear(document)
+        val durationMinutes: Int? = extractDurationMinutes(document)
+        val genres: List<String>  = extractGenres(document, max = 3)
 
         // ---- MissAV enrichment: description + cast ----
         var fetchedDescription: String?    = null
@@ -286,23 +337,26 @@ class JavHubProvider : MainAPI() {
         // ---- Plot: displayTitle + blank line + description ----
         val cleanDesc = fetchedDescription?.trim().orEmpty()
         val plotText: String = if (cleanDesc.isNotEmpty()) {
-            displayTitle + "\n\u00A0\n" + cleanDesc
+            displayTitle + "\n\n" + cleanDesc
         } else {
             displayTitle
         }
 
-        val loadDataJson = LoadData(videoUrl, verticalPoster, dvdId).toJson()
+        val loadDataJson = LoadData(videoUrl, horizontalPoster, dvdId).toJson()
 
         return newMovieLoadResponse(displayTitle, videoUrl, TvType.NSFW, loadDataJson) {
-            // Vertical poster (cards / bookmarks)
-            this.posterUrl = verticalPoster
-
-            // Horizontal poster (details page hero background)
+            // Both posters use the horizontal image on the details page.
+            this.posterUrl           = horizontalPoster
             this.backgroundPosterUrl = horizontalPoster
 
             this.posterHeaders = browserHeaders + mapOf("Referer" to "$mainUrl/")
             this.plot          = plotText
             this.actors        = fetchedActors
+
+            // Only set if the values were found in the HTML
+            if (releaseYear != null)     this.year     = releaseYear
+            if (durationMinutes != null) this.duration = durationMinutes
+            if (genres.isNotEmpty())     this.tags     = genres
         }
     }
 
