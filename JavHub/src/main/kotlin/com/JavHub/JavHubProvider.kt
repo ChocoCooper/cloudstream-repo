@@ -74,11 +74,12 @@ class JavHubProvider : MainAPI() {
         return regex.find(text)?.value?.uppercase()
     }
 
+    // Vertical poster (used on search cards).
     // JavTrailers is inconsistent about lazy loading:
-    //   - Video page (#thumbnailContainer img): real URL is in `src`, `data-src` is empty.
     //   - Search cards (img.card-img-top.video-image): real URL is in `data-src`, `src` is base64.
+    //   - Some cards put the real URL in `src`, `data-src` empty.
     // Strategy: pick whichever attribute holds a real (non-base64) URL, preferring `src`.
-    private fun realImageUrl(img: Element?): String? {
+    private fun verticalImageUrl(img: Element?): String? {
         if (img == null) return null
         val src     = img.attr("src").trim()
         val dataSrc = img.attr("data-src").trim()
@@ -89,6 +90,20 @@ class JavHubProvider : MainAPI() {
             else -> null
         }
         return fixUrlNull(chosen)
+    }
+
+    // Horizontal poster (used as background on details page).
+    // Source: <meta property="og:image" content="...">
+    private fun horizontalImageUrl(doc: Document): String? {
+        val fromOg = doc.selectFirst("meta[property=og:image]")?.attr("content")?.trim()
+        if (!fromOg.isNullOrBlank() && !fromOg.startsWith("data:")) {
+            return fixUrlNull(fromOg)
+        }
+        val fromTwitter = doc.selectFirst("meta[name=twitter:image]")?.attr("content")?.trim()
+        if (!fromTwitter.isNullOrBlank() && !fromTwitter.startsWith("data:")) {
+            return fixUrlNull(fromTwitter)
+        }
+        return null
     }
 
     // ==================== MissAV description / cast extraction ====================
@@ -154,7 +169,7 @@ class JavHubProvider : MainAPI() {
             val imgEl = card.selectFirst("img.card-img-top.video-image")
                 ?: card.selectFirst("img")
 
-            val posterUrl = realImageUrl(imgEl)
+            val posterUrl = verticalImageUrl(imgEl)
             val code      = extractCode(rawTitle)
 
             val data = LoadData(
@@ -231,12 +246,16 @@ class JavHubProvider : MainAPI() {
 
         val cleanCode = dvdId?.lowercase()
 
-        // ---- Background image (selector: #thumbnailContainer img) ----
-        // Real URL is in `src` for the video page (data-src is empty).
-        // .webp keeps file size small and loads fast.
-        val bgImage: String? = realImageUrl(
+        // ---- Vertical poster (search cards) ----
+        // #thumbnailContainer img → src (real URL, data-src empty on video page)
+        val verticalPoster: String? = verticalImageUrl(
             document.selectFirst("#thumbnailContainer img")
         )
+
+        // ---- Horizontal background (details page hero) ----
+        // <meta property="og:image"> → content
+        // Example: https://images.javtrailers.com/digital/video/jur00816/jur00816pl.w800.webp
+        val horizontalPoster: String? = horizontalImageUrl(document)
 
         // ---- MissAV enrichment: description + cast ----
         var fetchedDescription: String?    = null
@@ -265,8 +284,6 @@ class JavHubProvider : MainAPI() {
         }
 
         // ---- Plot: displayTitle + blank line + description ----
-        // The \u00A0 (non-breaking space) prevents TextView from collapsing
-        // the blank separator line.
         val cleanDesc = fetchedDescription?.trim().orEmpty()
         val plotText: String = if (cleanDesc.isNotEmpty()) {
             displayTitle + "\n\u00A0\n" + cleanDesc
@@ -274,14 +291,18 @@ class JavHubProvider : MainAPI() {
             displayTitle
         }
 
-        val loadDataJson = LoadData(videoUrl, bgImage, dvdId).toJson()
+        val loadDataJson = LoadData(videoUrl, verticalPoster, dvdId).toJson()
 
         return newMovieLoadResponse(displayTitle, videoUrl, TvType.NSFW, loadDataJson) {
-            this.posterUrl           = bgImage
-            this.backgroundPosterUrl = bgImage
-            this.posterHeaders       = browserHeaders + mapOf("Referer" to "$mainUrl/")
-            this.plot                = plotText
-            this.actors              = fetchedActors
+            // Vertical poster (cards / bookmarks)
+            this.posterUrl = verticalPoster
+
+            // Horizontal poster (details page hero background)
+            this.backgroundPosterUrl = horizontalPoster
+
+            this.posterHeaders = browserHeaders + mapOf("Referer" to "$mainUrl/")
+            this.plot          = plotText
+            this.actors        = fetchedActors
         }
     }
 
