@@ -132,8 +132,6 @@ class JavHubProvider : MainAPI() {
     private fun parseSearchPage(document: Document): List<SearchResponse> {
         val results = mutableListOf<SearchResponse>()
 
-        // The search results grid lives inside #search.
-        // Each card is an <a> wrapping an image + title.
         val cards = document.select("#search div.card-container a.video-link")
 
         for (card in cards) {
@@ -142,7 +140,6 @@ class JavHubProvider : MainAPI() {
 
             val fullUrl = if (href.startsWith("http")) href else "$mainUrl$href"
 
-            // Title: <p class="card-text title mb-0 vid-title">...</p>
             val titleEl = card.selectFirst("p.card-text.title.mb-0.vid-title")
                 ?: card.selectFirst("p.vid-title")
                 ?: card.selectFirst("p.card-text.title")
@@ -151,7 +148,6 @@ class JavHubProvider : MainAPI() {
                 ?: card.attr("title").ifBlank { null }
                 ?: continue
 
-            // Poster: <img class="card-img-top video-image">
             val imgEl = card.selectFirst("img.card-img-top.video-image")
                 ?: card.selectFirst("img")
 
@@ -161,7 +157,6 @@ class JavHubProvider : MainAPI() {
                 fixUrlNull(src)
             }
 
-            // Use the raw title as display title (it already contains "DVD-ID Title")
             val displayTitle = rawTitle
 
             val code = extractCode(rawTitle)
@@ -245,12 +240,17 @@ class JavHubProvider : MainAPI() {
 
         val cleanCode = dvdId?.lowercase()
 
+        // ============================================================
         // ---- Background / poster image from #thumbnailContainer > img ----
-        val bgImage = document.selectFirst("#thumbnailContainer > img")?.let {
-            val src = it.attr("src").ifBlank { null }
-                ?: it.attr("data-src").ifBlank { null }
+        // Selector: #thumbnailContainer > img
+        // Example: https://images.javtrailers.com/digital/video/jums00162/jums00162ps.w360.webp
+        // ============================================================
+        val bgImage = document.selectFirst("#thumbnailContainer > img")?.let { img ->
+            // Prefer src, fallback to data-src for lazy-loaded images
+            val src = img.attr("src").ifBlank { null }
+                ?: img.attr("data-src").ifBlank { null }
             fixUrlNull(src)
-        } ?: loadData?.poster
+        } ?: loadData?.poster  // Fallback to search poster if not found
 
         // ---- MissAV enrichment: description + cast ----
         var fetchedDescription: String?    = null
