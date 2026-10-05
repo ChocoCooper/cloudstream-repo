@@ -74,10 +74,10 @@ class JavHubProvider : MainAPI() {
         return regex.find(text)?.value?.uppercase()
     }
 
-    // Vertical poster (used on search cards only).
+    // Vertical poster (used on search cards & bookmarks list).
     // JavTrailers is inconsistent about lazy loading:
     //   - Search cards (img.card-img-top.video-image): real URL is in `data-src`, `src` is base64.
-    //   - Some cards put the real URL in `src`, `data-src` empty.
+    //   - Video page (#thumbnailContainer img): real URL is in `src`, `data-src` is empty.
     // Strategy: pick whichever attribute holds a real (non-base64) URL, preferring `src`.
     private fun verticalImageUrl(img: Element?): String? {
         if (img == null) return null
@@ -92,7 +92,7 @@ class JavHubProvider : MainAPI() {
         return fixUrlNull(chosen)
     }
 
-    // Horizontal poster (used on details page).
+    // Horizontal poster (used on details page hero).
     // Source: <meta property="og:image" content="...">
     private fun horizontalImageUrl(doc: Document): String? {
         val url = doc.selectFirst("meta[property=og:image]")?.attr("content")?.trim()
@@ -117,7 +117,6 @@ class JavHubProvider : MainAPI() {
             val spanText = p.selectFirst("span")?.text()?.trim()?.lowercase()?.removeSuffix(":")
                 ?: continue
             if (spanText in normalizedLabels) {
-                // Return full text with the label span removed
                 val labelSpan = p.selectFirst("span")
                 val fullText = p.text().trim()
                 val labelText = labelSpan?.text()?.trim().orEmpty()
@@ -143,9 +142,8 @@ class JavHubProvider : MainAPI() {
             .find(raw)?.groupValues?.get(1)?.toIntOrNull()
     }
 
-    // Categories row contains multiple <a> badges. We take the first 3.
+    // Categories row contains multiple <a> badges. We take the first N.
     private fun extractGenres(doc: Document, max: Int = 3): List<String> {
-        // Find the <p> whose label span starts with "Categories"
         for (p in doc.select("#info-row p")) {
             val spanText = p.selectFirst("span")?.text()?.trim()?.lowercase()?.removeSuffix(":")
                 ?: continue
@@ -299,12 +297,18 @@ class JavHubProvider : MainAPI() {
 
         val cleanCode = dvdId?.lowercase()
 
-        // ---- Horizontal poster (used on details page) ----
+        // ---- Vertical poster (bookmarks list / cards) ----
+        // #thumbnailContainer img → src
+        val verticalPoster: String? = verticalImageUrl(
+            document.selectFirst("#thumbnailContainer img")
+        )
+
+        // ---- Horizontal poster (details page hero) ----
         // <meta property="og:image"> → content
         val horizontalPoster: String? = horizontalImageUrl(document)
 
         // ---- Label-based info fields (skipped if label not found) ----
-        val releaseYear: Int?    = extractReleaseYear(document)
+        val releaseYear: Int?     = extractReleaseYear(document)
         val durationMinutes: Int? = extractDurationMinutes(document)
         val genres: List<String>  = extractGenres(document, max = 3)
 
@@ -342,18 +346,19 @@ class JavHubProvider : MainAPI() {
             displayTitle
         }
 
-        val loadDataJson = LoadData(videoUrl, horizontalPoster, dvdId).toJson()
+        val loadDataJson = LoadData(videoUrl, verticalPoster, dvdId).toJson()
 
         return newMovieLoadResponse(displayTitle, videoUrl, TvType.NSFW, loadDataJson) {
-            // Both posters use the horizontal image on the details page.
-            this.posterUrl           = horizontalPoster
+            // posterUrl → used for bookmarks list and cards (vertical)
+            this.posterUrl = verticalPoster
+
+            // backgroundPosterUrl → used for details page hero (horizontal)
             this.backgroundPosterUrl = horizontalPoster
 
             this.posterHeaders = browserHeaders + mapOf("Referer" to "$mainUrl/")
             this.plot          = plotText
             this.actors        = fetchedActors
 
-            // Only set if the values were found in the HTML
             if (releaseYear != null)     this.year     = releaseYear
             if (durationMinutes != null) this.duration = durationMinutes
             if (genres.isNotEmpty())     this.tags     = genres
