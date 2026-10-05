@@ -46,50 +46,6 @@ data class JavtifulWatchConfig(
     @JsonProperty("playerSources") val playerSources: List<JavtifulSource>? = null
 )
 
-// ============ JavTrailers API models ============
-
-data class JavTrailersVideo(
-    @JsonProperty("_id")         val id: String? = null,
-    @JsonProperty("title")       val title: String? = null,
-    @JsonProperty("jpTitle")     val jpTitle: String? = null,
-    @JsonProperty("contentId")   val contentId: String? = null,
-    @JsonProperty("dvdId")       val dvdId: String? = null,
-    @JsonProperty("releaseDate") val releaseDate: String? = null,
-    @JsonProperty("duration")    val duration: Int? = null,
-    @JsonProperty("image")       val image: String? = null
-)
-
-data class JavTrailersListResponse(
-    @JsonProperty("success") val success: Boolean? = null,
-    @JsonProperty("count")   val count: Int? = null,
-    @JsonProperty("videos")  val videos: List<JavTrailersVideo>? = null
-)
-
-data class JavTrailersDetailResponse(
-    @JsonProperty("success") val success: Boolean? = null,
-    @JsonProperty("video")   val video: JavTrailersVideo? = null
-)
-
-data class MeiliSearchResponse(
-    @JsonProperty("hits")       val hits: List<MeiliHit>? = null,
-    @JsonProperty("totalHits")  val totalHits: Int? = null,
-    @JsonProperty("page")       val page: Int? = null,
-    @JsonProperty("totalPages") val totalPages: Int? = null
-)
-
-data class MeiliHit(
-    @JsonProperty("_id")         val id: String? = null,
-    @JsonProperty("id")          val id2: String? = null,
-    @JsonProperty("title")       val title: String? = null,
-    @JsonProperty("enTitle")     val enTitle: String? = null,
-    @JsonProperty("jpTitle")     val jpTitle: String? = null,
-    @JsonProperty("contentId")   val contentId: String? = null,
-    @JsonProperty("dvdId")       val dvdId: String? = null,
-    @JsonProperty("releaseDate") val releaseDate: String? = null,
-    @JsonProperty("duration")    val duration: Int? = null,
-    @JsonProperty("image")       val image: String? = null
-)
-
 class JavHubProvider : MainAPI() {
     override var mainUrl              = "https://javtrailers.com"
     override var name                 = "JavHub"
@@ -106,18 +62,8 @@ class JavHubProvider : MainAPI() {
     private val subtitleCatUrl = "https://www.subtitlecat.com"
     private val missAvUrl      = "https://missav.ws"
 
-    // ---- JavTrailers endpoints / tokens ----
-    private val JAVTRAILERS_API          = "$mainUrl/api"
-    private val JAVTRAILERS_AUTH         = "AELAbPQCh_fifd93wMvf_kxMD_fqkUAVf@BVgb2!md@TNW8bUEopFExyGCoKRcZX"
-    private val JAVTRAILERS_SEARCH_TOKEN = "e8f7f0a9891342bcde8aeee404526aa3c94ba743b914d1211456201d64318788"
-    private val JAVTRAILERS_SEARCH_HOST  = "https://search.javtrailers.com"
-    private val JAVTRAILERS_IMAGE_BASE   = "https://images.javtrailers.com/digital/video"
-
-    // Madonna studio Mongo _id (used as home page section identifier)
-    private val MADONNA_STUDIO_ID = "5b2934755b1ff448d9a7b700"
-
     override val mainPage = mainPageOf(
-        MADONNA_STUDIO_ID to "Madonna"
+        "Madonna" to "Madonna"
     )
 
     // ==================== Title / code helpers ====================
@@ -135,11 +81,6 @@ class JavHubProvider : MainAPI() {
         if (text.isNullOrBlank()) return null
         val regex = Regex("""\b([a-zA-Z0-9]{2,8}(?:-[a-zA-Z0-9]{2,8})?-\d{2,6})\b""")
         return regex.find(text)?.value?.uppercase()
-    }
-
-    private fun buildBgCoverUrl(contentId: String?): String? {
-        if (contentId.isNullOrBlank()) return null
-        return "$JAVTRAILERS_IMAGE_BASE/$contentId/${contentId}pl.w800.webp"
     }
 
     private fun extractContentIdFromUrl(url: String): String? {
@@ -186,65 +127,74 @@ class JavHubProvider : MainAPI() {
         return actors
     }
 
-    // ==================== Mapping helpers ====================
+    // ==================== Search page parsing ====================
 
-    private fun JavTrailersVideo.toSearchResult(): SearchResponse? {
-        val cid = contentId ?: return null
-        val dvd = dvdId ?: return null
-        val rawTitle = title ?: jpTitle ?: return null
+    private fun parseSearchPage(document: Document): List<SearchResponse> {
+        val results = mutableListOf<SearchResponse>()
 
-        val displayTitle = "$dvd $rawTitle"
-        val poster = buildBgCoverUrl(cid) ?: image
+        // The search results grid lives inside #search.
+        // Each card is an <a> wrapping an image + title.
+        val cards = document.select("#search div.card-container a.video-link")
 
-        val data = LoadData(
-            url = "$mainUrl/video/$cid",
-            poster = poster,
-            code = dvd
-        ).toJson()
+        for (card in cards) {
+            val href = card.attr("href").ifBlank { continue }
+            val fullUrl = if (href.startsWith("http")) href else "$mainUrl$href"
 
-        return newMovieSearchResponse(displayTitle, data, TvType.NSFW) {
-            this.posterUrl = poster
+            // Title: <p class="card-text title mb-0 vid-title">...</p>
+            val titleEl = card.selectFirst("p.card-text.title.mb-0.vid-title")
+                ?: card.selectFirst("p.vid-title")
+                ?: card.selectFirst("p.card-text.title")
+
+            val rawTitle = titleEl?.text()?.trim()?.decodeHtmlEntities()
+                ?: card.attr("title").ifBlank { null }
+                ?: continue
+
+            // Poster: <img class="card-img-top video-image">
+            val imgEl = card.selectFirst("img.card-img-top.video-image")
+                ?: card.selectFirst("img")
+
+            val posterUrl = imgEl?.let {
+                val src = it.attr("data-src").ifBlank { null }
+                    ?: it.attr("src").ifBlank { null }
+                fixUrlNull(src)
+            }
+
+            // Use the raw title as display title (it already contains "DVD-ID Title")
+            val displayTitle = rawTitle
+
+            val code = extractCode(rawTitle)
+
+            val data = LoadData(
+                url = fullUrl,
+                poster = posterUrl,
+                code = code
+            ).toJson()
+
+            results.add(
+                newMovieSearchResponse(displayTitle, data, TvType.NSFW) {
+                    this.posterUrl = posterUrl
+                }
+            )
         }
-    }
 
-    private fun MeiliHit.toSearchResult(): SearchResponse? {
-        val cid = contentId ?: return null
-        val dvd = dvdId ?: return null
-        val rawTitle = title ?: enTitle ?: jpTitle ?: return null
-
-        val displayTitle = "$dvd $rawTitle"
-        val poster = buildBgCoverUrl(cid) ?: image
-
-        val data = LoadData(
-            url = "$mainUrl/video/$cid",
-            poster = poster,
-            code = dvd
-        ).toJson()
-
-        return newMovieSearchResponse(displayTitle, data, TvType.NSFW) {
-            this.posterUrl = poster
-        }
+        return results
     }
 
     // ==================== Home page ====================
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        val studioId = request.data
-        val apiPage  = (page - 1).coerceAtLeast(0)
-        val url      = "$JAVTRAILERS_API/videos?studio=$studioId&page=$apiPage"
+        val query   = request.data
+        val encoded = URLEncoder.encode(query, "UTF-8")
+        val url     = if (page <= 1) {
+            "$mainUrl/search/$encoded"
+        } else {
+            "$mainUrl/search/$encoded?page=$page"
+        }
 
-        val headers = browserHeaders + mapOf(
-            "Authorization" to JAVTRAILERS_AUTH,
-            "Accept"        to "*/*",
-            "Referer"       to "$mainUrl/videos"
-        )
+        val document = app.get(url, headers = browserHeaders).document
+        val items    = parseSearchPage(document)
 
-        val response = app.get(url, headers = headers).text
-        val data     = parseJson<JavTrailersListResponse>(response)
-        val videos   = data.videos ?: emptyList()
-        val items    = videos.mapNotNull { it.toSearchResult() }
-
-        return newHomePageResponse(request.name, items, hasNext = videos.size >= 24)
+        return newHomePageResponse(request.name, items, hasNext = items.isNotEmpty())
     }
 
     // ==================== Search ====================
@@ -256,17 +206,13 @@ class JavHubProvider : MainAPI() {
             (1..2).map { page ->
                 async {
                     runCatching {
-                        val url = "$JAVTRAILERS_SEARCH_HOST/indexes/videos/search" +
-                                "?q=$encoded&page=$page&sort=releaseDate:desc&hitsPerPage=24"
-                        val headers = browserHeaders + mapOf(
-                            "Authorization" to "Bearer $JAVTRAILERS_SEARCH_TOKEN",
-                            "Accept"        to "*/*",
-                            "Origin"        to mainUrl,
-                            "Referer"       to "$mainUrl/"
-                        )
-                        val response = app.get(url, headers = headers, timeout = 15).text
-                        val data = parseJson<MeiliSearchResponse>(response)
-                        (data.hits ?: emptyList()).mapNotNull { it.toSearchResult() }
+                        val url = if (page == 1) {
+                            "$mainUrl/search/$encoded"
+                        } else {
+                            "$mainUrl/search/$encoded?page=$page"
+                        }
+                        val document = app.get(url, headers = browserHeaders, timeout = 15).document
+                        parseSearchPage(document)
                     }.getOrDefault(emptyList())
                 }
             }.awaitAll().flatten().distinctBy { it.url }
@@ -279,39 +225,30 @@ class JavHubProvider : MainAPI() {
         val loadData = runCatching { parseJson<LoadData>(url) }.getOrNull()
         val videoUrl = loadData?.url ?: url
 
+        // Fetch the video page
+        val document = app.get(videoUrl, headers = browserHeaders).document
+
         val contentId = extractContentIdFromUrl(videoUrl)
-            ?: loadData?.code?.lowercase()
 
-        // Fetch JavTrailers detail API for bg cover + canonical metadata
-        var detailVideo: JavTrailersVideo? = null
-        if (!contentId.isNullOrBlank()) {
-            val headers = browserHeaders + mapOf(
-                "Authorization" to JAVTRAILERS_AUTH,
-                "Accept"        to "*/*",
-                "Referer"       to "$mainUrl/video/$contentId"
-            )
-            val detailResp = runCatching {
-                app.get("$JAVTRAILERS_API/video/$contentId", headers = headers, timeout = 15).text
-            }.getOrNull()
-            detailVideo = detailResp
-                ?.let { runCatching { parseJson<JavTrailersDetailResponse>(it) }.getOrNull() }
-                ?.video
-        }
+        // ---- Title from the video page ----
+        val rawTitle = document.selectFirst("h1")?.text()?.trim()?.decodeHtmlEntities()
+            ?: loadData?.code
+            ?: "Unknown"
 
-        // Background cover (w800 webp) — from detail API, else constructed
-        val bgCover = detailVideo?.image
-            ?: loadData?.poster
-            ?: buildBgCoverUrl(contentId)
-
-        // DVD id / title
-        val dvdId = detailVideo?.dvdId ?: loadData?.code
-        val rawTitle = detailVideo?.title ?: loadData?.code ?: "Unknown"
+        val dvdId = loadData?.code ?: extractCode(rawTitle)
         val displayTitle = if (!dvdId.isNullOrBlank() &&
                                 !rawTitle.startsWith(dvdId, ignoreCase = true)) {
             "$dvdId $rawTitle"
         } else rawTitle
 
         val cleanCode = dvdId?.lowercase()
+
+        // ---- Background / poster image from #thumbnailContainer > img ----
+        val bgImage = document.selectFirst("#thumbnailContainer > img")?.let {
+            val src = it.attr("src").ifBlank { null }
+                ?: it.attr("data-src").ifBlank { null }
+            fixUrlNull(src)
+        } ?: loadData?.poster
 
         // ---- MissAV enrichment: description + cast ----
         var fetchedDescription: String?    = null
@@ -340,11 +277,11 @@ class JavHubProvider : MainAPI() {
         }
 
         val plotText = fetchedDescription?.ifBlank { null } ?: rawTitle
-        val loadDataJson = LoadData(videoUrl, bgCover, dvdId).toJson()
+        val loadDataJson = LoadData(videoUrl, bgImage, dvdId).toJson()
 
         return newMovieLoadResponse(displayTitle, videoUrl, TvType.NSFW, loadDataJson) {
-            this.posterUrl           = bgCover
-            this.backgroundPosterUrl = bgCover
+            this.posterUrl           = bgImage
+            this.backgroundPosterUrl = bgImage
             this.plot                = plotText
             this.actors              = fetchedActors
         }
