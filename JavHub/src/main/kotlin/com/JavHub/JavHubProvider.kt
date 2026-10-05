@@ -279,7 +279,19 @@ class JavHubProvider : MainAPI() {
             }
         }
 
-        val plotText = fetchedDescription?.ifBlank { null } ?: rawTitle
+        // ============================================================
+        // ---- Plot: media title on top, then blank line, then description ----
+        // Format:
+        //   {displayTitle}
+        //
+        //   {extracted description}
+        // ============================================================
+        val plotText: String = if (!fetchedDescription.isNullOrBlank()) {
+            "$displayTitle\n\n$fetchedDescription"
+        } else {
+            displayTitle
+        }
+
         val loadDataJson = LoadData(videoUrl, bgImage, dvdId).toJson()
 
         return newMovieLoadResponse(displayTitle, videoUrl, TvType.NSFW, loadDataJson) {
@@ -290,8 +302,8 @@ class JavHubProvider : MainAPI() {
             // Properly utilized: set to the extracted bg image.
             this.backgroundPosterUrl = bgImage
 
-            this.plot    = plotText
-            this.actors  = fetchedActors
+            this.plot   = plotText
+            this.actors = fetchedActors
         }
     }
 
