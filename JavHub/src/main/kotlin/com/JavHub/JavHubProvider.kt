@@ -89,11 +89,12 @@ class JavHubProvider : MainAPI() {
 
     // ==================== Lazy-load image helper ====================
     // JavTrailers uses lazy loading: real URL is in `data-src`,
-    // while `src` holds a base64 placeholder (data:image/gif;base64,...).
-    // We ONLY read data-src — no fallback to src.
+    // `src` holds a base64 placeholder (data:image/gif;base64,...).
+    // We ONLY read data-src — never the src placeholder.
     private fun lazyImageSrc(img: org.jsoup.nodes.Element?): String? {
         if (img == null) return null
-        val dataSrc = img.attr("data-src").ifBlank { null }
+        val dataSrc = img.attr("data-src").trim()
+        if (dataSrc.isBlank()) return null
         return fixUrlNull(dataSrc)
     }
 
@@ -161,7 +162,7 @@ class JavHubProvider : MainAPI() {
             val imgEl = card.selectFirst("img.card-img-top.video-image")
                 ?: card.selectFirst("img")
 
-            // Lazy-load: only data-src, no src fallback
+            // Lazy-load: only data-src (never the base64 src placeholder)
             val posterUrl = lazyImageSrc(imgEl)
 
             val displayTitle = rawTitle
@@ -247,14 +248,31 @@ class JavHubProvider : MainAPI() {
         val cleanCode = dvdId?.lowercase()
 
         // ============================================================
-        // ---- Background / poster image ----
+        // ---- Background image ----
         // Selector: #description > div:nth-child(3) > img
-        // Lazy-load: real URL in data-src, src is base64 placeholder.
-        // Only data-src is used — no src fallback, no other fallback.
+        // Primary: read data-src (the lazy-load attribute, holds real URL).
+        // If that URL ends with .webp (which some CloudStream image
+        // loaders render as blank), we derive the .jpg equivalent on
+        // the DMM CDN, which is confirmed to work with all loaders.
         // ============================================================
-        val bgImage: String? = lazyImageSrc(
-            document.selectFirst("#description > div:nth-child(3) > img")
-        )
+        val bgImageRaw: String? = document
+            .selectFirst("#description > div:nth-child(3) > img")
+            ?.attr("data-src")
+            ?.trim()
+            ?.ifBlank { null }
+
+        val bgImage: String? = bgImageRaw?.let { raw ->
+            val absolute = fixUrlNull(raw) ?: return@let null
+
+            // If we have the JavTrailers webp, try deriving the DMM jpg
+            // using the same contentId embedded in the URL.
+            if (absolute.endsWith(".webp") && !contentId.isNullOrBlank()) {
+                val dmmJpg = "https://pics.dmm.co.jp/digital/video/$contentId/${contentId}pl.jpg"
+                dmmJpg
+            } else {
+                absolute
+            }
+        }
 
         // ---- MissAV enrichment: description + cast ----
         var fetchedDescription: String?    = null
@@ -283,14 +301,15 @@ class JavHubProvider : MainAPI() {
         }
 
         // ============================================================
-        // ---- Plot: displayTitle + ONE blank line + description ----
-        // Use explicit "\n\n" (LF LF) to guarantee a visible blank line.
-        // Trim the description so no stray whitespace merges them.
+        // ---- Plot: displayTitle, blank line, description ----
+        // Uses "\n \n" (newline + space + newline). The single space on
+        // the middle line prevents the TextView from collapsing the
+        // empty line — guaranteed visible gap on every renderer.
         // ============================================================
         val cleanDesc = fetchedDescription?.trim().orEmpty()
 
         val plotText: String = if (cleanDesc.isNotEmpty()) {
-            displayTitle + "\n\n" + cleanDesc
+            displayTitle + "\n \n" + cleanDesc
         } else {
             displayTitle
         }
