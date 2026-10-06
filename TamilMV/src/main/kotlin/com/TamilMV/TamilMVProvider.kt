@@ -6,17 +6,25 @@ import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
 import com.lagradost.cloudstream3.utils.newExtractorLink
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import org.json.JSONArray
+import org.json.JSONObject
 import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
 import java.net.URLEncoder
 
 class TamilMV : MainAPI() {
 
-    override var mainUrl = "https://www.1tamilmv.capital"
-    override var name = "TamilMV"
-    override var lang = "ta"
-    override val hasMainPage = true
+    override var mainUrl  = "https://www.1tamilmv.capital"
+    override var name     = "TamilMV"
+    override var lang     = "ta"
+    override val hasMainPage        = true
     override val hasDownloadSupport = true
-    override val supportedTypes = setOf(TvType.Movie)
+    override val supportedTypes     = setOf(TvType.Movie)
 
     override val mainPage = mainPageOf(
         "top_releases"   to "Top Releases This Week",
@@ -24,7 +32,7 @@ class TamilMV : MainAPI() {
     )
 
     // ────────────────────────────────────────────────────────────
-    // HOME PAGE
+    // HOME
     // ────────────────────────────────────────────────────────────
     override suspend fun getMainPage(
         page: Int,
@@ -34,9 +42,9 @@ class TamilMV : MainAPI() {
         val items = when (request.data) {
             "top_releases"   -> parseBangerSection(doc, "TOP RELEASES THIS WEEK")
             "recently_added" -> parseBangerSection(doc, "RECENTLY ADDED")
-            else -> emptyList()
+            else             -> emptyList()
         }
-        return newHomePageResponse(request.name, items)
+        return newHomePageResponse(request.name, enrichWithPosters(items))
     }
 
     private fun parseBangerSection(doc: Document, headerKeyword: String): List<SearchResponse> {
@@ -56,9 +64,9 @@ class TamilMV : MainAPI() {
                 val url = if (href.startsWith("http")) href else "$mainUrl$href"
                 if (!seen.add(url)) return@forEach
 
-                val title = a.text().trim().ifEmpty { return@forEach }
+                val fullTitle = a.text().trim().ifEmpty { return@forEach }
                 out.add(
-                    newMovieSearchResponse(title, url, TvType.Movie) {
+                    newMovieSearchResponse(fullTitle.toShortTitle(), url, TvType.Movie) {
                         this.posterUrl = null
                     }
                 )
@@ -68,93 +76,94 @@ class TamilMV : MainAPI() {
     }
 
     // ────────────────────────────────────────────────────────────
-    // SEARCH  →  /search/?q=<query>&direct=1
+    // SEARCH  →  /search/api/search.php (JSON)
     // ────────────────────────────────────────────────────────────
     override suspend fun search(query: String): List<SearchResponse> {
-        val q  = URLEncoder.encode(query, "UTF-8")
-        val url = "$mainUrl/search/?q=$q&direct=1"
-        Log.d(TAG, "search: $url")
-        val doc = app.get(url).document
-        return parseSearchResults(doc)
+        val q   = URLEncoder.encode(query, "UTF-8")
+        val api = "$mainUrl/search/api/search.php" +
+                  "?q=$q&direct=1&priority=1&sort=title_asc&page=1&per_page=25"
+
+        Log.d(TAG, "search: $api")
+
+        val json = try {
+            app.get(
+                api,
+                referer = "$mainUrl/search/?q=$q&direct=1",
+                headers = mapOf("X-Requested-With" to "XMLHttpRequest")
+            ).text
+        } catch (e: Exception) {
+            Log.e(TAG, "search request failed: ${e.message}")
+            return emptyList()
+        }
+
+        val parsed = parseSearchJson(json)
+        Log.d(TAG, "search → ${parsed.size} results")
+        return enrichWithPosters(parsed)
     }
 
-    private fun parseSearchResults(doc: Document): List<SearchResponse> {
+    private fun parseSearchJson(json: String): List<SearchResponse> {
         val out  = mutableListOf<SearchResponse>()
-        val seen = mutableSetOf<String>()
+        val seen = mutableSetOf<Int>()
 
-        fun addItem(href: String, title: String) {
-            if (!href.contains("/forums/topic/")) return
-            val cleanTitle = title
-                .removeSuffix("Direct Link")
-                .replace(Regex("""\s*★.*$"""), "")
-                .trim()
-            if (cleanTitle.length < 5) return
+        try {
+            val root = JSONObject(json)
+            val arr: JSONArray = root.optJSONArray("results") ?: return emptyList()
 
-            val url = if (href.startsWith("http")) href else "$mainUrl$href"
-            if (!seen.add(url)) return
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
 
-            out.add(newMovieSearchResponse(cleanTitle, url, TvType.Movie) {})
-        }
+                val tid   = obj.optInt("tid", 0)
+                val title = obj.optString("title").trim()
 
-        // Strategy A — custom search page (sRow template)
-        doc.select("a.sRow[href]").forEach { row ->
-            val href  = row.attr("href")
-            val title = row.selectFirst(".sTitle")?.text()?.trim()
-                ?: row.selectFirst("h3, h4, strong")?.text()?.trim()
-                ?: row.text().trim().take(180)
-            addItem(href, title)
-        }
+                if (tid <= 0 || title.isBlank()) continue
+                if (!seen.add(tid)) continue
 
-        // Strategy B — standard IPS stream results
-        if (out.isEmpty()) {
-            doc.select(
-                "li.ipsStreamItem h2 a, " +
-                "li.ipsStreamItem a.ipsContained, " +
-                "a.ipsDataItem_title[href*=forums/topic]"
-            ).forEach { addItem(it.attr("href"), it.text().trim()) }
-        }
-
-        // Strategy C — plain topic links fallback
-        if (out.isEmpty()) {
-            doc.select("a[href*=forums/topic/]").forEach { a ->
-                addItem(a.attr("href"), a.text().trim())
+                val url = "$mainUrl/index.php?/forums/topic/$tid/"
+                out.add(
+                    newMovieSearchResponse(title.toShortTitle(), url, TvType.Movie) {
+                        this.posterUrl = null
+                    }
+                )
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "JSON parse failed: ${e.message}")
+            Log.e(TAG, "raw head: ${json.take(400)}")
         }
 
-        Log.d(TAG, "search → ${out.size} results")
         return out
     }
 
     // ────────────────────────────────────────────────────────────
-    // LOAD  →  Topic page (movie only)
+    // LOAD
     // ────────────────────────────────────────────────────────────
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url).document
 
-        val rawTitle = doc.selectFirst("h1.ipsType_pageTitle")?.text()?.trim()
+        val fullTitle = doc.selectFirst("h1.ipsType_pageTitle")?.text()?.trim()
             ?: doc.selectFirst("title")?.text()?.trim()
             ?: "Unknown"
-        val title = rawTitle.cleanTitle()
 
         val poster = doc
             .selectFirst("article.cPost div[data-role=commentContent] img.ipsImage")
             ?.attr("src")
             ?.takeIf { it.startsWith("http") }
 
-        val plot = doc
+        val postText = doc
             .selectFirst("article.cPost div[data-role=commentContent]")
             ?.text()
             ?.trim()
-            ?.take(800)
+            ?: ""
 
-        return newMovieLoadResponse(title, url, TvType.Movie, url) {
+        val plot = "$fullTitle\n\n$postText".take(2500)
+
+        return newMovieLoadResponse(fullTitle.toShortTitle(), url, TvType.Movie, url) {
             this.posterUrl = poster
-            this.plot = plot
+            this.plot      = plot
         }
     }
 
     // ────────────────────────────────────────────────────────────
-    // LOAD LINKS  →  resolve every cyberloom short-link on the page
+    // LOAD LINKS
     // ────────────────────────────────────────────────────────────
     override suspend fun loadLinks(
         data: String,
@@ -164,35 +173,53 @@ class TamilMV : MainAPI() {
     ): Boolean {
         val doc = app.get(data).document
 
-        // Collect every cyberloom short link
-        val cyberLinks = linkedSetOf<String>()
+        val candidates = mutableListOf<Pair<String, BlockInfo>>()
+        val seen       = mutableSetOf<String>()
 
         doc.select("a.download-button, a[href*=cyberloom]").forEach { a ->
             val href = a.attr("href").trim()
-            if (CYBERLOOM_RX.containsMatchIn(href)) cyberLinks.add(href)
-        }
-        // Raw HTML sweep, in case hrefs are injected by JS
-        if (cyberLinks.isEmpty()) {
-            CYBERLOOM_RX.findAll(doc.html()).forEach { cyberLinks.add(it.value) }
+            if (!CYBERLOOM_RX.containsMatchIn(href)) return@forEach
+            if (!seen.add(href)) return@forEach
+
+            val info = findBlockInfo(a)
+            if (info.isOversized) {
+                Log.d(TAG, "skip oversized block: $href  (${info.size})")
+                return@forEach
+            }
+            candidates.add(href to info)
         }
 
-        Log.d(TAG, "cyberloom candidates: ${cyberLinks.size}")
+        if (candidates.isEmpty()) {
+            CYBERLOOM_RX.findAll(doc.html()).forEach { m ->
+                if (seen.add(m.value)) candidates.add(m.value to BlockInfo(null, null, false))
+            }
+        }
+
+        Log.d(TAG, "cyberloom candidates: ${candidates.size}")
 
         var any = false
-        for (cyber in cyberLinks) {
+        for ((cyber, info) in candidates) {
             try {
                 val direct = resolveCyberloom(cyber) ?: continue
-                val label  = detectLabel(direct)
+
+                val sizeLabel = info.size
+                    ?: detectSizeFromUrl(direct)
+                    ?: "Direct"
+                val quality = info.quality.toQualityValue()
+                    .takeIf { it != Qualities.Unknown.value }
+                    ?: detectQuality(direct)
+
+                Log.d(TAG, "link → $sizeLabel  ($quality)  $direct")
 
                 callback.invoke(
                     newExtractorLink(
                         source = this.name,
-                        name   = "TamilMV • $label",
+                        name   = "TamilMV • $sizeLabel",
                         url    = direct,
                         type   = ExtractorLinkType.VIDEO
                     ) {
                         this.referer = "$mainUrl/"
-                        this.quality = detectQuality(direct)
+                        this.quality = quality
                     }
                 )
                 any = true
@@ -204,23 +231,57 @@ class TamilMV : MainAPI() {
     }
 
     // ────────────────────────────────────────────────────────────
-    // CYBERLOOM RESOLVER
-    //   cyberloom.best/l/xxx  →  gateway  →  /out?t=…  →  messycloud  →  juicybits
+    // Block info (size + resolution from the block header)
+    // ────────────────────────────────────────────────────────────
+    private data class BlockInfo(
+        val size: String?,
+        val quality: String?,
+        val isOversized: Boolean
+    )
+
+    private fun findBlockInfo(anchor: Element): BlockInfo {
+        var cur = anchor.previousElementSibling()
+        while (cur != null) {
+            if (cur.tagName() == "strong") {
+                val text = cur.text()
+                val sizeM = SIZE_RX.find(text)?.value?.replace(" ", "")
+                if (sizeM != null) {
+                    val oversized = isOversized(sizeM)
+                    return BlockInfo(
+                        size        = sizeM,
+                        quality     = RES_RX.find(text)?.groupValues?.get(1),
+                        isOversized = oversized
+                    )
+                }
+            }
+            cur = cur.previousElementSibling()
+        }
+        return BlockInfo(null, null, false)
+    }
+
+    /** Skip anything whose smallest advertised size is 10 GB or more. */
+    private fun isOversized(sizeLabel: String): Boolean {
+        val m = SIZE_RX.find(sizeLabel) ?: return false
+        val value = m.groupValues[1].toDoubleOrNull() ?: return false
+        val unit  = m.groupValues[2].uppercase()
+        val gb    = if (unit == "GB") value else value / 1024.0
+        return gb >= OVERSIZE_GB
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // Cyberloom resolver
     // ────────────────────────────────────────────────────────────
     private suspend fun resolveCyberloom(cyberUrl: String): String? {
         val hop1 = app.get(cyberUrl)
-        var doc  = hop1.document
+        val doc1 = hop1.document
         val url1 = hop1.url
 
         Log.d(TAG, "hop1 → $url1")
+        if (url1.contains("messycloud")) return extractFromMessycloud(doc1)
 
-        // Already at messycloud?
-        if (url1.contains("messycloud")) return extractFromMessycloud(doc)
-
-        // Parse CTA on the gateway page
-        val ctaHref = doc.selectFirst("a#cta")?.attr("href")
-            ?: doc.selectFirst("a[href*=/out?t=]")?.attr("href")
-            ?: doc.selectFirst("a[href*=cyberloom.best/out]")?.attr("href")
+        val ctaHref = doc1.selectFirst("a#cta")?.attr("href")
+            ?: doc1.selectFirst("a[href*=/out?t=]")?.attr("href")
+            ?: doc1.selectFirst("a[href*=cyberloom.best/out]")?.attr("href")
 
         if (ctaHref.isNullOrBlank()) {
             Log.d(TAG, "no CTA on $url1")
@@ -238,7 +299,6 @@ class TamilMV : MainAPI() {
         val hop3 = app.get(ctaUrl)
         Log.d(TAG, "hop3 → ${hop3.url}")
 
-        // Some /out endpoints respond 200 with a JS redirect
         val jsRedirect = JS_REDIRECT_RX.find(hop3.text)?.groupValues?.get(1)
         val messyDoc = if (!jsRedirect.isNullOrBlank() && jsRedirect.contains("messycloud")) {
             Log.d(TAG, "js redirect → $jsRedirect")
@@ -251,15 +311,39 @@ class TamilMV : MainAPI() {
     }
 
     private fun extractFromMessycloud(doc: Document): String? {
-        // Anchor pass
         doc.select("a[href]").forEach { a ->
             val h = a.attr("href").trim()
             if (isDirectDownloadUrl(h)) return h
         }
-        // Raw HTML sweep
         CDN_RX.find(doc.html())?.let { return it.value }
         return null
     }
+
+    // ────────────────────────────────────────────────────────────
+    // Poster enrichment (parallel, 5-way)
+    // ────────────────────────────────────────────────────────────
+    private suspend fun enrichWithPosters(items: List<SearchResponse>): List<SearchResponse> =
+        coroutineScope {
+            if (items.isEmpty()) return@coroutineScope items
+            val sem = Semaphore(5)
+            items.map { item ->
+                async {
+                    sem.withPermit {
+                        try {
+                            val doc = app.get(item.url).document
+                            val poster = doc
+                                .selectFirst("article.cPost div[data-role=commentContent] img.ipsImage")
+                                ?.attr("src")
+                                ?.takeIf { it.startsWith("http") }
+                            if (poster != null) item.posterUrl = poster
+                        } catch (e: Exception) {
+                            Log.e(TAG, "poster fetch failed for ${item.url}: ${e.message}")
+                        }
+                        item
+                    }
+                }
+            }.awaitAll()
+        }
 
     // ────────────────────────────────────────────────────────────
     // Helpers
@@ -271,30 +355,64 @@ class TamilMV : MainAPI() {
         return FILE_EXT_RX.containsMatchIn(url)
     }
 
+    private fun String?.toQualityValue(): Int = when (this?.lowercase()) {
+        "1080p" -> Qualities.P1080.value
+        "720p"  -> Qualities.P720.value
+        "480p"  -> Qualities.P480.value
+        "360p"  -> Qualities.P360.value
+        "240p"  -> Qualities.P240.value
+        else    -> Qualities.Unknown.value
+    }
+
     private fun detectQuality(url: String): Int = when {
-        url.contains("2160p", true) || url.contains("4K", true) -> Qualities.P2160.value
-        url.contains("1080p", true)                               -> Qualities.P1080.value
-        url.contains("720p",  true)                               -> Qualities.P720.value
-        url.contains("480p",  true)                               -> Qualities.P480.value
-        url.contains("360p",  true)                               -> Qualities.P360.value
-        else                                                      -> Qualities.Unknown.value
+        url.contains("1080p", true) -> Qualities.P1080.value
+        url.contains("720p",  true) -> Qualities.P720.value
+        url.contains("480p",  true) -> Qualities.P480.value
+        url.contains("360p",  true) -> Qualities.P360.value
+        url.contains("240p",  true) -> Qualities.P240.value
+        else                        -> Qualities.Unknown.value
     }
 
-    private fun detectLabel(url: String): String = when {
-        url.contains("2160p", true) || url.contains("4K", true) -> "4K"
-        url.contains("1080p", true)                               -> "1080p"
-        url.contains("720p",  true)                               -> "720p"
-        url.contains("480p",  true)                               -> "480p"
-        else                                                      -> "Direct"
+    private fun detectSizeFromUrl(url: String): String? {
+        val m = Regex("""[-_](\d+(?:\.\d+)?)\s*(GB|MB)(?:[_-]|\.|$)""", RegexOption.IGNORE_CASE)
+            .find(url)
+        return m?.let { "${it.groupValues[1]}${it.groupValues[2].uppercase()}" }
     }
 
-    private fun String.cleanTitle(): String = this
-        .replace(Regex("""\s*\|\s*x264.*$"""), "")
-        .replace(Regex("""\s*-\s*ESub.*$"""), "")
-        .trim()
+    /**
+     * Extract "Title (YYYY)" plus an optional language + release-type tag.
+     *
+     *   "Spider Man: Brand New Day (2026) (HD + Org Auds) - […]"
+     *       → "Spider Man: Brand New Day (2026)"
+     *
+     *   "Vishwanath and Sons (2026) Tamil HQ PreDVD - […]"
+     *       → "Vishwanath and Sons (2026) • Tamil • HQ PreDVD"
+     */
+    private fun String.toShortTitle(): String {
+        val cleaned = this.replace(Regex("""\s+"""), " ").trim()
+        val m = Regex("""^(.+?\(\d{4}(?:[–\-]\d{4})?\))\s*(.*)""").find(cleaned)
+            ?: return cleaned.take(100)
+
+        val base = m.groupValues[1].trim()
+        val rest = m.groupValues[2].trim()
+        if (rest.isBlank()) return base
+
+        val lang = LANG_RX.find(rest)?.value
+        val type = TYPE_RX.find(rest)?.value
+
+        val parts = listOfNotNull(lang, type)
+            .map { it.replace(Regex("""\s+"""), " ").trim() }
+            .distinct()
+
+        return if (parts.isEmpty()) base
+               else "$base • ${parts.joinToString(" • ")}"
+    }
 
     companion object {
         private const val TAG = "TamilMV"
+
+        /** Threshold in GB above which a block is skipped. */
+        private const val OVERSIZE_GB = 10.0
 
         private val CYBERLOOM_RX = Regex(
             """https?://(?:www\.)?cyberloom\.best/l/[A-Za-z0-9]+"""
@@ -309,6 +427,22 @@ class TamilMV : MainAPI() {
         )
         private val JS_REDIRECT_RX = Regex(
             """location\s*(?:\.\s*href\s*=\s*|\.replace\s*\(\s*|\.assign\s*\(\s*)["']([^"']+)["']""",
+            RegexOption.IGNORE_CASE
+        )
+        private val SIZE_RX = Regex(
+            """(\d+(?:\.\d+)?)\s*(GB|MB)""",
+            RegexOption.IGNORE_CASE
+        )
+        private val RES_RX = Regex(
+            """\b(1080p|720p|480p|360p|240p)\b""",
+            RegexOption.IGNORE_CASE
+        )
+        private val LANG_RX = Regex(
+            """\b(Tamil|Telugu|Hindi|Malayalam|Kannada|English|Multi)\b""",
+            RegexOption.IGNORE_CASE
+        )
+        private val TYPE_RX = Regex(
+            """\b(HQ\s+PreDVD|PreDVD|HQ\s+HDRip|HDRip|HQ\s+HDTS|HDTS|TRUE\s+WEB-DL|WEB-DL|WEBRip|BluRay|Audio\s+launch|HDTV|HQ\s+Clean)\b""",
             RegexOption.IGNORE_CASE
         )
     }
