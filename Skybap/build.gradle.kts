@@ -4,7 +4,7 @@ version = 2
 cloudstream {
     // All of these properties are optional, you can safely remove them
 
-    description = "Skymovieshd Provider"
+    description = "SkymoviesHD Provider"
     authors = listOf("ChocoCooper")
 
     /**
