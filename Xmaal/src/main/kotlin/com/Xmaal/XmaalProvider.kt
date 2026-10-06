@@ -38,9 +38,9 @@ class XmaalProvider : MainAPI() {
     }
 
     private object Domains {
-        const val OTTDUDE   = "https://ottdude.com"
+        const val OTTDUDE   = "https://ottdude.cc"
         const val MAALVDO   = "https://maalvdo.co"
-        const val XMAZA     = "https://xmaza.xxx"
+        const val XMAZA     = "https://xmaza.adult"
         const val ZMAAL     = "https://zmaal.net"
         const val UNCUTMAZA = "https://uncutmaza.movie"
         const val XMAZA2    = "https://xmaza2.net"
