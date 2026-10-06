@@ -4,7 +4,7 @@ version = 2
 
 cloudstream {
     authors = listOf("ChocoCooper")
-    description = "TamilMV Provider (only contents that have a direct link)"
+    description = "TamilMV Provider (only contents with DL)"
 
     /**
     * Status int as the following:
