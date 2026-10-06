@@ -6,6 +6,7 @@ cloudstream {
 
     description = "#1 Best JAV Provider"
     authors = listOf("ChocoCooper")
+    language = "en"
 
     /**
      * Status int as the following:
