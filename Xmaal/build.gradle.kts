@@ -6,6 +6,7 @@ cloudstream {
 
     description = "Indian Bold Series"
     authors = listOf("ChocoCooper")
+    language = "hi"
 
     /**
      * Status int as the following:
