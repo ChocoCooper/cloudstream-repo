@@ -1,5 +1,5 @@
 // use an integer for version numbers
-version = 11
+version = 12
 
 cloudstream {
     // All of these properties are optional, you can safely remove them
@@ -17,10 +17,7 @@ cloudstream {
      * */
     status = 1 // will be 3 if unspecified
 
-    // List of video source types. Users are able to filter for extensions in a given category.
-    // You can find a list of available types here:
-    // https://recloudstream.github.io/cloudstream/html/app/com.lagradost.cloudstream3/-tv-type/index.html
     tvTypes = listOf("NSFW")
-    iconUrl = "https://www.film1k.com/favicon.ico"
+    iconUrl = "https://www.film1k.com/wp-content/uploads/2026/03/film1k-logo.webp"
     isCrossPlatform = true
 }
