@@ -497,12 +497,13 @@ class XmaalProvider : MainAPI() {
     // Cast extraction
     // ------------------------------------------------------------------
 
-    private fun extractCast(doc: Document): List<String> =
+    private fun extractCast(doc: Document): List<ActorData> =
         doc.select(".xx-cast-list a, a[rel=model]")
             .map { it.text().trim() }
             .filter { it.isNotBlank() && it.length < 60 }
             .distinct()
             .take(20)
+            .map { ActorData(name = it) }
 
     // ------------------------------------------------------------------
     // Series URL detection
