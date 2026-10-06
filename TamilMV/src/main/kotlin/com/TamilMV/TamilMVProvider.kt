@@ -1,3 +1,4 @@
+// src/TamilMV/src/main/kotlin/com/TamilMV/TamilMVProvider.kt
 package com.TamilMV
 
 import android.util.Log
@@ -16,6 +17,7 @@ import org.json.JSONObject
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import java.net.URLEncoder
+import java.util.concurrent.ConcurrentHashMap
 
 class TamilMV : MainAPI() {
 
@@ -30,6 +32,9 @@ class TamilMV : MainAPI() {
         "top_releases"   to "Top Releases This Week",
         "recently_added" to "Recently Added"
     )
+
+    /** Cache: topic URL → poster URL. Survives across navigation. */
+    private val posterCache = ConcurrentHashMap<String, String>()
 
     // ────────────────────────────────────────────────────────────
     // HOME
@@ -67,7 +72,7 @@ class TamilMV : MainAPI() {
                 val fullTitle = a.text().trim().ifEmpty { return@forEach }
                 out.add(
                     newMovieSearchResponse(fullTitle.toShortTitle(), url, TvType.Movie) {
-                        this.posterUrl = null
+                        this.posterUrl = posterCache[url]
                     }
                 )
             }
@@ -118,10 +123,10 @@ class TamilMV : MainAPI() {
                 if (tid <= 0 || title.isBlank()) continue
                 if (!seen.add(tid)) continue
 
-                val url = "$mainUrl/index.php?/forums/topic/$tid/"
+                val url = buildTopicUrl(tid, title)
                 out.add(
                     newMovieSearchResponse(title.toShortTitle(), url, TvType.Movie) {
-                        this.posterUrl = null
+                        this.posterUrl = posterCache[url]
                     }
                 )
             }
@@ -135,30 +140,39 @@ class TamilMV : MainAPI() {
 
     // ────────────────────────────────────────────────────────────
     // LOAD
+    //   name  == same trimmed title as home/search card
+    //   plot  == full release title from <h1.ipsType_pageTitle>
     // ────────────────────────────────────────────────────────────
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url).document
 
-        val fullTitle = doc.selectFirst("h1.ipsType_pageTitle")?.text()?.trim()
-            ?: doc.selectFirst("title")?.text()?.trim()
+        val rawH1 = doc.selectFirst("h1.ipsType_pageTitle")
+            ?.text()
+            ?.replace(Regex("""\s+"""), " ")
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
+
+        val fullTitle = rawH1
+            ?: doc.selectFirst("title")?.text()
+                ?.replace(Regex("""\s+"""), " ")
+                ?.substringBefore(" - Hollywood Movies")
+                ?.substringBefore(" - Tamil Language")
+                ?.substringBefore(" - Telugu Language")
+                ?.substringBefore(" - Hindi Language")
+                ?.substringBefore(" - Malayalam Language")
+                ?.substringBefore(" - Kannada Language")
+                ?.substringBefore(" - English Language")
+                ?.trim()
             ?: "Unknown"
 
-        val poster = doc
-            .selectFirst("article.cPost div[data-role=commentContent] img.ipsImage")
-            ?.attr("src")
-            ?.takeIf { it.startsWith("http") }
+        val shortTitle = fullTitle.toShortTitle()
 
-        val postText = doc
-            .selectFirst("article.cPost div[data-role=commentContent]")
-            ?.text()
-            ?.trim()
-            ?: ""
+        val poster = extractPoster(doc)
+        if (poster != null) posterCache[url] = poster
 
-        val plot = "$fullTitle\n\n$postText".take(2500)
-
-        return newMovieLoadResponse(fullTitle.toShortTitle(), url, TvType.Movie, url) {
+        return newMovieLoadResponse(shortTitle, url, TvType.Movie, url) {
             this.posterUrl = poster
-            this.plot      = plot
+            this.plot      = fullTitle
         }
     }
 
@@ -241,31 +255,90 @@ class TamilMV : MainAPI() {
 
     private fun findBlockInfo(anchor: Element): BlockInfo {
         var cur = anchor.previousElementSibling()
-        while (cur != null) {
+        var depth = 0
+        while (cur != null && depth < 15) {
             if (cur.tagName() == "strong") {
-                val text = cur.text()
+                val text  = cur.text()
                 val sizeM = SIZE_RX.find(text)?.value?.replace(" ", "")
                 if (sizeM != null) {
-                    val oversized = isOversized(sizeM)
                     return BlockInfo(
                         size        = sizeM,
                         quality     = RES_RX.find(text)?.groupValues?.get(1),
-                        isOversized = oversized
+                        isOversized = isOversized(sizeM)
                     )
                 }
             }
             cur = cur.previousElementSibling()
+            depth++
         }
         return BlockInfo(null, null, false)
     }
 
-    /** Skip anything whose smallest advertised size is 10 GB or more. */
     private fun isOversized(sizeLabel: String): Boolean {
         val m = SIZE_RX.find(sizeLabel) ?: return false
         val value = m.groupValues[1].toDoubleOrNull() ?: return false
         val unit  = m.groupValues[2].uppercase()
         val gb    = if (unit == "GB") value else value / 1024.0
         return gb >= OVERSIZE_GB
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // POSTER EXTRACTION
+    //
+    //   <article class="cPost">
+    //     <div data-role="commentContent">
+    //       <p>
+    //         <span><strong>
+    //           <a data-ipslightbox href="https://pbs.twimg.com/...">
+    //             <img class="ipsImage ipsImage_thumbnailed" src="...">
+    //           </a>
+    //         </strong></span>
+    //       </p>
+    //     </div>
+    //   </article>
+    //
+    //   Also handles:  img.ipsImage  |  img.ipsImage_thumbnailed  |
+    //                  img.ipsImage_thumbnailed_colorized  |
+    //                  img[src*="pbs.twimg"]  |  img[src*="pixelbb"]
+    // ────────────────────────────────────────────────────────────
+    private fun extractPoster(doc: Document): String? {
+        val content = doc.selectFirst("article.cPost div[data-role=commentContent]")
+            ?: doc.selectFirst("div[data-role=commentContent]")
+            ?: return null
+
+        // 1. Any <img> with an image class
+        content.selectFirst(
+            "img.ipsImage, img.ipsImage_thumbnailed, " +
+            "img.ipsImage_thumbnailed_colorized, " +
+            "img[src*=pbs.twimg], img[src*=pixelbb]"
+        )?.let { img ->
+            listOf("src", "data-src", "data-original")
+                .asSequence()
+                .map { img.attr(it).trim() }
+                .firstOrNull { it.startsWith("http") }
+                ?.let { return it }
+        }
+
+        // 2. Lightbox anchor wrapping an image
+        content.selectFirst("a[data-ipslightbox], a[data-lightbox-group]")
+            ?.attr("href")
+            ?.trim()
+            ?.takeIf { it.startsWith("http") && isImageUrl(it) }
+            ?.let { return it }
+
+        // 3. Regex sweep on the post HTML
+        IMAGE_URL_RX.find(content.html())?.value?.let { return it }
+
+        return null
+    }
+
+    private fun isImageUrl(url: String): Boolean {
+        val lower = url.lowercase()
+        return lower.contains("pbs.twimg.com") ||
+               lower.contains("pixelbb") ||
+               lower.contains("imgur") ||
+               lower.contains("postimg") ||
+               IMAGE_EXT_RX.containsMatchIn(lower)
     }
 
     // ────────────────────────────────────────────────────────────
@@ -320,22 +393,26 @@ class TamilMV : MainAPI() {
     }
 
     // ────────────────────────────────────────────────────────────
-    // Poster enrichment (parallel, 5-way)
+    // Poster enrichment (parallel, cached)
     // ────────────────────────────────────────────────────────────
     private suspend fun enrichWithPosters(items: List<SearchResponse>): List<SearchResponse> =
         coroutineScope {
             if (items.isEmpty()) return@coroutineScope items
-            val sem = Semaphore(5)
+            val sem = Semaphore(6)
             items.map { item ->
                 async {
                     sem.withPermit {
+                        posterCache[item.url]?.let {
+                            item.posterUrl = it
+                            return@withPermit item
+                        }
                         try {
-                            val doc = app.get(item.url).document
-                            val poster = doc
-                                .selectFirst("article.cPost div[data-role=commentContent] img.ipsImage")
-                                ?.attr("src")
-                                ?.takeIf { it.startsWith("http") }
-                            if (poster != null) item.posterUrl = poster
+                            val doc    = app.get(item.url).document
+                            val poster = extractPoster(doc)
+                            if (poster != null) {
+                                item.posterUrl = poster
+                                posterCache[item.url] = poster
+                            }
                         } catch (e: Exception) {
                             Log.e(TAG, "poster fetch failed for ${item.url}: ${e.message}")
                         }
@@ -348,6 +425,32 @@ class TamilMV : MainAPI() {
     // ────────────────────────────────────────────────────────────
     // Helpers
     // ────────────────────────────────────────────────────────────
+
+    /**
+     * Build an IPB topic URL that the site accepts.
+     *
+     *   tid   = 199155
+     *   title = "Vishwanath and Sons (2026) Tamil Audio launch TRUE WEB-DL - [1080p & 720p - AVC - 2.9GB - 1.3GB & 500MB]"
+     *   →
+     *   https://www.1tamilmv.capital/index.php?/forums/topic/199155-vishwanath-and-sons-2026-tamil-audio-launch-true-web-dl-1080p-720p-avc-29gb-13gb-500mb/
+     *
+     * Slug rules (verified against live URLs):
+     *   • lowercase
+     *   • every non-[a-z0-9.] char → '-'
+     *   • every '.' removed
+     *   • collapse runs of '-'
+     *   • strip leading/trailing '-'
+     */
+    private fun buildTopicUrl(tid: Int, title: String): String {
+        val slug = title
+            .lowercase()
+            .replace(Regex("[^a-z0-9.]+"), "-")
+            .replace(".", "")
+            .replace(Regex("-+"), "-")
+            .trim('-')
+        return "$mainUrl/index.php?/forums/topic/$tid-$slug/"
+    }
+
     private fun isDirectDownloadUrl(url: String): Boolean {
         if (!url.startsWith("http")) return false
         if (url.contains("juicybits")) return true
@@ -380,13 +483,16 @@ class TamilMV : MainAPI() {
     }
 
     /**
-     * Extract "Title (YYYY)" plus an optional language + release-type tag.
+     * Trim "Title (YYYY)" plus an optional language + release-type suffix.
      *
      *   "Spider Man: Brand New Day (2026) (HD + Org Auds) - […]"
      *       → "Spider Man: Brand New Day (2026)"
      *
-     *   "Vishwanath and Sons (2026) Tamil HQ PreDVD - […]"
-     *       → "Vishwanath and Sons (2026) • Tamil • HQ PreDVD"
+     *   "Meesaya Murukku 2 (2026) Tamil PreDVD - […]"
+     *       → "Meesaya Murukku 2 (2026) • Tamil • PreDVD"
+     *
+     * Both home/search cards AND load-response name call this, so they always
+     * resolve to the identical string.
      */
     private fun String.toShortTitle(): String {
         val cleaned = this.replace(Regex("""\s+"""), " ").trim()
@@ -443,6 +549,14 @@ class TamilMV : MainAPI() {
         )
         private val TYPE_RX = Regex(
             """\b(HQ\s+PreDVD|PreDVD|HQ\s+HDRip|HDRip|HQ\s+HDTS|HDTS|TRUE\s+WEB-DL|WEB-DL|WEBRip|BluRay|Audio\s+launch|HDTV|HQ\s+Clean)\b""",
+            RegexOption.IGNORE_CASE
+        )
+        private val IMAGE_EXT_RX = Regex(
+            """\.(jpg|jpeg|png|webp|gif)(\?|$)""",
+            RegexOption.IGNORE_CASE
+        )
+        private val IMAGE_URL_RX = Regex(
+            """https?://(?:pbs\.twimg\.com[^\s"'<>`\\]+|[^\s"'<>`\\]+?\.(?:jpg|jpeg|png|webp|gif)(?:\?[^\s"'<>`\\]*)?)""",
             RegexOption.IGNORE_CASE
         )
     }
