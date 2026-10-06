@@ -503,7 +503,7 @@ class XmaalProvider : MainAPI() {
             .filter { it.isNotBlank() && it.length < 60 }
             .distinct()
             .take(20)
-            .map { ActorData(name = it) }
+            .map { ActorData(actor = Actor(name = it)) }
 
     // ------------------------------------------------------------------
     // Series URL detection
