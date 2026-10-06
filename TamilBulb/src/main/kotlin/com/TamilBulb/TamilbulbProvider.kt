@@ -29,6 +29,7 @@ class TamilbulbProvider : MainAPI() {
     override var mainUrl = "https://tamilbulb.cc"
     override var name = "TamilBulb"
     override val hasMainPage = true
+    override var lang = "ta"
     override val hasQuickSearch = true
     override val supportedTypes = setOf(TvType.Movie)
 
