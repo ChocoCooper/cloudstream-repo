@@ -5,7 +5,6 @@ cloudstream {
     // All of these properties are optional, you can safely remove them
 
     description = "#1 Best JAV Provider"
-    language = "en"
     authors = listOf("ChocoCooper")
 
     /**
