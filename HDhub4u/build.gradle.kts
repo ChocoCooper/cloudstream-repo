@@ -3,7 +3,7 @@ version = 4
 
 
 cloudstream {
-    authors = listOf("ChocoCooper","Phisher98")
+    authors = listOf("ChocoCooper")
 
     /**
     * Status int as the following:
@@ -17,10 +17,8 @@ cloudstream {
     tvTypes = listOf(
         "Movie",
         "TvSeries",
-        "Anime"
     )
-    language = "ta"
-//  https://t0.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://hdhub4u.gratis&size=64
+    description = "HDhub4u Provider"
     iconUrl = "https://raw.githubusercontent.com/phisher98/TVVVV/refs/heads/main/Icons/HDHUB.png"
 
     isCrossPlatform = false
