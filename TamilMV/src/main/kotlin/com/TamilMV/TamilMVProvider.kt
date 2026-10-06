@@ -33,7 +33,6 @@ class TamilMV : MainAPI() {
         "recently_added" to "Recently Added"
     )
 
-    /** Cache: topic URL → poster URL. Survives across navigation. */
     private val posterCache = ConcurrentHashMap<String, String>()
 
     // ────────────────────────────────────────────────────────────
@@ -49,6 +48,7 @@ class TamilMV : MainAPI() {
             "recently_added" -> parseBangerSection(doc, "RECENTLY ADDED")
             else             -> emptyList()
         }
+        Log.d(TAG, "${request.data}: ${items.size} items")
         return newHomePageResponse(request.name, enrichWithPosters(items))
     }
 
@@ -57,21 +57,20 @@ class TamilMV : MainAPI() {
         val seen = mutableSetOf<String>()
 
         doc.select("div.banger-container").forEach { container ->
-            val header = container.selectFirst("div.banger-header")?.text()?.trim().orEmpty()
+            val header = container.selectFirst("div.banger-header")
+                ?.text()?.trim().orEmpty()
             if (!header.contains(headerKeyword, ignoreCase = true)) return@forEach
 
-            val row = container.selectFirst("div.banger-row") ?: return@forEach
+            val scope = container.selectFirst("div.banger-row") ?: container
 
-            row.select("a[href*=/forums/topic/]").forEach { a ->
-                val href = a.attr("href").trim()
-                if (href.isBlank()) return@forEach
-
-                val url = if (href.startsWith("http")) href else "$mainUrl$href"
+            scope.select("a[href*=/forums/topic/]").forEach { a ->
+                val href = normalizeUrl(a.attr("href")) ?: return@forEach
+                val url  = if (href.startsWith("http")) href else "$mainUrl$href"
                 if (!seen.add(url)) return@forEach
 
-                val fullTitle = a.text().trim().ifEmpty { return@forEach }
+                val title = extractTitleFromAnchor(a) ?: return@forEach
                 out.add(
-                    newMovieSearchResponse(fullTitle.toShortTitle(), url, TvType.Movie) {
+                    newMovieSearchResponse(title.toShortTitle(), url, TvType.Movie) {
                         this.posterUrl = posterCache[url]
                     }
                 )
@@ -80,8 +79,54 @@ class TamilMV : MainAPI() {
         return out
     }
 
+    /** Extract the human title from around a topic anchor (see comments). */
+    private fun extractTitleFromAnchor(a: Element): String? {
+        val anchorText = a.text().trim().trim('\u00A0', '\u200B')
+        val normalized = anchorText.replace(Regex("""\s+"""), " ").trim()
+
+        if (normalized.length >= 5 && !normalized.startsWith("[")) {
+            return normalized
+        }
+
+        // Title lives in an ancestor text, anchor is only the variant suffix
+        var anc: Element? = a.parent()
+        for (depth in 0 until 4) {
+            if (anc == null) break
+            val full = anc.text().replace(Regex("""\s+"""), " ").trim()
+            if (full.length > normalized.length + 3) {
+                val clean = full
+                    .replace(normalized, "")
+                    .replace(Regex("""\s+"""), " ")
+                    .trim()
+                    .trimEnd('-', '–', '—', ' ')
+                    .trim()
+                if (clean.length >= 5 && !clean.startsWith("[")) return clean
+            }
+            anc = anc.parent()
+        }
+
+        // Title lives in a sibling <strong>
+        var node: Element? = a
+        for (level in 0 until 4) {
+            if (node == null) break
+            var sib = node.previousElementSibling()
+            while (sib != null) {
+                val text = sib.text().replace(Regex("""\s+"""), " ").trim()
+                if (text.length >= 5 && !text.startsWith("[")) {
+                    val clean = text.substringBefore("[").trim()
+                        .trimEnd('-', '–', '—', ' ').trim()
+                    if (clean.length >= 5) return clean
+                }
+                sib = sib.previousElementSibling()
+            }
+            node = node.parent()
+        }
+
+        return null
+    }
+
     // ────────────────────────────────────────────────────────────
-    // SEARCH  →  /search/api/search.php (JSON)
+    // SEARCH
     // ────────────────────────────────────────────────────────────
     override suspend fun search(query: String): List<SearchResponse> {
         val q   = URLEncoder.encode(query, "UTF-8")
@@ -116,10 +161,8 @@ class TamilMV : MainAPI() {
 
             for (i in 0 until arr.length()) {
                 val obj = arr.optJSONObject(i) ?: continue
-
                 val tid   = obj.optInt("tid", 0)
                 val title = obj.optString("title").trim()
-
                 if (tid <= 0 || title.isBlank()) continue
                 if (!seen.add(tid)) continue
 
@@ -132,16 +175,12 @@ class TamilMV : MainAPI() {
             }
         } catch (e: Exception) {
             Log.e(TAG, "JSON parse failed: ${e.message}")
-            Log.e(TAG, "raw head: ${json.take(400)}")
         }
-
         return out
     }
 
     // ────────────────────────────────────────────────────────────
     // LOAD
-    //   name  == same trimmed title as home/search card
-    //   plot  == full release title from <h1.ipsType_pageTitle>
     // ────────────────────────────────────────────────────────────
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url).document
@@ -177,7 +216,8 @@ class TamilMV : MainAPI() {
     }
 
     // ────────────────────────────────────────────────────────────
-    // LOAD LINKS
+    // LOAD LINKS  — pick any <a class="download-button" href="…">
+    // No domain filtering: the site's own class is the contract.
     // ────────────────────────────────────────────────────────────
     override suspend fun loadLinks(
         data: String,
@@ -190,11 +230,10 @@ class TamilMV : MainAPI() {
         val candidates = mutableListOf<Pair<String, BlockInfo>>()
         val seen       = mutableSetOf<String>()
 
-        doc.select("a.download-button, a[href*=cyberloom]").forEach { a ->
-            val href = a.attr("href").trim()
-            if (!CYBERLOOM_RX.containsMatchIn(href)) return@forEach
+        // Primary selector — the site's own download button class
+        doc.select("a.download-button[href]").forEach { a ->
+            val href = normalizeUrl(a.attr("href")) ?: return@forEach
             if (!seen.add(href)) return@forEach
-
             val info = findBlockInfo(a)
             if (info.isOversized) {
                 Log.d(TAG, "skip oversized block: $href  (${info.size})")
@@ -203,18 +242,27 @@ class TamilMV : MainAPI() {
             candidates.add(href to info)
         }
 
+        // Fallback — anchors with a `download` attribute or that sit inside
+        // an IPS download-ish container
         if (candidates.isEmpty()) {
-            CYBERLOOM_RX.findAll(doc.html()).forEach { m ->
-                if (seen.add(m.value)) candidates.add(m.value to BlockInfo(null, null, false))
+            doc.select(
+                "a[download][href], " +
+                "[class*=download] a[href], " +
+                "a[class*=download][href]"
+            ).forEach { a ->
+                val href = normalizeUrl(a.attr("href")) ?: return@forEach
+                if (href == "#" || href.startsWith("javascript:")) return@forEach
+                if (!seen.add(href)) return@forEach
+                candidates.add(href to findBlockInfo(a))
             }
         }
 
-        Log.d(TAG, "cyberloom candidates: ${candidates.size}")
+        Log.d(TAG, "download candidates: ${candidates.size}")
 
         var any = false
-        for ((cyber, info) in candidates) {
+        for ((link, info) in candidates) {
             try {
-                val direct = resolveCyberloom(cyber) ?: continue
+                val direct = resolveDownloadChain(link) ?: continue
 
                 val sizeLabel = info.size
                     ?: detectSizeFromUrl(direct)
@@ -238,7 +286,7 @@ class TamilMV : MainAPI() {
                 )
                 any = true
             } catch (e: Exception) {
-                Log.e(TAG, "resolve failed for $cyber: ${e.message}")
+                Log.e(TAG, "resolve failed for $link: ${e.message}")
             }
         }
         return any
@@ -283,117 +331,148 @@ class TamilMV : MainAPI() {
     }
 
     // ────────────────────────────────────────────────────────────
-    // POSTER EXTRACTION
+    // POSTER EXTRACTION  — 100 % DOM-driven
     //
-    //   <article class="cPost">
-    //     <div data-role="commentContent">
-    //       <p>
-    //         <span><strong>
-    //           <a data-ipslightbox href="https://pbs.twimg.com/...">
-    //             <img class="ipsImage ipsImage_thumbnailed" src="...">
-    //           </a>
-    //         </strong></span>
-    //       </p>
-    //     </div>
-    //   </article>
+    //   • First image with an IPS image class inside the first post.
+    //   • Fallback: first non-emoticon <img src> inside the post.
+    //   • Fallback: lightbox anchor href.
     //
-    //   Also handles:  img.ipsImage  |  img.ipsImage_thumbnailed  |
-    //                  img.ipsImage_thumbnailed_colorized  |
-    //                  img[src*="pbs.twimg"]  |  img[src*="pixelbb"]
+    // No domain filter — any http(s) URL returned by these selectors
+    // is assumed to be the poster, regardless of CDN.
     // ────────────────────────────────────────────────────────────
     private fun extractPoster(doc: Document): String? {
         val content = doc.selectFirst("article.cPost div[data-role=commentContent]")
             ?: doc.selectFirst("div[data-role=commentContent]")
             ?: return null
 
-        // 1. Any <img> with an image class
+        // Preferred — IPS image class
         content.selectFirst(
-            "img.ipsImage, img.ipsImage_thumbnailed, " +
-            "img.ipsImage_thumbnailed_colorized, " +
-            "img[src*=pbs.twimg], img[src*=pixelbb]"
+            "img.ipsImage, img.ipsImage_thumbnailed, img.ipsImage_thumbnailed_colorized"
         )?.let { img ->
-            listOf("src", "data-src", "data-original")
-                .asSequence()
-                .map { img.attr(it).trim() }
-                .firstOrNull { it.startsWith("http") }
+            firstHttpAttr(img, "src", "data-src", "data-original")
                 ?.let { return it }
         }
 
-        // 2. Lightbox anchor wrapping an image
-        content.selectFirst("a[data-ipslightbox], a[data-lightbox-group]")
-            ?.attr("href")
-            ?.trim()
-            ?.takeIf { it.startsWith("http") && isImageUrl(it) }
-            ?.let { return it }
+        // Fallback — any img that is not a smiley
+        content.select("img[src]").firstOrNull { img ->
+            !img.hasAttr("data-emoticon")
+        }?.let { img ->
+            normalizeUrl(img.attr("src"))?.let { return it }
+        }
 
-        // 3. Regex sweep on the post HTML
-        IMAGE_URL_RX.find(content.html())?.value?.let { return it }
+        // Fallback — lightbox anchor
+        content.selectFirst("a[data-ipslightbox][href], a[data-lightbox-group][href]")
+            ?.attr("href")
+            ?.let { normalizeUrl(it) }
+            ?.let { return it }
 
         return null
     }
 
-    private fun isImageUrl(url: String): Boolean {
-        val lower = url.lowercase()
-        return lower.contains("pbs.twimg.com") ||
-               lower.contains("pixelbb") ||
-               lower.contains("imgur") ||
-               lower.contains("postimg") ||
-               IMAGE_EXT_RX.containsMatchIn(lower)
+    private fun firstHttpAttr(el: Element, vararg attrs: String): String? {
+        for (attr in attrs) {
+            val v = el.attr(attr).trim()
+            if (v.isEmpty()) continue
+            normalizeUrl(v)?.let { return it }
+        }
+        return null
     }
 
     // ────────────────────────────────────────────────────────────
-    // Cyberloom resolver
+    // Download-chain resolver  — 100 % DOM-driven
+    //
+    //   media page  →  [link]  (whatever href the site put on the button)
+    //     ↓ follow redirects / JS location assignments
+    //   gateway page → <a id="cta" href="…">   (site-provided ID)
+    //     ↓
+    //   final page   → anchor with a media extension
     // ────────────────────────────────────────────────────────────
-    private suspend fun resolveCyberloom(cyberUrl: String): String? {
-        val hop1 = app.get(cyberUrl)
-        val doc1 = hop1.document
+    private suspend fun resolveDownloadChain(link: String): String? {
+        val hop1 = app.get(link)
+        var doc  = hop1.document
         val url1 = hop1.url
 
         Log.d(TAG, "hop1 → $url1")
-        if (url1.contains("messycloud")) return extractFromMessycloud(doc1)
 
-        val ctaHref = doc1.selectFirst("a#cta")?.attr("href")
-            ?: doc1.selectFirst("a[href*=/out?t=]")?.attr("href")
-            ?: doc1.selectFirst("a[href*=cyberloom.best/out]")?.attr("href")
+        // If hop1 already IS the final page (anchor with a media extension)
+        extractDirectFromPage(doc)?.let { return it }
+
+        // Gateway page: site-provided CTA id is stable across domains
+        val ctaHref = doc.selectFirst("a#cta[href]")?.attr("href")?.trim()
+            ?: doc.selectFirst("a[href*=/out?]")?.attr("href")?.trim()
 
         if (ctaHref.isNullOrBlank()) {
             Log.d(TAG, "no CTA on $url1")
             return null
         }
 
-        val ctaUrl = when {
-            ctaHref.startsWith("http") -> ctaHref
-            ctaHref.startsWith("//")   -> "https:$ctaHref"
-            else                       -> "https://www.cyberloom.best$ctaHref"
-        }.replace("&amp;", "&")
+        val ctaUrl = normalizeUrl(ctaHref)
+            ?: if (ctaHref.startsWith("/")) {
+                val base = runCatching { java.net.URI(url1).let { "${it.scheme}://${it.host}" } }
+                    .getOrNull() ?: mainUrl
+                "$base$ctaHref"
+            } else null
+
+        if (ctaUrl == null) {
+            Log.d(TAG, "unparseable CTA: $ctaHref")
+            return null
+        }
 
         Log.d(TAG, "cta → $ctaUrl")
 
         val hop3 = app.get(ctaUrl)
         Log.d(TAG, "hop3 → ${hop3.url}")
 
-        val jsRedirect = JS_REDIRECT_RX.find(hop3.text)?.groupValues?.get(1)
-        val messyDoc = if (!jsRedirect.isNullOrBlank() && jsRedirect.contains("messycloud")) {
-            Log.d(TAG, "js redirect → $jsRedirect")
-            app.get(jsRedirect).document
+        // Follow any JS location redirect the page performs
+        val jsUrl = JS_REDIRECT_RX.find(hop3.text)?.groupValues?.get(1)
+            ?.let { normalizeUrl(it) }
+
+        val pageDoc = if (jsUrl != null) {
+            Log.d(TAG, "js redirect → $jsUrl")
+            app.get(jsUrl).document
         } else {
             hop3.document
         }
 
-        return extractFromMessycloud(messyDoc)
+        return extractDirectFromPage(pageDoc)
     }
 
-    private fun extractFromMessycloud(doc: Document): String? {
+    /**
+     * Extract a media-file link from any page:
+     *
+     *   1. Anchors whose href ends with a known media extension.
+     *   2. Anchors inside download-like containers.
+     *   3. Regex sweep of the raw HTML for media URLs.
+     *
+     * No domain filter — only file extensions, which are stable.
+     */
+    private fun extractDirectFromPage(doc: Document): String? {
+        // 1. Anchor with a media extension
         doc.select("a[href]").forEach { a ->
-            val h = a.attr("href").trim()
-            if (isDirectDownloadUrl(h)) return h
+            val href = normalizeUrl(a.attr("href")) ?: return@forEach
+            if (FILE_EXT_RX.containsMatchIn(href)) return href
         }
-        CDN_RX.find(doc.html())?.let { return it.value }
+
+        // 2. Anchor inside a download-ish container
+        doc.select(
+            "a[download][href], " +
+            "[class*=download] a[href], " +
+            "a[class*=download][href], " +
+            "[class*=btn] a[href]"
+        ).forEach { a ->
+            val href = normalizeUrl(a.attr("href")) ?: return@forEach
+            if (href == "#" || href.startsWith("javascript:")) return@forEach
+            return href
+        }
+
+        // 3. Regex sweep for a media URL anywhere in the HTML
+        FILE_EXT_URL_RX.find(doc.html())?.value?.let { return it }
+
         return null
     }
 
     // ────────────────────────────────────────────────────────────
-    // Poster enrichment (parallel, cached)
+    // Poster enrichment
     // ────────────────────────────────────────────────────────────
     private suspend fun enrichWithPosters(items: List<SearchResponse>): List<SearchResponse> =
         coroutineScope {
@@ -426,21 +505,18 @@ class TamilMV : MainAPI() {
     // Helpers
     // ────────────────────────────────────────────────────────────
 
-    /**
-     * Build an IPB topic URL that the site accepts.
-     *
-     *   tid   = 199155
-     *   title = "Vishwanath and Sons (2026) Tamil Audio launch TRUE WEB-DL - [1080p & 720p - AVC - 2.9GB - 1.3GB & 500MB]"
-     *   →
-     *   https://www.1tamilmv.capital/index.php?/forums/topic/199155-vishwanath-and-sons-2026-tamil-audio-launch-true-web-dl-1080p-720p-avc-29gb-13gb-500mb/
-     *
-     * Slug rules (verified against live URLs):
-     *   • lowercase
-     *   • every non-[a-z0-9.] char → '-'
-     *   • every '.' removed
-     *   • collapse runs of '-'
-     *   • strip leading/trailing '-'
-     */
+    /** Return an absolute http(s) URL, or null. */
+    private fun normalizeUrl(u: String?): String? {
+        val t = u?.trim() ?: return null
+        if (t.isEmpty()) return null
+        return when {
+            t.startsWith("http://")  -> t
+            t.startsWith("https://") -> t
+            t.startsWith("//")       -> "https:$t"
+            else                     -> null
+        }
+    }
+
     private fun buildTopicUrl(tid: Int, title: String): String {
         val slug = title
             .lowercase()
@@ -449,13 +525,6 @@ class TamilMV : MainAPI() {
             .replace(Regex("-+"), "-")
             .trim('-')
         return "$mainUrl/index.php?/forums/topic/$tid-$slug/"
-    }
-
-    private fun isDirectDownloadUrl(url: String): Boolean {
-        if (!url.startsWith("http")) return false
-        if (url.contains("juicybits")) return true
-        if (url.contains("cdn.") && FILE_EXT_RX.containsMatchIn(url)) return true
-        return FILE_EXT_RX.containsMatchIn(url)
     }
 
     private fun String?.toQualityValue(): Int = when (this?.lowercase()) {
@@ -482,18 +551,6 @@ class TamilMV : MainAPI() {
         return m?.let { "${it.groupValues[1]}${it.groupValues[2].uppercase()}" }
     }
 
-    /**
-     * Trim "Title (YYYY)" plus an optional language + release-type suffix.
-     *
-     *   "Spider Man: Brand New Day (2026) (HD + Org Auds) - […]"
-     *       → "Spider Man: Brand New Day (2026)"
-     *
-     *   "Meesaya Murukku 2 (2026) Tamil PreDVD - […]"
-     *       → "Meesaya Murukku 2 (2026) • Tamil • PreDVD"
-     *
-     * Both home/search cards AND load-response name call this, so they always
-     * resolve to the identical string.
-     */
     private fun String.toShortTitle(): String {
         val cleaned = this.replace(Regex("""\s+"""), " ").trim()
         val m = Regex("""^(.+?\(\d{4}(?:[–\-]\d{4})?\))\s*(.*)""").find(cleaned)
@@ -516,25 +573,9 @@ class TamilMV : MainAPI() {
 
     companion object {
         private const val TAG = "TamilMV"
-
-        /** Threshold in GB above which a block is skipped. */
         private const val OVERSIZE_GB = 10.0
 
-        private val CYBERLOOM_RX = Regex(
-            """https?://(?:www\.)?cyberloom\.best/l/[A-Za-z0-9]+"""
-        )
-        private val CDN_RX = Regex(
-            """https?://[^\s"'<>`\\]*?juicybits[^\s"'<>`\\]*""",
-            RegexOption.IGNORE_CASE
-        )
-        private val FILE_EXT_RX = Regex(
-            """\.(mkv|mp4|avi|mov|zip|rar|7z|webm|m4v)(\?|$)""",
-            RegexOption.IGNORE_CASE
-        )
-        private val JS_REDIRECT_RX = Regex(
-            """location\s*(?:\.\s*href\s*=\s*|\.replace\s*\(\s*|\.assign\s*\(\s*)["']([^"']+)["']""",
-            RegexOption.IGNORE_CASE
-        )
+        /** Content patterns — no domains. */
         private val SIZE_RX = Regex(
             """(\d+(?:\.\d+)?)\s*(GB|MB)""",
             RegexOption.IGNORE_CASE
@@ -551,12 +592,20 @@ class TamilMV : MainAPI() {
             """\b(HQ\s+PreDVD|PreDVD|HQ\s+HDRip|HDRip|HQ\s+HDTS|HDTS|TRUE\s+WEB-DL|WEB-DL|WEBRip|BluRay|Audio\s+launch|HDTV|HQ\s+Clean)\b""",
             RegexOption.IGNORE_CASE
         )
-        private val IMAGE_EXT_RX = Regex(
-            """\.(jpg|jpeg|png|webp|gif)(\?|$)""",
+
+        /** Media file extensions — stable identifiers, not domains. */
+        private val FILE_EXT_RX = Regex(
+            """\.(mkv|mp4|avi|mov|zip|rar|7z|webm|m4v)(\?|$)""",
             RegexOption.IGNORE_CASE
         )
-        private val IMAGE_URL_RX = Regex(
-            """https?://(?:pbs\.twimg\.com[^\s"'<>`\\]+|[^\s"'<>`\\]+?\.(?:jpg|jpeg|png|webp|gif)(?:\?[^\s"'<>`\\]*)?)""",
+        private val FILE_EXT_URL_RX = Regex(
+            """https?://[^\s"'<>`\\]+?\.(?:mkv|mp4|avi|mov|zip|rar|7z|webm|m4v)(?:\?[^\s"'<>`\\]*)?""",
+            RegexOption.IGNORE_CASE
+        )
+
+        /** Generic JS location redirect. */
+        private val JS_REDIRECT_RX = Regex(
+            """location\s*(?:\.\s*href\s*=\s*|\.replace\s*\(\s*|\.assign\s*\(\s*)["']([^"']+)["']""",
             RegexOption.IGNORE_CASE
         )
     }
