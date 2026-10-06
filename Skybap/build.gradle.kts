@@ -23,6 +23,6 @@ cloudstream {
     tvTypes = listOf(
         "Movie",
     )
-    iconUrl = "https://skymovieshd.band/images/logo2.png"
+    iconUrl = "https://skymovieshd.band/images/favicon.ico"
     isCrossPlatform = true
 }
