@@ -1,4 +1,3 @@
-// src/TamilMV/src/main/kotlin/com/TamilMV/TamilMVProvider.kt
 package com.TamilMV
 
 import android.util.Log
@@ -21,7 +20,7 @@ import java.util.concurrent.ConcurrentHashMap
 
 class TamilMV : MainAPI() {
 
-    override var mainUrl  = "https://www.1tamilmv.capital"
+    override var mainUrl  = "https://www.1tamilmv.fi"
     override var name     = "TamilMV"
     override var lang     = "ta"
     override val hasMainPage        = true
@@ -35,17 +34,14 @@ class TamilMV : MainAPI() {
 
     private val posterCache = ConcurrentHashMap<String, String>()
 
-    // ────────────────────────────────────────────────────────────
-    // HOME
-    // ────────────────────────────────────────────────────────────
     override suspend fun getMainPage(
         page: Int,
         request: MainPageRequest
     ): HomePageResponse {
         val doc = app.get(mainUrl).document
         val items = when (request.data) {
-            "top_releases"   -> parseBangerSection(doc, "TOP RELEASES THIS WEEK")
-            "recently_added" -> parseBangerSection(doc, "RECENTLY ADDED")
+            "top_releases"   -> parseBangerSection(doc, "TOP RELEASES THIS WEEK").take(HOME_LIMIT)
+            "recently_added" -> parseBangerSection(doc, "RECENTLY ADDED").take(HOME_LIMIT)
             else             -> emptyList()
         }
         Log.d(TAG, "${request.data}: ${items.size} items")
@@ -64,11 +60,15 @@ class TamilMV : MainAPI() {
             val scope = container.selectFirst("div.banger-row") ?: container
 
             scope.select("a[href*=/forums/topic/]").forEach { a ->
-                val href = normalizeUrl(a.attr("href")) ?: return@forEach
-                val url  = if (href.startsWith("http")) href else "$mainUrl$href"
+                val href = a.attr("href").trim()
+                if (href.isBlank()) return@forEach
+
+                val url = if (href.startsWith("http")) href else "$mainUrl$href"
                 if (!seen.add(url)) return@forEach
 
                 val title = extractTitleFromAnchor(a) ?: return@forEach
+                if (title.contains("[W]") || title.trim() == "[W]") return@forEach
+
                 out.add(
                     newMovieSearchResponse(title.toShortTitle(), url, TvType.Movie) {
                         this.posterUrl = posterCache[url]
@@ -79,43 +79,44 @@ class TamilMV : MainAPI() {
         return out
     }
 
-    /** Extract the human title from around a topic anchor (see comments). */
     private fun extractTitleFromAnchor(a: Element): String? {
         val anchorText = a.text().trim().trim('\u00A0', '\u200B')
         val normalized = anchorText.replace(Regex("""\s+"""), " ").trim()
+
+        if (normalized.isEmpty() || normalized == "[W]") return null
 
         if (normalized.length >= 5 && !normalized.startsWith("[")) {
             return normalized
         }
 
-        // Title lives in an ancestor text, anchor is only the variant suffix
-        var anc: Element? = a.parent()
-        for (depth in 0 until 4) {
-            if (anc == null) break
-            val full = anc.text().replace(Regex("""\s+"""), " ").trim()
+        val strongParent = a.parent()?.takeIf { it.tagName() == "strong" }
+        if (strongParent != null) {
+            val full = strongParent.text().replace(Regex("""\s+"""), " ").trim()
             if (full.length > normalized.length + 3) {
                 val clean = full
                     .replace(normalized, "")
                     .replace(Regex("""\s+"""), " ")
                     .trim()
-                    .trimEnd('-', '–', '—', ' ')
+                    .trimEnd('-', '–', '—', ' ', '.')
                     .trim()
-                if (clean.length >= 5 && !clean.startsWith("[")) return clean
+                if (clean.length in 5..300 && !clean.startsWith("[") && !clean.contains("[W]")) {
+                    return clean
+                }
             }
-            anc = anc.parent()
         }
 
-        // Title lives in a sibling <strong>
         var node: Element? = a
-        for (level in 0 until 4) {
+        for (level in 0 until 3) {
             if (node == null) break
             var sib = node.previousElementSibling()
             while (sib != null) {
                 val text = sib.text().replace(Regex("""\s+"""), " ").trim()
-                if (text.length >= 5 && !text.startsWith("[")) {
-                    val clean = text.substringBefore("[").trim()
-                        .trimEnd('-', '–', '—', ' ').trim()
-                    if (clean.length >= 5) return clean
+                if (text.length >= 5 && !text.startsWith("[") && !text.contains("[W]")) {
+                    val clean = text.substringBefore("[")
+                        .trim()
+                        .trimEnd('-', '–', '—', ' ', '.')
+                        .trim()
+                    if (clean.length in 5..300) return clean
                 }
                 sib = sib.previousElementSibling()
             }
@@ -125,9 +126,6 @@ class TamilMV : MainAPI() {
         return null
     }
 
-    // ────────────────────────────────────────────────────────────
-    // SEARCH
-    // ────────────────────────────────────────────────────────────
     override suspend fun search(query: String): List<SearchResponse> {
         val q   = URLEncoder.encode(query, "UTF-8")
         val api = "$mainUrl/search/api/search.php" +
@@ -179,9 +177,6 @@ class TamilMV : MainAPI() {
         return out
     }
 
-    // ────────────────────────────────────────────────────────────
-    // LOAD
-    // ────────────────────────────────────────────────────────────
     override suspend fun load(url: String): LoadResponse {
         val doc = app.get(url).document
 
@@ -215,10 +210,6 @@ class TamilMV : MainAPI() {
         }
     }
 
-    // ────────────────────────────────────────────────────────────
-    // LOAD LINKS  — pick any <a class="download-button" href="…">
-    // No domain filtering: the site's own class is the contract.
-    // ────────────────────────────────────────────────────────────
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -230,7 +221,6 @@ class TamilMV : MainAPI() {
         val candidates = mutableListOf<Pair<String, BlockInfo>>()
         val seen       = mutableSetOf<String>()
 
-        // Primary selector — the site's own download button class
         doc.select("a.download-button[href]").forEach { a ->
             val href = normalizeUrl(a.attr("href")) ?: return@forEach
             if (!seen.add(href)) return@forEach
@@ -242,8 +232,6 @@ class TamilMV : MainAPI() {
             candidates.add(href to info)
         }
 
-        // Fallback — anchors with a `download` attribute or that sit inside
-        // an IPS download-ish container
         if (candidates.isEmpty()) {
             doc.select(
                 "a[download][href], " +
@@ -264,9 +252,12 @@ class TamilMV : MainAPI() {
             try {
                 val direct = resolveDownloadChain(link) ?: continue
 
-                val sizeLabel = info.size
-                    ?: detectSizeFromUrl(direct)
-                    ?: "Direct"
+                val sizeLabel = info.size ?: detectSizeFromUrl(direct)
+                if (sizeLabel.isNullOrBlank()) {
+                    Log.d(TAG, "skip unknown-size source: $direct")
+                    continue
+                }
+
                 val quality = info.quality.toQualityValue()
                     .takeIf { it != Qualities.Unknown.value }
                     ?: detectQuality(direct)
@@ -292,9 +283,6 @@ class TamilMV : MainAPI() {
         return any
     }
 
-    // ────────────────────────────────────────────────────────────
-    // Block info (size + resolution from the block header)
-    // ────────────────────────────────────────────────────────────
     private data class BlockInfo(
         val size: String?,
         val quality: String?,
@@ -330,22 +318,11 @@ class TamilMV : MainAPI() {
         return gb >= OVERSIZE_GB
     }
 
-    // ────────────────────────────────────────────────────────────
-    // POSTER EXTRACTION  — 100 % DOM-driven
-    //
-    //   • First image with an IPS image class inside the first post.
-    //   • Fallback: first non-emoticon <img src> inside the post.
-    //   • Fallback: lightbox anchor href.
-    //
-    // No domain filter — any http(s) URL returned by these selectors
-    // is assumed to be the poster, regardless of CDN.
-    // ────────────────────────────────────────────────────────────
     private fun extractPoster(doc: Document): String? {
         val content = doc.selectFirst("article.cPost div[data-role=commentContent]")
             ?: doc.selectFirst("div[data-role=commentContent]")
             ?: return null
 
-        // Preferred — IPS image class
         content.selectFirst(
             "img.ipsImage, img.ipsImage_thumbnailed, img.ipsImage_thumbnailed_colorized"
         )?.let { img ->
@@ -353,14 +330,12 @@ class TamilMV : MainAPI() {
                 ?.let { return it }
         }
 
-        // Fallback — any img that is not a smiley
         content.select("img[src]").firstOrNull { img ->
             !img.hasAttr("data-emoticon")
         }?.let { img ->
             normalizeUrl(img.attr("src"))?.let { return it }
         }
 
-        // Fallback — lightbox anchor
         content.selectFirst("a[data-ipslightbox][href], a[data-lightbox-group][href]")
             ?.attr("href")
             ?.let { normalizeUrl(it) }
@@ -378,28 +353,17 @@ class TamilMV : MainAPI() {
         return null
     }
 
-    // ────────────────────────────────────────────────────────────
-    // Download-chain resolver  — 100 % DOM-driven
-    //
-    //   media page  →  [link]  (whatever href the site put on the button)
-    //     ↓ follow redirects / JS location assignments
-    //   gateway page → <a id="cta" href="…">   (site-provided ID)
-    //     ↓
-    //   final page   → anchor with a media extension
-    // ────────────────────────────────────────────────────────────
     private suspend fun resolveDownloadChain(link: String): String? {
         val hop1 = app.get(link)
-        var doc  = hop1.document
+        val doc1 = hop1.document
         val url1 = hop1.url
 
         Log.d(TAG, "hop1 → $url1")
 
-        // If hop1 already IS the final page (anchor with a media extension)
-        extractDirectFromPage(doc)?.let { return it }
+        extractDirectFromPage(doc1)?.let { return it }
 
-        // Gateway page: site-provided CTA id is stable across domains
-        val ctaHref = doc.selectFirst("a#cta[href]")?.attr("href")?.trim()
-            ?: doc.selectFirst("a[href*=/out?]")?.attr("href")?.trim()
+        val ctaHref = doc1.selectFirst("a#cta[href]")?.attr("href")?.trim()
+            ?: doc1.selectFirst("a[href*=/out?]")?.attr("href")?.trim()
 
         if (ctaHref.isNullOrBlank()) {
             Log.d(TAG, "no CTA on $url1")
@@ -408,8 +372,9 @@ class TamilMV : MainAPI() {
 
         val ctaUrl = normalizeUrl(ctaHref)
             ?: if (ctaHref.startsWith("/")) {
-                val base = runCatching { java.net.URI(url1).let { "${it.scheme}://${it.host}" } }
-                    .getOrNull() ?: mainUrl
+                val base = runCatching {
+                    java.net.URI(url1).let { "${it.scheme}://${it.host}" }
+                }.getOrNull() ?: mainUrl
                 "$base$ctaHref"
             } else null
 
@@ -423,7 +388,6 @@ class TamilMV : MainAPI() {
         val hop3 = app.get(ctaUrl)
         Log.d(TAG, "hop3 → ${hop3.url}")
 
-        // Follow any JS location redirect the page performs
         val jsUrl = JS_REDIRECT_RX.find(hop3.text)?.groupValues?.get(1)
             ?.let { normalizeUrl(it) }
 
@@ -437,23 +401,12 @@ class TamilMV : MainAPI() {
         return extractDirectFromPage(pageDoc)
     }
 
-    /**
-     * Extract a media-file link from any page:
-     *
-     *   1. Anchors whose href ends with a known media extension.
-     *   2. Anchors inside download-like containers.
-     *   3. Regex sweep of the raw HTML for media URLs.
-     *
-     * No domain filter — only file extensions, which are stable.
-     */
     private fun extractDirectFromPage(doc: Document): String? {
-        // 1. Anchor with a media extension
         doc.select("a[href]").forEach { a ->
             val href = normalizeUrl(a.attr("href")) ?: return@forEach
             if (FILE_EXT_RX.containsMatchIn(href)) return href
         }
 
-        // 2. Anchor inside a download-ish container
         doc.select(
             "a[download][href], " +
             "[class*=download] a[href], " +
@@ -465,15 +418,11 @@ class TamilMV : MainAPI() {
             return href
         }
 
-        // 3. Regex sweep for a media URL anywhere in the HTML
         FILE_EXT_URL_RX.find(doc.html())?.value?.let { return it }
 
         return null
     }
 
-    // ────────────────────────────────────────────────────────────
-    // Poster enrichment
-    // ────────────────────────────────────────────────────────────
     private suspend fun enrichWithPosters(items: List<SearchResponse>): List<SearchResponse> =
         coroutineScope {
             if (items.isEmpty()) return@coroutineScope items
@@ -501,11 +450,6 @@ class TamilMV : MainAPI() {
             }.awaitAll()
         }
 
-    // ────────────────────────────────────────────────────────────
-    // Helpers
-    // ────────────────────────────────────────────────────────────
-
-    /** Return an absolute http(s) URL, or null. */
     private fun normalizeUrl(u: String?): String? {
         val t = u?.trim() ?: return null
         if (t.isEmpty()) return null
@@ -574,8 +518,8 @@ class TamilMV : MainAPI() {
     companion object {
         private const val TAG = "TamilMV"
         private const val OVERSIZE_GB = 10.0
+        private const val HOME_LIMIT  = 8
 
-        /** Content patterns — no domains. */
         private val SIZE_RX = Regex(
             """(\d+(?:\.\d+)?)\s*(GB|MB)""",
             RegexOption.IGNORE_CASE
@@ -592,8 +536,6 @@ class TamilMV : MainAPI() {
             """\b(HQ\s+PreDVD|PreDVD|HQ\s+HDRip|HDRip|HQ\s+HDTS|HDTS|TRUE\s+WEB-DL|WEB-DL|WEBRip|BluRay|Audio\s+launch|HDTV|HQ\s+Clean)\b""",
             RegexOption.IGNORE_CASE
         )
-
-        /** Media file extensions — stable identifiers, not domains. */
         private val FILE_EXT_RX = Regex(
             """\.(mkv|mp4|avi|mov|zip|rar|7z|webm|m4v)(\?|$)""",
             RegexOption.IGNORE_CASE
@@ -602,8 +544,6 @@ class TamilMV : MainAPI() {
             """https?://[^\s"'<>`\\]+?\.(?:mkv|mp4|avi|mov|zip|rar|7z|webm|m4v)(?:\?[^\s"'<>`\\]*)?""",
             RegexOption.IGNORE_CASE
         )
-
-        /** Generic JS location redirect. */
         private val JS_REDIRECT_RX = Regex(
             """location\s*(?:\.\s*href\s*=\s*|\.replace\s*\(\s*|\.assign\s*\(\s*)["']([^"']+)["']""",
             RegexOption.IGNORE_CASE
