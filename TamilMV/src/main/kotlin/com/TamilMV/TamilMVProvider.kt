@@ -323,33 +323,59 @@ class TamilMV : MainAPI() {
             ?: doc.selectFirst("div[data-role=commentContent]")
             ?: return null
 
+        val skipFragments = listOf(
+            "spacer", "torrborder", "utorrent",
+            "smiley", "blank", "emoji", "emoticon"
+        )
+
+        fun isDecorative(url: String): Boolean {
+            val l = url.lowercase()
+            if (skipFragments.any { l.contains(it) }) return true
+            if (l.endsWith(".gif")) return true
+            return false
+        }
+
+        fun urlFromImg(img: Element): String? {
+            for (attr in listOf("data-src", "data-original", "src")) {
+                val v = img.attr(attr).trim()
+                if (v.isEmpty()) continue
+                val n = normalizeUrl(v) ?: continue
+                if (isDecorative(n)) continue
+                return n
+            }
+            return null
+        }
+
+        // Strategy 1 — poster inside <strong> (the wrapper the site uses for posters)
+        content.select("p strong img, p span strong img").forEach { img ->
+            if (img.hasAttr("data-emoticon")) return@forEach
+            urlFromImg(img)?.let { return it }
+        }
+
+        // Strategy 2 — lightbox anchor inside <strong> (fallback for that wrapper)
         content.selectFirst(
+            "p strong a[data-ipslightbox][href], " +
+            "p span strong a[data-ipslightbox][href]"
+        )?.let { a ->
+            normalizeUrl(a.attr("href"))?.let {
+                if (!isDecorative(it)) return it
+            }
+        }
+
+        // Strategy 3 — first IPS content image anywhere in the post
+        content.select(
             "img.ipsImage, img.ipsImage_thumbnailed, img.ipsImage_thumbnailed_colorized"
-        )?.let { img ->
-            firstHttpAttr(img, "src", "data-src", "data-original")
-                ?.let { return it }
+        ).forEach { img ->
+            if (img.hasAttr("data-emoticon")) return@forEach
+            urlFromImg(img)?.let { return it }
         }
 
-        content.select("img[src]").firstOrNull { img ->
-            !img.hasAttr("data-emoticon")
-        }?.let { img ->
-            normalizeUrl(img.attr("src"))?.let { return it }
+        // Strategy 4 — first non-emoticon image with any source
+        content.select("img[src], img[data-src]").forEach { img ->
+            if (img.hasAttr("data-emoticon")) return@forEach
+            urlFromImg(img)?.let { return it }
         }
 
-        content.selectFirst("a[data-ipslightbox][href], a[data-lightbox-group][href]")
-            ?.attr("href")
-            ?.let { normalizeUrl(it) }
-            ?.let { return it }
-
-        return null
-    }
-
-    private fun firstHttpAttr(el: Element, vararg attrs: String): String? {
-        for (attr in attrs) {
-            val v = el.attr(attr).trim()
-            if (v.isEmpty()) continue
-            normalizeUrl(v)?.let { return it }
-        }
         return null
     }
 
