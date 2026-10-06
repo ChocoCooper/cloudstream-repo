@@ -68,7 +68,8 @@ class JavHubProvider : MainAPI() {
     ).map { it.lowercase() }.toSet()
 
     override val mainPage = mainPageOf(
-        "Madonna" to "Madonna"
+        "Madonna"     to "Madonna",
+        "NSFS"        to "Nagae Style"
     )
 
     // ==================== Helpers ====================
@@ -329,13 +330,16 @@ class JavHubProvider : MainAPI() {
         }
 
         // ============================================================
-        // ---- Plot: displayTitle, divider, description ----
-        // If MissAV has no description, plot is just the title.
+        // ---- Plot: "DisplayTitle. ExtractedDescription" ----
+        // If displayTitle already ends with a dot, just add a space;
+        // otherwise insert ". " between them.
+        // If no description, plot is just the title.
         // ============================================================
         val cleanDesc = fetchedDescription?.trim().orEmpty()
 
         val plotText: String = if (cleanDesc.isNotEmpty()) {
-            "$displayTitle\n.\n$cleanDesc"
+            val separator = if (displayTitle.trimEnd().endsWith(".")) " " else ". "
+            displayTitle.trimEnd() + separator + cleanDesc
         } else {
             displayTitle
         }
