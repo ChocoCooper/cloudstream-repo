@@ -1,9 +1,10 @@
 // use an integer for version numbers
-version = 1
+version = 2
 
 
 cloudstream {
     authors = listOf("ChocoCooper")
+    description = "TamilMV Provider (content that includes only direct links)
 
     /**
     * Status int as the following:
