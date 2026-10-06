@@ -14,9 +14,7 @@ https://raw.githubusercontent.com/ChocoCooper/cloudstream-repo/master/repo.json
 
 ## ⭐ Support
 
-If you find these extensions useful, consider giving the repository a ⭐ on GitHub.
-
-[⭐ Star this repository](https://github.com/ChocoCooper/cloudstream-repo)
+If you find these extension useful, consider giving the star ⭐ on Repo.
 
 ## ⚖️ DMCA Disclaimer
 
