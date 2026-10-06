@@ -50,7 +50,7 @@ class XmaalProvider : MainAPI() {
     }
 
     override var mainUrl = Domains.XMAZA2
-    override var name = "Xmaza"
+    override var name = "Xmaal"
     override val hasMainPage = true
     override var lang = "hi"
     override val hasDownloadSupport = true
@@ -69,13 +69,13 @@ class XmaalProvider : MainAPI() {
     )
 
     override val mainPage = mainPageOf(
-        "${Domains.OTTDUDE}/ott/ullu/"               to "ULLU",
-        "${Domains.OTTDUDE}/ott/atrangii/"           to "Atrangii",
-        "${Domains.OTTDUDE}/ott/kooku/"              to "Kooku",
-        "${Domains.OTTDUDE}/ott/moovi/"              to "Moovi",
-        "${Domains.OTTDUDE}/ott/look-entertainment/" to "Look Entertainment",
-        "${Domains.OTTDUDE}/ott/jugnu/"              to "Jugnu",
-        "${Domains.OTTDUDE}/ott/voovi/"              to "Voovi"
+        "${Domains.XMAZA}/ott/ullu/"               to "ULLU",
+        "${Domains.XMAZA}/ott/atrangii/"           to "Atrangii",
+        "${Domains.XMAZA}/ott/kooku/"              to "Kooku",
+        "${Domains.XMAZA}/ott/moovi/"              to "Moovi",
+        "${Domains.XMAZA}/ott/look-entertainment/" to "Look Entertainment",
+        "${Domains.XMAZA}/ott/jugnu/"              to "Jugnu",
+        "${Domains.XMAZA}/ott/voovi/"              to "Voovi"
     )
 
     // ------------------------------------------------------------------
@@ -494,18 +494,6 @@ class XmaalProvider : MainAPI() {
     }
 
     // ------------------------------------------------------------------
-    // Cast extraction
-    // ------------------------------------------------------------------
-
-    private fun extractCast(doc: Document): List<ActorData> =
-        doc.select(".xx-cast-list a, a[rel=model]")
-            .map { it.text().trim() }
-            .filter { it.isNotBlank() && it.length < 60 }
-            .distinct()
-            .take(20)
-            .map { ActorData(actor = Actor(name = it)) }
-
-    // ------------------------------------------------------------------
     // Series URL detection
     // ------------------------------------------------------------------
 
@@ -745,7 +733,6 @@ class XmaalProvider : MainAPI() {
         }
 
         val clickedPoster = extractSeriesPoster(epDoc, url, rawClickedTitle)
-        val cast = extractCast(epDoc)
 
         // ---- Inline episodes (XMasti) — no extra fetch ----
         val seriesUrl = findSeriesUrl(epDoc, url, rawClickedTitle)
@@ -757,7 +744,6 @@ class XmaalProvider : MainAPI() {
                     this.posterUrl = clickedPoster
                     this.backgroundPosterUrl = clickedPoster
                     this.plot = mediaTitle
-                    this.actors = cast
                 }
             }
         }
@@ -768,7 +754,6 @@ class XmaalProvider : MainAPI() {
                 this.posterUrl = clickedPoster
                 this.backgroundPosterUrl = clickedPoster
                 this.plot = mediaTitle
-                this.actors = cast
             }
         }
 
@@ -788,15 +773,12 @@ class XmaalProvider : MainAPI() {
                 this.posterUrl = clickedPoster
                 this.backgroundPosterUrl = clickedPoster
                 this.plot = mediaTitle
-                this.actors = cast
             }
         }
 
         val seriesPoster = if (seriesDoc !== epDoc)
             extractSeriesPoster(seriesDoc, seriesUrl, rawClickedTitle) else null
-        val seriesCast = extractCast(seriesDoc)
         val poster = clickedPoster ?: seriesPoster
-        val finalCast = if (seriesCast.isNotEmpty()) seriesCast else cast
 
         val episodesList = mutableListOf<Episode>()
         val seenEpTitles = mutableSetOf<String>()
@@ -819,7 +801,6 @@ class XmaalProvider : MainAPI() {
                 this.posterUrl = poster
                 this.backgroundPosterUrl = poster
                 this.plot = mediaTitle
-                this.actors = finalCast
             }
         }
 
@@ -829,7 +810,6 @@ class XmaalProvider : MainAPI() {
             this.posterUrl = poster
             this.backgroundPosterUrl = poster
             this.plot = mediaTitle
-            this.actors = finalCast
         }
     }
 
