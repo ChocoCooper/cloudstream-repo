@@ -18,7 +18,7 @@ cloudstream {
         "Movie"
     )
     language = "ta"
-    iconUrl = "https://tamilbulb.cc/favicon.ico"
+    iconUrl = "https://t2.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://tamilbulb.cc&size=256"
 
     isCrossPlatform = false
 }
