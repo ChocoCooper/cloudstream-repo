@@ -21,10 +21,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 class XmaalProvider : MainAPI() {
 
-    // ------------------------------------------------------------------
-    // Constants
-    // ------------------------------------------------------------------
-
     private companion object {
         const val TAG = "XmaalProvider"
 
@@ -78,10 +74,6 @@ class XmaalProvider : MainAPI() {
         "${Domains.XMAZA}/ott/voovi/"              to "Voovi"
     )
 
-    // ------------------------------------------------------------------
-    // Regexes
-    // ------------------------------------------------------------------
-
     private val styleUrlRegex = Regex("url\\((['\"]?)(.*?)\\1\\)")
 
     private val streamPattern = Regex(
@@ -89,7 +81,6 @@ class XmaalProvider : MainAPI() {
         RegexOption.IGNORE_CASE
     )
 
-    // Episode regexes: try the most specific first.
     private val seasonEpisodeRegex = Regex(
         """^(.*?)\bSeason\s+(\d+)\s+Episode\s+(\d+)\b""",
         RegexOption.IGNORE_CASE
@@ -116,7 +107,6 @@ class XmaalProvider : MainAPI() {
         RegexOption.IGNORE_CASE
     )
 
-    // Junk-URL filter (previews, ads, images).
     private val junkUrlPatterns = listOf(
         Regex("""/(?:preview|sample|trailer|teaser|promo)/""", RegexOption.IGNORE_CASE),
         Regex("""\.(?:gif|jpe?g|png|webp|svg)(?:\?|$)""", RegexOption.IGNORE_CASE),
@@ -124,17 +114,9 @@ class XmaalProvider : MainAPI() {
         Regex("""(?:doubleclick|googlesyndication|adservice)""", RegexOption.IGNORE_CASE)
     )
 
-    // ------------------------------------------------------------------
-    // Logging
-    // ------------------------------------------------------------------
-
     private fun logD(msg: String) = println("[$TAG] $msg")
     private fun logE(label: String, e: Throwable) =
         println("[$TAG] $label: ${e.message ?: e.javaClass.simpleName}")
-
-    // ------------------------------------------------------------------
-    // Retry helper
-    // ------------------------------------------------------------------
 
     private suspend fun <T> retry(
         times: Int = 3,
@@ -143,11 +125,8 @@ class XmaalProvider : MainAPI() {
     ): T? {
         var d = initialDelayMs
         repeat(times) { attempt ->
-            val result = try {
-                block()
-            } catch (e: Exception) {
-                logD("retry[$attempt] ${e.message}")
-                null
+            val result = try { block() } catch (e: Exception) {
+                logD("retry[$attempt] ${e.message}"); null
             }
             if (result != null) return result
             if (attempt < times - 1) delay(d)
@@ -156,11 +135,6 @@ class XmaalProvider : MainAPI() {
         return null
     }
 
-    // ------------------------------------------------------------------
-    // Basic helpers
-    // ------------------------------------------------------------------
-
-    /** Episode-level title cleanup: strips "… Episode N" and trailing punctuation. */
     private fun cleanTitle(title: String): String {
         val cleaned = title
             .replace(seriesPageTitlePrefix, "")
@@ -174,7 +148,6 @@ class XmaalProvider : MainAPI() {
         return if (cleaned.isBlank()) title.trim() else cleaned
     }
 
-    /** Series-level cleanup: strips only "Web Series:" / "… Web Series" wrappers. */
     private fun cleanSeriesTitle(title: String): String {
         val cleaned = title
             .replace(seriesPageTitlePrefix, "")
@@ -198,18 +171,14 @@ class XmaalProvider : MainAPI() {
         if (raw.isNullOrBlank()) return null
         val url = raw.trim()
         if (url.startsWith("data:")) return null
-
         val root = domainOf(pageUrl)
 
         if (url.contains("/_next/image")) {
             val full = if (url.startsWith("http")) url else root + url
             val encoded = Regex("[?&]url=([^&]+)").find(full)?.groupValues?.get(1)
             return if (encoded != null) {
-                try {
-                    URLDecoder.decode(encoded.replace("+", "%2B"), "UTF-8")
-                } catch (e: Exception) {
-                    full
-                }
+                try { URLDecoder.decode(encoded.replace("+", "%2B"), "UTF-8") }
+                catch (e: Exception) { full }
             } else full
         }
 
@@ -236,10 +205,6 @@ class XmaalProvider : MainAPI() {
     private fun isXmaza2(site: String)    = site.contains(Domains.XMAZA2)
     private fun isZmaal(site: String)     = site.contains(Domains.ZMAAL)
 
-    // ------------------------------------------------------------------
-    // Junk-URL filter
-    // ------------------------------------------------------------------
-
     private fun isLikelyRealVideo(url: String): Boolean {
         if (url.length < 20) return false
         if (junkUrlPatterns.any { it.containsMatchIn(url) }) return false
@@ -250,10 +215,6 @@ class XmaalProvider : MainAPI() {
                 lower.contains(".mkv") ||
                 lower.contains("mime=video")
     }
-
-    // ==================================================================
-    // Per-site VideoExtractor interface + registry
-    // ==================================================================
 
     private data class StreamCandidate(
         val url: String,
@@ -266,7 +227,6 @@ class XmaalProvider : MainAPI() {
         fun extract(doc: Document, html: String, pageUrl: String): List<StreamCandidate>
     }
 
-    /** xplayer.js embed used by XMasti and MastiWala. */
     private class XPlayerExtractor : VideoExtractor {
         override val id = "xplayer"
         override fun extract(doc: Document, html: String, pageUrl: String): List<StreamCandidate> {
@@ -275,8 +235,7 @@ class XmaalProvider : MainAPI() {
                 val src = el.attr("data-src").trim()
                 if (src.isNotBlank()) {
                     val mime = el.attr("data-type")
-                    val isHls = src.contains(".m3u8", true) ||
-                            mime.contains("mpegurl", true)
+                    val isHls = src.contains(".m3u8", true) || mime.contains("mpegurl", true)
                     out.add(StreamCandidate(src, isHls, pageUrl))
                 }
             }
@@ -284,7 +243,6 @@ class XmaalProvider : MainAPI() {
         }
     }
 
-    /** Native <video> tag + download button (YMaal). */
     private class NativeVideoExtractor : VideoExtractor {
         override val id = "native-video"
         override fun extract(doc: Document, html: String, pageUrl: String): List<StreamCandidate> {
@@ -299,7 +257,6 @@ class XmaalProvider : MainAPI() {
                 if (src.isNotBlank())
                     out.add(StreamCandidate(src, src.contains(".m3u8", true), pageUrl))
             }
-            // YMaal download button
             doc.select("a.sdl[href]").forEach { a ->
                 val href = a.attr("href").trim()
                 if (href.contains(".mp4", true) || href.contains(".m3u8", true))
@@ -309,7 +266,6 @@ class XmaalProvider : MainAPI() {
         }
     }
 
-    /** Next.js sites embed the stream URL in a JSON blob (XMaza2). */
     private class NextJsExtractor : VideoExtractor {
         private val rx = Regex(
             """"(?:file|src|url|source)"\s*:\s*"(https?://[^"]+\.(?:mp4|m3u8)[^"]*)"""",
@@ -325,7 +281,6 @@ class XmaalProvider : MainAPI() {
         }
     }
 
-    /** Final fallback: bare regex over raw HTML. */
     private class GenericRegexExtractor : VideoExtractor {
         private val rx = Regex(
             """["'](https?://[^"']+\.(?:mp4|m3u8)[^"']*)["']""",
@@ -409,27 +364,44 @@ class XmaalProvider : MainAPI() {
             }
 
             else -> {
-                doc.select("a.video").forEach { a ->
-                    val title = a.selectFirst("h2.vtitle")?.text()?.trim()
-                        ?.takeUnless { it.isBlank() }
-                        ?: a.attr("title").trim()
-                    val href = a.attr("href")
-                    val dataBg = a.attr("data-bg")
-                    val raw = dataBg.ifBlank {
-                        styleUrlRegex.find(a.attr("style"))?.groupValues?.get(2)
-                    }
-                    if (title.isNotBlank() && href.isNotBlank())
+                // XMAZA (xmaza.adult) / OTTDUDE and other WP-Script-style sites.
+                // Try multiple common card selectors; use the first that yields cards.
+                val seenHrefs = mutableSetOf<String>()
+                val cardSelectors = listOf(
+                    "a.video",                 // original WP-Script / ottdude theme
+                    "article.video a",
+                    ".video-block a",
+                    ".thumb-block a",
+                    ".video-item a",
+                    ".item a[href]",
+                    ".card a[href]"
+                )
+
+                for (sel in cardSelectors) {
+                    doc.select(sel).forEach { a ->
+                        val title = a.selectFirst("h2.vtitle, h2, h3, .title")
+                            ?.text()?.trim()
+                            ?.takeUnless { it.isBlank() }
+                            ?: a.attr("title").trim()
+                        val href = a.attr("href")
+                        if (title.isBlank() || href.isBlank()) return@forEach
+                        if (!seenHrefs.add(href)) return@forEach
+
+                        val dataBg = a.attr("data-bg")
+                        val raw = dataBg.ifBlank {
+                            a.selectFirst("img")?.let { img ->
+                                img.attr("data-src").ifBlank { img.attr("src") }
+                            } ?: styleUrlRegex.find(a.attr("style"))?.groupValues?.get(2)
+                        }
                         results.add(Triple(title, href, raw))
+                    }
+                    if (results.isNotEmpty()) break
                 }
             }
         }
 
         return results
     }
-
-    // ------------------------------------------------------------------
-    // Poster heuristic
-    // ------------------------------------------------------------------
 
     private fun extractSeriesPoster(doc: Document, pageUrl: String, title: String): String? {
         val site = domainOf(pageUrl)
@@ -481,21 +453,12 @@ class XmaalProvider : MainAPI() {
             if (fnLower.contains("logo") || fnLower.contains("icon") || fnLower.contains("default"))
                 score -= 50
 
-            if (score > bestScore) {
-                bestScore = score
-                bestRaw = raw
-            }
+            if (score > bestScore) { bestScore = score; bestRaw = raw }
         }
 
-        if (bestScore <= 0 || bestRaw == null) {
-            return fixImageUrl(candidates.first(), pageUrl)
-        }
+        if (bestScore <= 0 || bestRaw == null) return fixImageUrl(candidates.first(), pageUrl)
         return fixImageUrl(bestRaw, pageUrl)
     }
-
-    // ------------------------------------------------------------------
-    // Series URL detection
-    // ------------------------------------------------------------------
 
     private fun findSeriesUrl(epDoc: Document, pageUrl: String, mediaTitle: String): String? {
         val site = domainOf(pageUrl)
@@ -541,10 +504,6 @@ class XmaalProvider : MainAPI() {
         return candidates.firstOrNull()?.second
     }
 
-    // ------------------------------------------------------------------
-    // Inline episode list (XMasti)
-    // ------------------------------------------------------------------
-
     private fun extractInlineEpisodes(epDoc: Document, pageUrl: String): List<Episode> {
         val list = mutableListOf<Episode>()
         val seen = mutableSetOf<String>()
@@ -572,67 +531,35 @@ class XmaalProvider : MainAPI() {
         return list
     }
 
-    // ==================================================================
-    // Verify links before emitting (prevents "source error")
-    // ==================================================================
-
     private suspend fun verifyVideoLink(url: String, referer: String): Boolean {
-        // Do a ranged GET (bytes=0-1) — cheap, and validates the CDN actually serves the file.
         val resp = try {
             withTimeoutOrNull(Timeouts.VERIFY_MS) {
-                app.get(
-                    url = url,
-                    referer = referer,
-                    headers = mapOf("Range" to "bytes=0-1")
-                )
+                app.get(url = url, referer = referer, headers = mapOf("Range" to "bytes=0-1"))
             }
         } catch (e: Exception) {
-            logD("verify threw for $url: ${e.message}")
-            null
+            logD("verify threw for $url: ${e.message}"); null
         } ?: return false
 
         val code = resp.code
-        if (code !in 200..399) {
-            logD("verify rejected (code=$code) $url")
-            return false
-        }
+        if (code !in 200..399) { logD("verify rejected (code=$code) $url"); return false }
 
         val ct = (resp.headers["Content-Type"] ?: "").lowercase()
         val cl = resp.headers["Content-Length"]?.toLongOrNull() ?: -1L
 
-        // Reject HTML error pages (Cloudflare, 404 pages, etc.).
         if (ct.contains("text/html") || ct.contains("text/plain")) {
-            logD("verify rejected (html) $url")
-            return false
+            logD("verify rejected (html) $url"); return false
         }
 
-        val looksLikeVideo = ct.contains("video/") ||
-                ct.contains("audio/") ||
-                ct.contains("octet-stream") ||
-                ct.contains("mpegurl") ||
-                ct.contains("mp2t") ||
-                url.contains(".mp4", ignoreCase = true) ||
-                url.contains(".m3u8", ignoreCase = true) ||
-                url.contains(".webm", ignoreCase = true) ||
-                url.contains(".mkv", ignoreCase = true)
+        val looksLikeVideo = ct.contains("video/") || ct.contains("audio/") ||
+                ct.contains("octet-stream") || ct.contains("mpegurl") || ct.contains("mp2t") ||
+                url.contains(".mp4", true) || url.contains(".m3u8", true) ||
+                url.contains(".webm", true) || url.contains(".mkv", true)
 
-        if (!looksLikeVideo) {
-            logD("verify rejected (not video, ct=$ct) $url")
-            return false
-        }
-
-        // If the server returned 200 for a Range request but reports 0 bytes, it's dead.
-        if (cl == 0L && code == 200) {
-            logD("verify rejected (0 bytes) $url")
-            return false
-        }
+        if (!looksLikeVideo) { logD("verify rejected (not video, ct=$ct) $url"); return false }
+        if (cl == 0L && code == 200) { logD("verify rejected (0 bytes) $url"); return false }
 
         return true
     }
-
-    // ------------------------------------------------------------------
-    // CloudStream API — Main page
-    // ------------------------------------------------------------------
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
         val document = retry(2) {
@@ -649,14 +576,8 @@ class XmaalProvider : MainAPI() {
             }
         }
 
-        return newHomePageResponse(
-            HomePageList(request.name, home, isHorizontalImages = true)
-        )
+        return newHomePageResponse(HomePageList(request.name, home, isHorizontalImages = true))
     }
-
-    // ------------------------------------------------------------------
-    // CloudStream API — Search
-    // ------------------------------------------------------------------
 
     override suspend fun search(query: String): List<SearchResponse> {
         val results = mutableMapOf<String, SearchResponse>()
@@ -668,7 +589,6 @@ class XmaalProvider : MainAPI() {
                     try {
                         val searchUrl = if (isXmaza2(site)) "$site/search/$query"
                                         else "$site/?s=$query"
-
                         val doc = retry(2) {
                             withTimeoutOrNull(Timeouts.SEARCH_MS) { app.get(searchUrl).document }
                         } ?: return@async
@@ -677,7 +597,6 @@ class XmaalProvider : MainAPI() {
                             val key = normalizeTitle(title)
                             val href = resolveHref(hrefRaw, site)
                             if (key.isBlank() || href.isBlank()) return@forEach
-
                             mutex.withLock {
                                 if (!results.containsKey(key)) {
                                     results[key] = newTvSeriesSearchResponse(title, href, TvType.NSFW) {
@@ -686,19 +605,13 @@ class XmaalProvider : MainAPI() {
                                 }
                             }
                         }
-                    } catch (e: Exception) {
-                        logE("search $site", e)
-                    }
+                    } catch (e: Exception) { logE("search $site", e) }
                 }
             }.awaitAll()
         }
 
         return results.values.toList()
     }
-
-    // ------------------------------------------------------------------
-    // CloudStream API — Load
-    // ------------------------------------------------------------------
 
     override suspend fun load(url: String): LoadResponse? {
         val epDoc = retry(2) {
@@ -707,7 +620,6 @@ class XmaalProvider : MainAPI() {
 
         val site = domainOf(url)
 
-        // Distinguish episode vs series title pages.
         val h1Episode = epDoc.selectFirst("h1.video-title")
             ?: epDoc.selectFirst("h1.stitle")
             ?: epDoc.selectFirst(".video-container h1")
@@ -734,7 +646,6 @@ class XmaalProvider : MainAPI() {
 
         val clickedPoster = extractSeriesPoster(epDoc, url, rawClickedTitle)
 
-        // ---- Inline episodes (XMasti) — no extra fetch ----
         val seriesUrl = findSeriesUrl(epDoc, url, rawClickedTitle)
         if (isXmasti(site) && seriesUrl != null) {
             val inline = extractInlineEpisodes(epDoc, url)
@@ -748,7 +659,6 @@ class XmaalProvider : MainAPI() {
             }
         }
 
-        // ---- Standalone movie (no series link) ----
         if (seriesUrl == null) {
             return newMovieLoadResponse(mediaTitle, url, TvType.NSFW, url) {
                 this.posterUrl = clickedPoster
@@ -757,12 +667,10 @@ class XmaalProvider : MainAPI() {
             }
         }
 
-        // ---- Series page load ----
         val seriesDoc = retry(2) {
             withTimeoutOrNull(Timeouts.LOAD_MS) { app.get(seriesUrl).document }
         }
 
-        // Fallback: series page fetch failed → return a single-episode series.
         if (seriesDoc == null) {
             logD("series fetch failed for $seriesUrl — falling back to single-episode response")
             val fallbackEp = newEpisode(url) {
@@ -813,10 +721,6 @@ class XmaalProvider : MainAPI() {
         }
     }
 
-    // ------------------------------------------------------------------
-    // CloudStream API — Load links
-    // ------------------------------------------------------------------
-
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -829,10 +733,6 @@ class XmaalProvider : MainAPI() {
         val found = AtomicBoolean(false)
         val seenUrls: MutableSet<String> = Collections.synchronizedSet(HashSet())
 
-        // Build candidate page URLs in priority order:
-        //   1. The URL we were given.
-        //   2. Same path, different mirror domain.
-        //   3. Slug-based fallbacks per site template.
         val candidates = LinkedHashSet<String>()
         candidates.add(data)
         mirrors.forEach { site ->
@@ -888,18 +788,11 @@ class XmaalProvider : MainAPI() {
 
         for (stream in extracted) {
             if (found.get()) return
-
-            // De-dupe across mirrors.
             if (!seenUrls.add(stream.url)) continue
 
             val referer = stream.referer ?: pageUrl
-
-            // VERIFY the link actually serves video content before emitting.
             val ok = verifyVideoLink(stream.url, referer)
-            if (!ok) {
-                logD("link failed verification: ${stream.url}")
-                continue
-            }
+            if (!ok) { logD("link failed verification: ${stream.url}"); continue }
 
             callback.invoke(
                 newExtractorLink(
@@ -917,10 +810,6 @@ class XmaalProvider : MainAPI() {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Season-aware comparator with modern episode regexes
-    // ------------------------------------------------------------------
-
     private inner class SeasonAwareComparator : Comparator<Episode> {
         override fun compare(s1: Episode, s2: Episode): Int {
             val (base1, season1, ep1) = parseKey(s1.name ?: "")
@@ -933,7 +822,6 @@ class XmaalProvider : MainAPI() {
         private fun parseKey(title: String): Triple<String, Int, Int> {
             val t = title.trim()
 
-            // 1) "Show Season N Episode M"
             seasonEpisodeRegex.find(t)?.let { m ->
                 return Triple(
                     normalizeTitle(m.groupValues[1]),
@@ -941,7 +829,6 @@ class XmaalProvider : MainAPI() {
                     m.groupValues[3].toInt()
                 )
             }
-            // 2) "Show SxxExx"
             sxxexxRegex.find(t)?.let { m ->
                 return Triple(
                     normalizeTitle(m.groupValues[1]),
@@ -949,14 +836,12 @@ class XmaalProvider : MainAPI() {
                     m.groupValues[3].toInt()
                 )
             }
-            // 3) "Show N Episode M"
             episodeRegex.matchEntire(t)?.let { m ->
                 val base = normalizeTitle(m.groupValues[1])
                 val season = m.groupValues[2].toIntOrNull() ?: 1
                 val ep = m.groupValues[3].toIntOrNull() ?: 0
                 return Triple(base, season, ep)
             }
-            // 4) Fallback: sort by normalized title.
             return Triple(normalizeTitle(t), 0, 0)
         }
     }
