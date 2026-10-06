@@ -64,14 +64,15 @@ class XmaalProvider : MainAPI() {
         Domains.MASTIWALA
     )
 
+    // ---- FIXED: use /category/ instead of /ott/ ----
     override val mainPage = mainPageOf(
-        "${Domains.XMAZA}/ott/ullu/"               to "ULLU",
-        "${Domains.XMAZA}/ott/atrangii/"           to "Atrangii",
-        "${Domains.XMAZA}/ott/kooku/"              to "Kooku",
-        "${Domains.XMAZA}/ott/moovi/"              to "Moovi",
-        "${Domains.XMAZA}/ott/look-entertainment/" to "Look Entertainment",
-        "${Domains.XMAZA}/ott/jugnu/"              to "Jugnu",
-        "${Domains.XMAZA}/ott/voovi/"              to "Voovi"
+        "${Domains.XMAZA}/category/ullu/"               to "ULLU",
+        "${Domains.XMAZA}/category/atrangii/"           to "Atrangii",
+        "${Domains.XMAZA}/category/kooku/"              to "Kooku",
+        "${Domains.XMAZA}/category/moovi/"              to "Moovi",
+        "${Domains.XMAZA}/category/look-entertainment/" to "Look Entertainment",
+        "${Domains.XMAZA}/category/jugnu/"              to "Jugnu",
+        "${Domains.XMAZA}/category/voovi/"              to "Voovi"
     )
 
     private val styleUrlRegex = Regex("url\\((['\"]?)(.*?)\\1\\)")
@@ -303,10 +304,6 @@ class XmaalProvider : MainAPI() {
         GenericRegexExtractor()
     )
 
-    // ------------------------------------------------------------------
-    // Card extraction
-    // ------------------------------------------------------------------
-
     private fun extractCards(doc: Document, site: String): List<Triple<String, String, String?>> {
         val results = mutableListOf<Triple<String, String, String?>>()
 
@@ -364,11 +361,9 @@ class XmaalProvider : MainAPI() {
             }
 
             else -> {
-                // XMAZA (xmaza.adult) / OTTDUDE and other WP-Script-style sites.
-                // Try multiple common card selectors; use the first that yields cards.
                 val seenHrefs = mutableSetOf<String>()
                 val cardSelectors = listOf(
-                    "a.video",                 // original WP-Script / ottdude theme
+                    "a.video",
                     "article.video a",
                     ".video-block a",
                     ".thumb-block a",
