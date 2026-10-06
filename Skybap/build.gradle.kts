@@ -22,8 +22,7 @@ cloudstream {
     // https://recloudstream.github.io/cloudstream/html/app/com.lagradost.cloudstream3/-tv-type/index.html
     tvTypes = listOf(
         "Movie",
-        "TvSeries"
     )
-    iconUrl = "https://t0.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://skybap.site"
+    iconUrl = "https://skymovieshd.band/images/logo2.png"
     isCrossPlatform = true
 }
