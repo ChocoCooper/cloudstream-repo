@@ -6,8 +6,10 @@ New providers may be added, and existing providers may be updated over time.
 
 ## Install Repo
 
+- Shortcode: `CCrepo`
+- Direct Install: [Click Here](https://cutt.ly/MyWwgucQ)
+- Manual Install:
 CloudStream → Settings → Extensions → Add Repo
-
 ```text
 https://raw.githubusercontent.com/ChocoCooper/cloudstream-repo/master/repo.json
 ```
