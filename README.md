@@ -1,4 +1,4 @@
-# ChocoCooper's Repo
+# ChocoCooper's Repo 🇮🇳
 
 This repository contains custom [CloudStream](https://github.com/recloudstream/cloudstream) providers for accessing and organizing media from various online sources. The extensions are designed to work with CloudStream.
 
