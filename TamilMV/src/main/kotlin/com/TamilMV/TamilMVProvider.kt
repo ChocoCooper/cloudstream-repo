@@ -350,16 +350,12 @@ class TamilMV : MainAPI() {
             return null
         }
 
-        // 1. THE POSTER — first <a> under <p> that wraps an <img>, in document order.
-        //    Screenshots live in later <a> tags (a[2], a[3], …), so the first
-        //    anchor is always the poster.
         content.select("p a").forEach { a ->
             val img = a.selectFirst("img") ?: return@forEach
             if (img.hasAttr("data-emoticon")) return@forEach
             urlFromImg(img)?.let { return it }
         }
 
-        // 2. First IPS-class image anywhere (older layout, no <a> wrapper)
         content.selectFirst(
             "img.ipsImage, img.ipsImage_thumbnailed, img.ipsImage_thumbnailed_colorized"
         )?.let { img ->
@@ -368,7 +364,6 @@ class TamilMV : MainAPI() {
             }
         }
 
-        // 3. Last resort — first non-emoticon image with any source
         content.selectFirst("img[src], img[data-src]")?.let { img ->
             if (!img.hasAttr("data-emoticon")) {
                 urlFromImg(img)?.let { return it }
@@ -455,37 +450,55 @@ class TamilMV : MainAPI() {
             items.map { item ->
                 async {
                     sem.withPermit {
-                        try {
-                            val doc = app.get(item.url).document
+                        var poster = posterCache[item.url]
+                        var title  = titleCache[item.url]
 
-                            // ── Poster ───────────────────────────────
-                            posterCache[item.url]?.let {
-                                item.posterUrl = it
-                            } ?: run {
-                                val poster = extractPoster(doc)
-                                if (poster != null) {
-                                    item.posterUrl = poster
-                                    posterCache[item.url] = poster
-                                }
-                            }
+                        if (poster == null || title == null) {
+                            try {
+                                val doc = app.get(item.url).document
 
-                            // ── Title from <h1> — source of truth ────
-                            val h1 = doc.selectFirst("h1.ipsType_pageTitle")
-                                ?.text()
-                                ?.replace(Regex("""\s+"""), " ")
-                                ?.trim()
-                            if (!h1.isNullOrBlank()) {
-                                val canonical = h1.toShortTitle()
-                                titleCache[item.url] = canonical
-                                if (canonical.isNotBlank() && canonical != item.name) {
-                                    Log.d(TAG, "title refine: '${item.name}' → '$canonical'")
-                                    item.name = canonical
+                                if (poster == null) {
+                                    val p = extractPoster(doc)
+                                    if (p != null) {
+                                        poster = p
+                                        posterCache[item.url] = p
+                                    }
                                 }
+
+                                if (title == null) {
+                                    val h1 = doc.selectFirst("h1.ipsType_pageTitle")
+                                        ?.text()
+                                        ?.replace(Regex("""\s+"""), " ")
+                                        ?.trim()
+                                    if (!h1.isNullOrBlank()) {
+                                        val canonical = h1.toShortTitle()
+                                        titleCache[item.url] = canonical
+                                        title = canonical
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                Log.e(TAG, "enrich failed for ${item.url}: ${e.message}")
                             }
-                        } catch (e: Exception) {
-                            Log.e(TAG, "enrich failed for ${item.url}: ${e.message}")
                         }
-                        item
+
+                        val originalName = item.name
+                        val finalTitle = title
+                            ?: originalName
+                            ?: return@withPermit item
+
+                        val titleChanged  = finalTitle != originalName
+                        val posterChanged = poster != item.posterUrl
+
+                        if (titleChanged || posterChanged) {
+                            if (titleChanged) {
+                                Log.d(TAG, "title refine: '$originalName' → '$finalTitle'")
+                            }
+                            newMovieSearchResponse(finalTitle, item.url, TvType.Movie) {
+                                this.posterUrl = poster
+                            }
+                        } else {
+                            item
+                        }
                     }
                 }
             }.awaitAll()
