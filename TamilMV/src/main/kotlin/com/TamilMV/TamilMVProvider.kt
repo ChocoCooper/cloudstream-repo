@@ -46,7 +46,7 @@ class TamilMV : MainAPI() {
             else             -> emptyList()
         }
         Log.d(TAG, "${request.data}: ${items.size} items")
-        return newHomePageResponse(request.name, enrichWithPosters(items))
+        return newHomePageResponse(request.name, enrich(items))
     }
 
     private fun parseBangerSection(doc: Document, headerKeyword: String): List<SearchResponse> {
@@ -148,7 +148,7 @@ class TamilMV : MainAPI() {
 
         val parsed = parseSearchJson(json)
         Log.d(TAG, "search → ${parsed.size} results")
-        return enrichWithPosters(parsed)
+        return enrich(parsed)
     }
 
     private fun parseSearchJson(json: String): List<SearchResponse> {
@@ -332,42 +332,51 @@ class TamilMV : MainAPI() {
             "smiley", "blank", "emoji", "emoticon"
         )
 
-        fun isDecorative(url: String): Boolean {
-            val l = url.lowercase()
-            if (skipFragments.any { l.contains(it) }) return true
-            if (l.endsWith(".gif")) return true
-            return false
+        fun valid(url: String?): String? {
+            val n = normalizeUrl(url) ?: return null
+            val l = n.lowercase()
+            if (skipFragments.any { l.contains(it) }) return null
+            if (l.endsWith(".gif")) return null
+            return n
         }
 
-        fun urlFromImg(img: Element): String? {
+        fun imgUrl(img: Element): String? {
+            if (img.hasAttr("data-emoticon")) return null
             for (attr in listOf("data-src", "data-original", "src")) {
-                val v = img.attr(attr).trim()
-                if (v.isEmpty()) continue
-                val n = normalizeUrl(v) ?: continue
-                if (isDecorative(n)) continue
-                return n
+                valid(img.attr(attr))?.let { return it }
             }
             return null
         }
 
-        content.select("p a").forEach { a ->
-            val img = a.selectFirst("img") ?: return@forEach
-            if (img.hasAttr("data-emoticon")) return@forEach
-            urlFromImg(img)?.let { return it }
+        // Primary: the poster anchor is uniquely marked with data-ipslightbox.
+        // Screenshot anchors do not carry this attribute.
+        content.selectFirst("a[data-ipslightbox][href], a[data-lightbox-group][href]")
+            ?.let { a ->
+                // Prefer the anchor's own href — it's the direct image URL
+                valid(a.attr("href"))?.let { return it }
+                // Otherwise the wrapped image's source
+                a.selectFirst("img")?.let { img ->
+                    imgUrl(img)?.let { return it }
+                }
+            }
+
+        // Fallback A: first image inside <strong> (older template)
+        content.selectFirst("p strong img, p span strong img")?.let { img ->
+            imgUrl(img)?.let { return it }
         }
 
+        // Fallback B: first IPS-class image anywhere in the post
         content.selectFirst(
-            "img.ipsImage, img.ipsImage_thumbnailed, img.ipsImage_thumbnailed_colorized"
+            "img.ipsImage_thumbnailed, " +
+            "img.ipsImage_thumbnailed_colorized, " +
+            "img.ipsImage"
         )?.let { img ->
-            if (!img.hasAttr("data-emoticon")) {
-                urlFromImg(img)?.let { return it }
-            }
+            imgUrl(img)?.let { return it }
         }
 
+        // Fallback C: first non-emoticon image with any source
         content.selectFirst("img[src], img[data-src]")?.let { img ->
-            if (!img.hasAttr("data-emoticon")) {
-                urlFromImg(img)?.let { return it }
-            }
+            imgUrl(img)?.let { return it }
         }
 
         return null
@@ -443,7 +452,13 @@ class TamilMV : MainAPI() {
         return null
     }
 
-    private suspend fun enrichWithPosters(items: List<SearchResponse>): List<SearchResponse> =
+    /**
+     * Enrich each card with poster + h1-derived title.
+     *
+     * Both home and search call this; both end up with the same title and poster
+     * that the load page will show, because the h1 is the single source of truth.
+     */
+    private suspend fun enrich(items: List<SearchResponse>): List<SearchResponse> =
         coroutineScope {
             if (items.isEmpty()) return@coroutineScope items
             val sem = Semaphore(6)
@@ -482,9 +497,7 @@ class TamilMV : MainAPI() {
                         }
 
                         val originalName = item.name
-                        val finalTitle = title
-                            ?: originalName
-                            ?: return@withPermit item
+                        val finalTitle   = title ?: originalName ?: return@withPermit item
 
                         val titleChanged  = finalTitle != originalName
                         val posterChanged = poster != item.posterUrl
