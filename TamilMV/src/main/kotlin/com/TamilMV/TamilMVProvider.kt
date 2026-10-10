@@ -33,6 +33,7 @@ class TamilMV : MainAPI() {
     )
 
     private val posterCache = ConcurrentHashMap<String, String>()
+    private val titleCache  = ConcurrentHashMap<String, String>()
 
     override suspend fun getMainPage(
         page: Int,
@@ -69,8 +70,9 @@ class TamilMV : MainAPI() {
                 val title = extractTitleFromAnchor(a) ?: return@forEach
                 if (title.contains("[W]") || title.trim() == "[W]") return@forEach
 
+                val cached = titleCache[url]
                 out.add(
-                    newMovieSearchResponse(title.toShortTitle(), url, TvType.Movie) {
+                    newMovieSearchResponse(cached ?: title.toShortTitle(), url, TvType.Movie) {
                         this.posterUrl = posterCache[url]
                     }
                 )
@@ -165,8 +167,9 @@ class TamilMV : MainAPI() {
                 if (!seen.add(tid)) continue
 
                 val url = buildTopicUrl(tid, title)
+                val cached = titleCache[url]
                 out.add(
-                    newMovieSearchResponse(title.toShortTitle(), url, TvType.Movie) {
+                    newMovieSearchResponse(cached ?: title.toShortTitle(), url, TvType.Movie) {
                         this.posterUrl = posterCache[url]
                     }
                 )
@@ -200,6 +203,7 @@ class TamilMV : MainAPI() {
             ?: "Unknown"
 
         val shortTitle = fullTitle.toShortTitle()
+        titleCache[url] = shortTitle
 
         val poster = extractPoster(doc)
         if (poster != null) posterCache[url] = poster
@@ -346,34 +350,29 @@ class TamilMV : MainAPI() {
             return null
         }
 
-        // Strategy 1 — poster inside <strong> (the wrapper the site uses for posters)
-        content.select("p strong img, p span strong img").forEach { img ->
+        // 1. THE POSTER — first <a> under <p> that wraps an <img>, in document order.
+        //    Screenshots live in later <a> tags (a[2], a[3], …), so the first
+        //    anchor is always the poster.
+        content.select("p a").forEach { a ->
+            val img = a.selectFirst("img") ?: return@forEach
             if (img.hasAttr("data-emoticon")) return@forEach
             urlFromImg(img)?.let { return it }
         }
 
-        // Strategy 2 — lightbox anchor inside <strong> (fallback for that wrapper)
+        // 2. First IPS-class image anywhere (older layout, no <a> wrapper)
         content.selectFirst(
-            "p strong a[data-ipslightbox][href], " +
-            "p span strong a[data-ipslightbox][href]"
-        )?.let { a ->
-            normalizeUrl(a.attr("href"))?.let {
-                if (!isDecorative(it)) return it
+            "img.ipsImage, img.ipsImage_thumbnailed, img.ipsImage_thumbnailed_colorized"
+        )?.let { img ->
+            if (!img.hasAttr("data-emoticon")) {
+                urlFromImg(img)?.let { return it }
             }
         }
 
-        // Strategy 3 — first IPS content image anywhere in the post
-        content.select(
-            "img.ipsImage, img.ipsImage_thumbnailed, img.ipsImage_thumbnailed_colorized"
-        ).forEach { img ->
-            if (img.hasAttr("data-emoticon")) return@forEach
-            urlFromImg(img)?.let { return it }
-        }
-
-        // Strategy 4 — first non-emoticon image with any source
-        content.select("img[src], img[data-src]").forEach { img ->
-            if (img.hasAttr("data-emoticon")) return@forEach
-            urlFromImg(img)?.let { return it }
+        // 3. Last resort — first non-emoticon image with any source
+        content.selectFirst("img[src], img[data-src]")?.let { img ->
+            if (!img.hasAttr("data-emoticon")) {
+                urlFromImg(img)?.let { return it }
+            }
         }
 
         return null
@@ -456,19 +455,35 @@ class TamilMV : MainAPI() {
             items.map { item ->
                 async {
                     sem.withPermit {
-                        posterCache[item.url]?.let {
-                            item.posterUrl = it
-                            return@withPermit item
-                        }
                         try {
-                            val doc    = app.get(item.url).document
-                            val poster = extractPoster(doc)
-                            if (poster != null) {
-                                item.posterUrl = poster
-                                posterCache[item.url] = poster
+                            val doc = app.get(item.url).document
+
+                            // ── Poster ───────────────────────────────
+                            posterCache[item.url]?.let {
+                                item.posterUrl = it
+                            } ?: run {
+                                val poster = extractPoster(doc)
+                                if (poster != null) {
+                                    item.posterUrl = poster
+                                    posterCache[item.url] = poster
+                                }
+                            }
+
+                            // ── Title from <h1> — source of truth ────
+                            val h1 = doc.selectFirst("h1.ipsType_pageTitle")
+                                ?.text()
+                                ?.replace(Regex("""\s+"""), " ")
+                                ?.trim()
+                            if (!h1.isNullOrBlank()) {
+                                val canonical = h1.toShortTitle()
+                                titleCache[item.url] = canonical
+                                if (canonical.isNotBlank() && canonical != item.name) {
+                                    Log.d(TAG, "title refine: '${item.name}' → '$canonical'")
+                                    item.name = canonical
+                                }
                             }
                         } catch (e: Exception) {
-                            Log.e(TAG, "poster fetch failed for ${item.url}: ${e.message}")
+                            Log.e(TAG, "enrich failed for ${item.url}: ${e.message}")
                         }
                         item
                     }
