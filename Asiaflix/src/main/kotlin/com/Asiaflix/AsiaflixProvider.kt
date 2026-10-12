@@ -13,9 +13,6 @@ import com.lagradost.cloudstream3.utils.newExtractorLink
 
 class AsiaflixProvider : MainAPI() {
 
-    // ─────────────────────────────────────────────────────────────
-    //  Identity
-    // ─────────────────────────────────────────────────────────────
     override var mainUrl = "https://asiaflix.net"
     override var name    = "Asiaflix"
     override var lang    = "en"
@@ -30,9 +27,6 @@ class AsiaflixProvider : MainAPI() {
         TvType.Movie,
     )
 
-    // ─────────────────────────────────────────────────────────────
-    //  Constants
-    // ─────────────────────────────────────────────────────────────
     private val api = "https://api.asiaflix.net/v1"
 
     private val apiHeaders: Map<String, String> = mapOf(
@@ -44,18 +38,10 @@ class AsiaflixProvider : MainAPI() {
                               "(KHTML, like Gecko) Chrome/120 Mobile Safari/537.36",
     )
 
-    // ─────────────────────────────────────────────────────────────
-    //  Jackson mapper
-    //  Scraper rule #1: never fail on unknown fields. The API will
-    //  add new keys over time; we only consume what we need.
-    // ─────────────────────────────────────────────────────────────
     private val mapper = jacksonObjectMapper().apply {
         disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
     }
 
-    // ─────────────────────────────────────────────────────────────
-    //  Logging — all messages share the tag "ASIAFLIX"
-    // ─────────────────────────────────────────────────────────────
     private fun log(tag: String, msg: String) = Log.d("ASIAFLIX", "[$tag] $msg")
     private fun err(tag: String, msg: String) = Log.e("ASIAFLIX", "[$tag] $msg")
 
@@ -105,9 +91,6 @@ class AsiaflixProvider : MainAPI() {
         null
     }
 
-    // ─────────────────────────────────────────────────────────────
-    //  Main page
-    // ─────────────────────────────────────────────────────────────
     override val mainPage = mainPageOf("home" to "Home")
 
     override suspend fun getMainPage(
@@ -143,9 +126,6 @@ class AsiaflixProvider : MainAPI() {
         return newHomePageResponse(homeLists)
     }
 
-    // ─────────────────────────────────────────────────────────────
-    //  Search
-    // ─────────────────────────────────────────────────────────────
     override suspend fun search(query: String): List<SearchResponse> {
         log("SEARCH", "query='$query'")
 
@@ -170,9 +150,6 @@ class AsiaflixProvider : MainAPI() {
         return list.mapNotNull { it.toSearchResponse() }
     }
 
-    // ─────────────────────────────────────────────────────────────
-    //  Detail page → episode list
-    // ─────────────────────────────────────────────────────────────
     override suspend fun load(url: String): LoadResponse {
         log("LOAD", "url='$url'")
 
@@ -214,13 +191,11 @@ class AsiaflixProvider : MainAPI() {
         ) {
             this.posterUrl = detail.image ?: detail.coverImage
             this.plot      = detail.description
-            this.year      = detail.releaseYear
+            // releaseYear comes back as a JSON string like "2026"
+            this.year      = detail.releaseYear?.toIntOrNull()
         }
     }
 
-    // ─────────────────────────────────────────────────────────────
-    //  Playback
-    // ─────────────────────────────────────────────────────────────
     override suspend fun loadLinks(
         data: String,
         isCasting: Boolean,
@@ -299,9 +274,6 @@ class AsiaflixProvider : MainAPI() {
         return false
     }
 
-    // ─────────────────────────────────────────────────────────────
-    //  Helpers
-    // ─────────────────────────────────────────────────────────────
     private fun TitleItem.toSearchResponse(): SearchResponse? {
         val title = name ?: run {
             err("MAP", "TitleItem missing name — skipping (_id=$_id)")
@@ -317,15 +289,13 @@ class AsiaflixProvider : MainAPI() {
             type = TvType.AsianDrama,
         ) {
             this.posterUrl = image ?: coverImage
-            this.year      = releaseYear
+            this.year      = releaseYear?.toIntOrNull()   // string → Int?
         }
     }
 }
 
 // ═════════════════════════════════════════════════════════════════
-//  DTOs — every field we've actually observed in API responses.
-//  The mapper is configured to ignore any *new* fields the API
-//  adds later, so these classes never need to change.
+//  DTOs
 // ═════════════════════════════════════════════════════════════════
 
 data class HomeSection(
@@ -344,7 +314,7 @@ data class TitleItem(
     val country:        String? = null,
     val status:         String? = null,
     val type:           String? = null,
-    val releaseYear:    String? = null,   // API returns "2026" as string
+    val releaseYear:    String? = null,
     val updatedAt:      String? = null,
     val uploadDate:     String? = null,
     val createdAt:      String? = null,
