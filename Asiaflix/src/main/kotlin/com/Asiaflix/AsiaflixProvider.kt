@@ -3,6 +3,7 @@ package com.asiaflix
 import android.util.Base64
 import android.util.Log
 import com.fasterxml.jackson.core.type.TypeReference
+import com.fasterxml.jackson.databind.DeserializationFeature
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.ExtractorLink
@@ -43,7 +44,14 @@ class AsiaflixProvider : MainAPI() {
                               "(KHTML, like Gecko) Chrome/120 Mobile Safari/537.36",
     )
 
-    private val mapper = jacksonObjectMapper()
+    // ─────────────────────────────────────────────────────────────
+    //  Jackson mapper
+    //  Scraper rule #1: never fail on unknown fields. The API will
+    //  add new keys over time; we only consume what we need.
+    // ─────────────────────────────────────────────────────────────
+    private val mapper = jacksonObjectMapper().apply {
+        disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+    }
 
     // ─────────────────────────────────────────────────────────────
     //  Logging — all messages share the tag "ASIAFLIX"
@@ -51,10 +59,6 @@ class AsiaflixProvider : MainAPI() {
     private fun log(tag: String, msg: String) = Log.d("ASIAFLIX", "[$tag] $msg")
     private fun err(tag: String, msg: String) = Log.e("ASIAFLIX", "[$tag] $msg")
 
-    /**
-     * Timed GET with full request/response logging.
-     * `params` defaults to an empty map so it is always non-null.
-     */
     private suspend fun timedGet(
         tag:     String,
         url:     String,
@@ -68,9 +72,8 @@ class AsiaflixProvider : MainAPI() {
         val resp = try {
             app.get(url, headers = headers, params = params, timeout = timeout)
         } catch (e: Throwable) {
-            val exName = e.javaClass.simpleName
-            val exMsg  = e.message ?: "(no message)"
-            err(tag, "EXCEPTION after ${System.currentTimeMillis() - stamp}ms: $exName: $exMsg")
+            err(tag, "EXCEPTION after ${System.currentTimeMillis() - stamp}ms: " +
+                     "${e.javaClass.simpleName}: ${e.message ?: "(no message)"}")
             throw e
         }
 
@@ -127,7 +130,6 @@ class AsiaflixProvider : MainAPI() {
         }
         log("HOME", "parsed ${sections.size} sections")
 
-        // Build one HomePageList per section.
         val homeLists: List<HomePageList> = sections.mapIndexedNotNull { idx, s ->
             val items = s.data.orEmpty().mapNotNull { it.toSearchResponse() }
             val label = s.title?.takeIf { it.isNotBlank() }
@@ -204,7 +206,6 @@ class AsiaflixProvider : MainAPI() {
         }
         log("LOAD", "built ${episodes.size} episodes")
 
-        // Factory method — infers apiName from the calling provider.
         return newTvSeriesLoadResponse(
             name     = showName,
             url      = url,
@@ -274,7 +275,6 @@ class AsiaflixProvider : MainAPI() {
             for (s in sources) {
                 val link = s.url?.takeIf { it.isNotBlank() } ?: continue
                 log("LINKS", "  ✓ emitting m3u8=${s.isM3U8}  url=${link.take(100)}")
-
                 callback.invoke(
                     newExtractorLink(
                         source = this.name,
@@ -311,8 +311,6 @@ class AsiaflixProvider : MainAPI() {
             err("MAP", "TitleItem '$title' missing slug/_id — skipping")
             return null
         }
-
-        // Factory method — infers apiName from the calling provider.
         return newTvSeriesSearchResponse(
             name = title,
             url  = "$mainUrl/drama/$s",
@@ -325,7 +323,9 @@ class AsiaflixProvider : MainAPI() {
 }
 
 // ═════════════════════════════════════════════════════════════════
-//  DTOs — plain data classes, decoded with Jackson.
+//  DTOs — every field we've actually observed in API responses.
+//  The mapper is configured to ignore any *new* fields the API
+//  adds later, so these classes never need to change.
 // ═════════════════════════════════════════════════════════════════
 
 data class HomeSection(
@@ -344,7 +344,11 @@ data class TitleItem(
     val country:        String? = null,
     val status:         String? = null,
     val type:           String? = null,
-    val releaseYear:    Int?    = null,
+    val releaseYear:    String? = null,   // API returns "2026" as string
+    val updatedAt:      String? = null,
+    val uploadDate:     String? = null,
+    val createdAt:      String? = null,
+    val recentEp:       Any?    = null,
 )
 
 data class SearchRoot(
@@ -353,6 +357,7 @@ data class SearchRoot(
     val currentPage: Int?             = null,
     val nextPage:    Int?             = null,
     val hasNext:     Boolean?         = null,
+    val hasPrevious: Boolean?         = null,
     val totalPages:  Int?             = null,
     val totalItems:  Int?             = null,
 )
@@ -364,18 +369,19 @@ data class DramaDetail(
     val image:       String? = null,
     val coverImage:  String? = null,
     val description: String? = null,
-    val releaseYear: Int?    = null,
+    val releaseYear: String? = null,
     val genres:      List<String>? = null,
     val tags:        List<String>? = null,
     val episodes:    List<EpisodeEntry>? = null,
 )
 
 data class EpisodeEntry(
-    val title:      String? = null,
-    val number:     Int     = 1,
-    val epUrl:      String? = null,
-    val type:       String? = null,
-    val streamUrls: List<StreamServer>? = null,
+    val title:        String? = null,
+    val number:       Int     = 1,
+    val epUrl:        String? = null,
+    val type:         String? = null,
+    val epUploadDate: String? = null,
+    val streamUrls:   List<StreamServer>? = null,
 )
 
 data class StreamServer(
