@@ -34,7 +34,7 @@ class AsiaflixProvider : MainAPI() {
     // ─────────────────────────────────────────────────────────────
     private val api = "https://api.asiaflix.net/v1"
 
-    private val apiHeaders = mapOf(
+    private val apiHeaders: Map<String, String> = mapOf(
         "x-access-control" to "web",
         "Origin"           to "https://asiaflix.net",
         "Referer"          to "https://asiaflix.net/",
@@ -46,88 +46,66 @@ class AsiaflixProvider : MainAPI() {
     private val mapper = jacksonObjectMapper()
 
     // ─────────────────────────────────────────────────────────────
-    //  ▓▓ LOGGING HELPERS ▓▓
-    //  Every message is prefixed "ASIAFLIX/" so a single logcat filter
-    //  captures the entire provider lifecycle.
+    //  Logging — all messages share the tag "ASIAFLIX"
     // ─────────────────────────────────────────────────────────────
-
-    /** Info-level breadcrumb. */
-    private fun log(tag: String, msg: String) {
-        Log.d("ASIAFLIX", "[$tag] $msg")
-    }
-
-    /** Error-level — shows up in red in Android Studio / Termux logcat. */
-    private fun err(tag: String, msg: String) {
-        Log.e("ASIAFLIX", "[$tag] $msg")
-    }
+    private fun log(tag: String, msg: String) = Log.d("ASIAFLIX", "[$tag] $msg")
+    private fun err(tag: String, msg: String) = Log.e("ASIAFLIX", "[$tag] $msg")
 
     /**
-     * Timed GET that logs:
-     *  - the full URL (including query params)
-     *  - HTTP status
-     *  - wall-clock milliseconds
-     *  - response size in bytes
-     *  - a snippet of the body on non-2xx
+     * Timed GET with full request/response logging.
+     * `params` defaults to an empty map so it is always non-null.
      */
     private suspend fun timedGet(
-        tag: String,
-        url: String,
+        tag:     String,
+        url:     String,
         headers: Map<String, String> = apiHeaders,
-        params: Map<String, String>?  = null,
-        timeout: Long = 25L,
+        params:  Map<String, String> = emptyMap(),
+        timeout: Long                = 25L,
     ): String {
         val stamp = System.currentTimeMillis()
-        log(tag, "GET $url" + (params?.let { "  params=$it" } ?: ""))
+        log(tag, "GET $url" + if (params.isNotEmpty()) "  params=$params" else "")
+
         val resp = try {
             app.get(url, headers = headers, params = params, timeout = timeout)
-        } catch (e: Exception) {
-            err(tag, "EXCEPTION after ${System.currentTimeMillis() - stamp}ms: " +
-                     "${e::class.simpleName}: ${e.message}")
+        } catch (e: Throwable) {
+            val exName = e.javaClass.simpleName
+            val exMsg  = e.message ?: "(no message)"
+            err(tag, "EXCEPTION after ${System.currentTimeMillis() - stamp}ms: $exName: $exMsg")
             throw e
         }
-        val ms = System.currentTimeMillis() - stamp
+
+        val ms   = System.currentTimeMillis() - stamp
         val body = resp.text ?: ""
-        log(tag, "→ ${resp.code} ${resp.message}  ${ms}ms  ${body.length}B")
-        if (resp.code !in 200..299) {
-            err(tag, "non-2xx body preview: ${body.take(400)}")
-        } else if (body.length < 800) {
-            // short bodies are cheap to show in full — very useful for
-            // confirming exact response shape during debugging
-            log(tag, "body: $body")
-        } else {
-            log(tag, "body preview: ${body.take(300)} …")
+        log(tag, "→ ${resp.code}  ${ms}ms  ${body.length}B")
+
+        when {
+            resp.code !in 200..299 -> err(tag, "non-2xx body: ${body.take(400)}")
+            body.length < 800      -> log(tag, "body: $body")
+            else                   -> log(tag, "body preview: ${body.take(300)} …")
         }
         return body
     }
 
-    /** Jackson decode with full error context. Never throws. */
-    private inline fun <reified T> parseList(tag: String, json: String): List<T>? {
-        return try {
-            mapper.readValue(json, object : TypeReference<List<T>>() {})
-        } catch (e: Exception) {
-            err(tag, "JSON decode to List<${T::class.simpleName}> failed: ${e.message}")
-            err(tag, "raw json (first 400): ${json.take(400)}")
-            null
-        }
+    private inline fun <reified T> parseList(tag: String, json: String): List<T>? = try {
+        mapper.readValue(json, object : TypeReference<List<T>>() {})
+    } catch (e: Throwable) {
+        err(tag, "JSON decode List<${T::class.java.simpleName}> failed: ${e.message}")
+        err(tag, "raw json: ${json.take(400)}")
+        null
     }
 
-    /** Jackson decode of a single object. Never throws. */
-    private inline fun <reified T> parseObj(tag: String, json: String): T? {
-        return try {
-            mapper.readValue(json, T::class.java)
-        } catch (e: Exception) {
-            err(tag, "JSON decode to ${T::class.simpleName} failed: ${e.message}")
-            err(tag, "raw json (first 400): ${json.take(400)}")
-            null
-        }
+    private inline fun <reified T> parseObj(tag: String, json: String): T? = try {
+        mapper.readValue(json, T::class.java)
+    } catch (e: Throwable) {
+        err(tag, "JSON decode ${T::class.java.simpleName} failed: ${e.message}")
+        err(tag, "raw json: ${json.take(400)}")
+        null
     }
 
     // ─────────────────────────────────────────────────────────────
     //  Main page
     // ─────────────────────────────────────────────────────────────
-    override val mainPage = mainPageOf(
-        "home" to "Home",
-    )
+    override val mainPage = mainPageOf("home" to "Home")
 
     override suspend fun getMainPage(
         page: Int,
@@ -137,7 +115,7 @@ class AsiaflixProvider : MainAPI() {
 
         val json = try {
             timedGet("HOME", "$api/home")
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             err("HOME", "network failed: ${e.message}")
             return newHomePageResponse(request.name, emptyList())
         }
@@ -147,17 +125,16 @@ class AsiaflixProvider : MainAPI() {
             err("HOME", "parsing failed — returning empty page")
             return newHomePageResponse(request.name, emptyList())
         }
-
         log("HOME", "parsed ${sections.size} sections")
 
+        // Build one HomePageList per section.
         val homeLists: List<HomePageList> = sections.mapIndexedNotNull { idx, s ->
             val items = s.data.orEmpty().mapNotNull { it.toSearchResponse() }
             val label = s.title?.takeIf { it.isNotBlank() }
-                        ?: s.type?.takeIf { it.isNotBlank() }
-                        ?: "Section $idx"
+                ?: s.type?.takeIf { it.isNotBlank() }
+                ?: "Section $idx"
             log("HOME", "  [$idx] '$label' type='${s.type}' raw=${s.data?.size ?: 0} ok=${items.size}")
-            if (items.isEmpty()) null
-            else newHomePageList(label, items)
+            if (items.isEmpty()) null else HomePageList(label, items)
         }
 
         log("HOME", "returning ${homeLists.size} non-empty sections")
@@ -169,19 +146,19 @@ class AsiaflixProvider : MainAPI() {
     // ─────────────────────────────────────────────────────────────
     override suspend fun search(query: String): List<SearchResponse> {
         log("SEARCH", "query='$query'")
+
         val json = try {
             timedGet(
                 "SEARCH",
                 "$api/drama/search",
                 params = mapOf("q" to query, "page" to "1"),
             )
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             err("SEARCH", "network failed: ${e.message}")
             return emptyList()
         }
 
-        val root = parseObj<SearchRoot>("SEARCH", json)
-        if (root == null) {
+        val root = parseObj<SearchRoot>("SEARCH", json) ?: run {
             err("SEARCH", "parse failed")
             return emptyList()
         }
@@ -198,7 +175,7 @@ class AsiaflixProvider : MainAPI() {
         log("LOAD", "url='$url'")
 
         val slug = url.trimEnd('/').substringAfterLast('/')
-        log("LOAD", "extracted slug='$slug'")
+        log("LOAD", "slug='$slug'")
         if (slug.isBlank()) throw ErrorLoadingException("Invalid url: $url")
 
         val json = timedGet(
@@ -212,42 +189,31 @@ class AsiaflixProvider : MainAPI() {
 
         val showName = detail.name ?: slug
         val showId   = detail._id  ?: slug
-        log("LOAD", "name='$showName'  _id='$showId'  " +
-                   "episodes=${detail.episodes?.size ?: 0}  " +
-                   "image=${detail.image?.take(60)}")
+        log("LOAD", "name='$showName' _id='$showId' eps=${detail.episodes?.size ?: 0}")
 
-        val episodes: List<Episode> = detail.episodes.orEmpty().map { ep ->
+        val episodes = detail.episodes.orEmpty().map { ep ->
             val serversJson = try {
                 mapper.writeValueAsString(ep.streamUrls.orEmpty())
-            } catch (e: Exception) {
-                err("LOAD", "serialize servers for ep ${ep.number}: ${e.message}")
-                "[]"
-            }
+            } catch (_: Throwable) { "[]" }
+
             newEpisode("$mainUrl/play/$slug/$showId/${ep.number}") {
-                this.name    = ep.title?.takeIf { it.isNotBlank() }
-                               ?: "Episode ${ep.number}"
+                this.name    = ep.title?.takeIf { it.isNotBlank() } ?: "Episode ${ep.number}"
                 this.episode = ep.number
                 this.data    = serversJson
             }
         }
         log("LOAD", "built ${episodes.size} episodes")
 
-        if (episodes.isEmpty()) {
-            err("LOAD", "no episodes — the detail parser may need updating")
-        }
-
-        // Explicit constructor avoids any ambiguity across CloudStream
-        // helper overloads.
-        return TvSeriesLoadResponse(
-            name      = showName,
-            url       = url,
-            type      = TvType.AsianDrama,
-            episodes  = episodes,
-            posterUrl = detail.image ?: detail.coverImage,
-            plot      = detail.description,
-            year      = detail.releaseYear,
-        ).apply {
-            log("LOAD", "returning TvSeriesLoadResponse")
+        // Factory method — infers apiName from the calling provider.
+        return newTvSeriesLoadResponse(
+            name     = showName,
+            url      = url,
+            type     = TvType.AsianDrama,
+            episodes = episodes,
+        ) {
+            this.posterUrl = detail.image ?: detail.coverImage
+            this.plot      = detail.description
+            this.year      = detail.releaseYear
         }
     }
 
@@ -264,9 +230,8 @@ class AsiaflixProvider : MainAPI() {
 
         val servers: List<StreamServer> = try {
             mapper.readValue(data, object : TypeReference<List<StreamServer>>() {})
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             err("LINKS", "servers decode failed: ${e.message}")
-            err("LINKS", "raw data: ${data.take(400)}")
             emptyList()
         }
 
@@ -277,14 +242,11 @@ class AsiaflixProvider : MainAPI() {
             val srcUrl  = srv.url?.takeIf { it.isNotBlank() }    ?: continue
             val srcName = srv.source?.takeIf { it.isNotBlank() } ?: continue
 
-            log("LINKS", "[$i/$servers.size] trying source='$srcName'  url=${srcUrl.take(80)}")
+            log("LINKS", "[$i/${servers.size}] source='$srcName' url=${srcUrl.take(80)}")
 
             val encoded = try {
                 Base64.encodeToString(srcUrl.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
-            } catch (e: Exception) {
-                err("LINKS", "  base64 failed: ${e.message}")
-                continue
-            }
+            } catch (_: Throwable) { continue }
 
             val streamJson = try {
                 timedGet(
@@ -292,32 +254,27 @@ class AsiaflixProvider : MainAPI() {
                     "$api/drama/get-stream-url",
                     params = mapOf("value" to encoded, "server" to srcName),
                 )
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 err("LINKS", "  stream-url failed: ${e.message}")
                 continue
             }
 
-            val resp = parseObj<StreamResponse>("LINKS", streamJson)
-            if (resp == null) {
-                err("LINKS", "  parse failed")
-                continue
-            }
+            val resp = parseObj<StreamResponse>("LINKS", streamJson) ?: continue
 
-            val sources = resp.sources
-                ?: listOfNotNull(
-                    (resp.url ?: resp.link ?: resp.stream)?.let {
-                        StreamSource(url = it, isM3U8 = it.contains(".m3u8"))
-                    }
-                )
-
+            val sources = resp.sources ?: listOfNotNull(
+                (resp.url ?: resp.link ?: resp.stream)?.let {
+                    StreamSource(url = it, isM3U8 = it.contains(".m3u8"))
+                }
+            )
             if (sources.isEmpty()) {
-                err("LINKS", "  response had no sources — keys=${resp::class.members}")
+                err("LINKS", "  no sources in response")
                 continue
             }
 
             for (s in sources) {
                 val link = s.url?.takeIf { it.isNotBlank() } ?: continue
-                log("LINKS", "  ✓ emitting: m3u8=${s.isM3U8}  url=${link.take(100)}")
+                log("LINKS", "  ✓ emitting m3u8=${s.isM3U8}  url=${link.take(100)}")
+
                 callback.invoke(
                     newExtractorLink(
                         source = this.name,
@@ -347,26 +304,28 @@ class AsiaflixProvider : MainAPI() {
     // ─────────────────────────────────────────────────────────────
     private fun TitleItem.toSearchResponse(): SearchResponse? {
         val title = name ?: run {
-            err("MAP", "TitleItem missing name — skipping. _id=$_id")
+            err("MAP", "TitleItem missing name — skipping (_id=$_id)")
             return null
         }
-        val slug = slug ?: _id ?: run {
+        val s = slug ?: _id ?: run {
             err("MAP", "TitleItem '$title' missing slug/_id — skipping")
             return null
         }
-        return TvSeriesSearchResponse(
-            name      = title,
-            url       = "$mainUrl/drama/$slug",
-            apiName   = this@AsiaflixProvider.name,
-            type      = TvType.AsianDrama,
-            posterUrl = image ?: coverImage,
-        )
+
+        // Factory method — infers apiName from the calling provider.
+        return newTvSeriesSearchResponse(
+            name = title,
+            url  = "$mainUrl/drama/$s",
+            type = TvType.AsianDrama,
+        ) {
+            this.posterUrl = image ?: coverImage
+            this.year      = releaseYear
+        }
     }
 }
 
 // ═════════════════════════════════════════════════════════════════
 //  DTOs — plain data classes, decoded with Jackson.
-//  (No @Serializable needed since we don't use kotlinx.serialization.)
 // ═════════════════════════════════════════════════════════════════
 
 data class HomeSection(
