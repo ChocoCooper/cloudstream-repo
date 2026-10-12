@@ -114,6 +114,8 @@ class AsiaflixProvider : MainAPI() {
         log("HOME", "parsed ${sections.size} sections")
 
         val homeLists: List<HomePageList> = sections.mapIndexedNotNull { idx, s ->
+            // The "categories" section contains {name,id,type} objects with
+            // no slug — those fail mapping and are intentionally skipped.
             val items = s.data.orEmpty().mapNotNull { it.toSearchResponse() }
             val label = s.title?.takeIf { it.isNotBlank() }
                 ?: s.type?.takeIf { it.isNotBlank() }
@@ -191,7 +193,6 @@ class AsiaflixProvider : MainAPI() {
         ) {
             this.posterUrl = detail.image ?: detail.coverImage
             this.plot      = detail.description
-            // releaseYear comes back as a JSON string like "2026"
             this.year      = detail.releaseYear?.toIntOrNull()
         }
     }
@@ -289,13 +290,15 @@ class AsiaflixProvider : MainAPI() {
             type = TvType.AsianDrama,
         ) {
             this.posterUrl = image ?: coverImage
-            this.year      = releaseYear?.toIntOrNull()   // string → Int?
+            this.year      = releaseYear?.toIntOrNull()
         }
     }
 }
 
 // ═════════════════════════════════════════════════════════════════
-//  DTOs
+//  DTOs — only fields the provider actually reads.
+//  Everything else the API sends is silently ignored thanks to
+//  FAIL_ON_UNKNOWN_PROPERTIES being disabled.
 // ═════════════════════════════════════════════════════════════════
 
 data class HomeSection(
@@ -340,9 +343,11 @@ data class DramaDetail(
     val coverImage:  String? = null,
     val description: String? = null,
     val releaseYear: String? = null,
-    val genres:      List<String>? = null,
-    val tags:        List<String>? = null,
     val episodes:    List<EpisodeEntry>? = null,
+    // NOTE: genres / tags / directors / casts / networks were removed.
+    // The API sends `genres` as an array of {name,id} objects, which
+    // cannot bind to List<String>. We don't need them, so we let
+    // FAIL_ON_UNKNOWN_PROPERTIES drop them on the floor.
 )
 
 data class EpisodeEntry(
