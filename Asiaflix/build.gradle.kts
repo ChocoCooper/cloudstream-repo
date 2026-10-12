@@ -16,9 +16,9 @@ cloudstream {
     status = 1 // will be 3 if unspecified
 
     tvTypes = listOf(
-        "AsianDrama"
-        "TvSeries"
-        "Movie"
+        "AsianDrama",
+        "TvSeries",
+        "Movie",
     )
     language = "en"
     iconUrl = "https://asiaflix.net/assets/main_asiaflix_logo.png"
