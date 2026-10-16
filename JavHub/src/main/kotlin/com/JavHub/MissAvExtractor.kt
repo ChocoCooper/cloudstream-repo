@@ -5,6 +5,7 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.getAndUnpack
 import com.lagradost.cloudstream3.utils.newExtractorLink
 
 class MissAvExtractor : JavExtractor {
@@ -42,6 +43,7 @@ class MissAvExtractor : JavExtractor {
         if (response.code != 200) return false
 
         val unpackedText = getAndUnpack(response.text)
+
         var finalLink = Regex("""source\s*[:=]\s*['"](.*?)['"]""")
             .find(unpackedText)?.groupValues?.get(1)
 
