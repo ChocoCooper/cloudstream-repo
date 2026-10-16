@@ -15,18 +15,11 @@ import java.net.URLEncoder
 /**
  * Khflix provider.
  *
- * DATA STRINGS (episode / movie "data" passed to loadLinks) ALWAYS START WITH
- * THE PAGE URL. CloudStream's newEpisode() runs fixUrl() on the data string and
- * prepends mainUrl to anything that does not start with "http" - that is what
- * produced https://khflix.com/My.Bias... in the old build.
+ * Confirmed URL schema (from css.khflix.top/Khflix.Playlist.js):
+ *   TV video    : https://cdn1.khflixcdnvideos.top/{series}{EE}.mp4
+ *   TV subtitle : https://subtitle.khflix.top/{series}{EE}.vtt     (English only)
  *
- *   {pageUrl}|movie|{postId}
- *   {pageUrl}|tv|{seriesPrefix}|{episodeNumberPadded}
- *   {pageUrl}|page                      (episode page, resolved by scanning it)
- *
- * LOGGING: Log.e on purpose (survives errors-only filters).
- *   adb logcat Khflix:V *:S
- *   Stages: HOME SEARCH LOAD LINKS MOVIE TV HOST EMBED PROBE SUB EMIT NET DIAG
+ * Only English subtitles are emitted (no language suffix).
  */
 class KhflixProvider : MainAPI() {
     override var mainUrl = "https://khflix.com"
@@ -46,24 +39,23 @@ class KhflixProvider : MainAPI() {
                 "AppleWebKit/537.36 (KHTML, like Gecko) " +
                 "Chrome/124.0.0.0 Safari/537.36"
 
-        // Used ONLY if host discovery from the page + its scripts finds nothing.
-        // Set both to "" to disable. A "[HOST] USING FALLBACK" line is logged
-        // whenever they are used.
         private const val FALLBACK_VIDEO_HOST = "cdn1.khflixcdnvideos.top"
         private const val FALLBACK_SUB_HOST = "subtitle.khflix.top"
 
-        // Hosts that are never media/subtitle CDNs
         private val HOST_BLOCKLIST = listOf(
             "tmdb", "google", "gstatic", "cloudflare", "jsdelivr", "tailwind",
             "unpkg", "ampproject", "w.org", "wordpress", "gravatar", "facebook",
             "twitter", "youtube", "youtu.be", "schema.org", "jquery", "bootstrap",
-            "fontawesome", "wp.com", "imdb", "instagram", "tiktok"
+            "fontawesome", "wp.com", "imdb", "instagram", "tiktok",
+            "acscdn", "jwplayer", "jwplatform", "vimeo", "vimeocdn", "ok.ru",
+            "javip", "tithebesew", "pinterest", "amazon", "media-amazon",
+            "kissflix", "t.me", "w3.org", "blogger", "blogspot"
         )
 
-        // Scripts we do not bother fetching during host discovery
         private val SCRIPT_SKIP = listOf(
             "wp-includes", "jquery", "google", "cloudflare", "gstatic",
-            "wp-content/plugins", "bootstrap", "tailwind", "unpkg", "jsdelivr"
+            "wp-content/plugins", "bootstrap", "tailwind", "unpkg", "jsdelivr",
+            "googletagmanager", "acscdn", "cloudflareinsights"
         )
     }
 
@@ -76,7 +68,7 @@ class KhflixProvider : MainAPI() {
     private var hostCache: Hosts? = null
 
     // ------------------------------------------------------------------
-    // Logging helpers
+    // Logging
     // ------------------------------------------------------------------
     private fun dbg(stage: String, msg: String) {
         if (DEBUG) Log.e(TAG, "[$stage] $msg")
@@ -103,20 +95,20 @@ class KhflixProvider : MainAPI() {
     // ==================================================================
     // HOME PAGE
     // ==================================================================
-    override val mainPage = mainPageOf(
-        "" to "Latest",
-        "movies" to "Movies",
-        "tvshows" to "TV Shows",
-        "genre/action" to "Action",
-        "genre/comedy" to "Comedy",
-        "genre/drama" to "Drama",
-        "genre/horror" to "Horror",
-        "genre/romance" to "Romance",
-        "genre/thriller" to "Thriller",
-        "genre/k-drama" to "K-Drama",
-        "genre/c-drama" to "C-Drama",
-        "genre/j-drama" to "J-Drama",
-        "genre/movie-speak-khmer" to "Khmer Dubbed",
+    override val mainPage = listOf(
+        MainPageData("Latest", "", isHorizontalImages = true),
+        MainPageData("Movies", "movies", isHorizontalImages = true),
+        MainPageData("TV Shows", "tvshows", isHorizontalImages = true),
+        MainPageData("Action", "genre/action"),
+        MainPageData("Comedy", "genre/comedy"),
+        MainPageData("Drama", "genre/drama"),
+        MainPageData("Horror", "genre/horror"),
+        MainPageData("Romance", "genre/romance"),
+        MainPageData("Thriller", "genre/thriller"),
+        MainPageData("K-Drama", "genre/k-drama"),
+        MainPageData("C-Drama", "genre/c-drama"),
+        MainPageData("J-Drama", "genre/j-drama"),
+        MainPageData("Khmer Dubbed", "genre/movie-speak-khmer"),
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
@@ -191,12 +183,11 @@ class KhflixProvider : MainAPI() {
 
         val cfg = extractKhflixConfig(html)
         val postId = extractPostId(html, doc)
-        dbg("LOAD", "url=$url isTv=$isTv title='$title' postId='$postId' cfg=$cfg year=$year genres=$genres")
+        dbg("LOAD", "url=$url isTv=$isTv title='$title' postId='$postId' cfg=$cfg")
 
         return if (isTv) {
             val episodes = mutableListOf<Episode>()
 
-            // Source 1: window.khflixConfig (series prefix + episode count)
             val seriesPrefix = cfg?.get("series")
             val episodeCount = cfg?.get("episodes")?.toIntOrNull() ?: 0
             if (!seriesPrefix.isNullOrBlank() && episodeCount > 0) {
@@ -204,7 +195,6 @@ class KhflixProvider : MainAPI() {
                     .find(seriesPrefix)?.groupValues?.get(1)?.toIntOrNull() ?: 1
                 for (n in 1..episodeCount) {
                     val padded = n.toString().padStart(2, '0')
-                    // MUST start with the page URL (see class comment)
                     episodes.add(newEpisode("$url|tv|$seriesPrefix|$padded") {
                         this.name = "Episode $n"
                         this.episode = n
@@ -214,20 +204,14 @@ class KhflixProvider : MainAPI() {
                 dbg("LOAD", "episodes from khflixConfig: ${episodes.size} prefix=$seriesPrefix")
             }
 
-            // Source 2: standard DooPlay episode list
             if (episodes.isEmpty()) {
                 episodes.addAll(parseEpisodeList(doc))
-                dbg("LOAD", "episodes from DooPlay list: ${episodes.size}")
             }
 
-            // Source 3: page itself carries media links -> single episode
             if (episodes.isEmpty()) {
                 diagnoseTvPage(html, doc)
                 if (findMediaUrls(html).isNotEmpty()) {
                     episodes.add(newEpisode("$url|page") { this.name = "Episode 1"; this.episode = 1 })
-                    dbg("LOAD", "no episode source; page has media URLs, created single episode")
-                } else {
-                    err("LOAD", "NO EPISODES FOUND for '$title' (see [DIAG] lines above)")
                 }
             }
 
@@ -242,7 +226,6 @@ class KhflixProvider : MainAPI() {
                 this.score = score
             }
         } else {
-            if (postId.isBlank()) err("LOAD", "movie postId BLANK for $url (loadLinks will retry from page)")
             newMovieLoadResponse(title, url, TvType.Movie, "$url|movie|$postId") {
                 this.posterUrl = poster
                 this.backgroundPosterUrl = backdrop
@@ -267,17 +250,13 @@ class KhflixProvider : MainAPI() {
         val parts = data.split("|")
         val pageUrl = parts[0]
         val kind = parts.getOrNull(1) ?: "page"
-        if (!pageUrl.startsWith("http")) {
-            err("LINKS", "data does not start with a page URL: '$data'")
-            return false
-        }
+        if (!pageUrl.startsWith("http")) return false
 
-        val direct = mutableListOf<Pair<String, String>>() // label to url
+        val direct = mutableListOf<Pair<String, String>>()
         val embeds = mutableListOf<String>()
-        var englishBase: String? = null
+        var baseName: String? = null
 
         val pageHtml = fetchHtml(pageUrl).orEmpty()
-        dbg("LINKS", "page len=${pageHtml.length} kind=$kind")
         val hosts = resolveHosts(pageUrl, pageHtml)
 
         when (kind) {
@@ -285,41 +264,37 @@ class KhflixProvider : MainAPI() {
                 val seriesPrefix = parts.getOrNull(2).orEmpty()
                 val padded = parts.getOrNull(3) ?: "01"
                 val base = "$seriesPrefix$padded"
-                dbg("TV", "prefix='$seriesPrefix' ep=$padded base='$base' videoHost=${hosts.video}")
-                englishBase = base
+                baseName = base
 
-                if (hosts.video.isNullOrBlank()) {
-                    err("TV", "no video host discovered or configured")
-                } else {
-                    val videoUrl = "https://${hosts.video}/$base.mp4"
-                    val code = probe(videoUrl)
-                    dbg("TV", "video probe code=$code url=$videoUrl")
-                    if (code !in 200..299 && code != 206) {
-                        err("TV", "video probe NOT OK (code=$code); emitting anyway")
-                    }
+                val videoHost = FALLBACK_VIDEO_HOST.ifBlank { hosts.video.orEmpty() }
+                dbg("TV", "base='$base' usingVideoHost=$videoHost")
+
+                if (videoHost.isNotBlank()) {
+                    val videoUrl = "https://$videoHost/$base.mp4"
+                    dbg("TV", "video url=$videoUrl")
                     direct.add("tv-cdn" to videoUrl)
                 }
             }
 
-            else -> { // "movie" or "page"
+            else -> {
                 val postIdHint = if (kind == "movie") parts.getOrNull(2).orEmpty() else ""
                 resolveFromPage(
                     pageUrl,
                     if (kind == "movie") "movie" else "tv",
                     postIdHint, pageHtml, direct, embeds
                 )
-                // PATCH: prefer m3u8 for the canonical base name (matches subtitle host pattern)
-                englishBase = direct
+                baseName = direct
                     .sortedBy { if (it.second.contains(".m3u8")) 0 else 1 }
-                    .firstOrNull()?.second?.let { baseNameFromMedia(it) }
+                    .firstOrNull { it.second.contains("khflix") }
+                    ?.second?.let { baseNameFromMedia(it) }
+                dbg("MOVIE", "baseName='$baseName'")
             }
         }
 
-        // ---- English subtitle only ----
-        val subOk = emitEnglishSubtitle(englishBase, pageHtml, hosts.sub, pageUrl, subtitleCallback)
-        dbg("SUB", "english subtitle emitted=$subOk base='$englishBase'")
+        // ---- Emit English subtitle only ----
+        emitEnglishSubtitle(baseName, hosts.sub ?: FALLBACK_SUB_HOST, pageUrl, subtitleCallback)
 
-        // ---- Emit direct links (m3u8 first) ----
+        // ---- Emit video sources ----
         var count = 0
         val seen = mutableSetOf<String>()
         for ((label, src) in direct.sortedBy { if (it.second.contains(".m3u8")) 0 else 1 }) {
@@ -336,16 +311,13 @@ class KhflixProvider : MainAPI() {
             count++
         }
 
-        // ---- Hand non-direct embeds to CloudStream extractors ----
+        // ---- Hand non-direct embeds to extractors ----
         for (embed in embeds.distinct()) {
-            dbg("EMIT", "loadExtractor embed=$embed")
             try {
-                val ok = loadExtractor(embed, "$mainUrl/", subtitleCallback) { link ->
+                loadExtractor(embed, "$mainUrl/", subtitleCallback) { link ->
                     count++
-                    dbg("EMIT", "extractor link ${link.source} ${link.url}")
                     callback.invoke(link)
                 }
-                dbg("EMIT", "loadExtractor result=$ok for $embed")
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -353,16 +325,53 @@ class KhflixProvider : MainAPI() {
             }
         }
 
-        dbg("LINKS", "DONE links=$count (returning ${count > 0})")
+        dbg("LINKS", "DONE links=$count")
         return count > 0
     }
 
     // ==================================================================
-    // SOURCE RESOLUTION FOR PAGES (movies and episode pages)
+    // SUBTITLES — English only
+    // ==================================================================
+    private suspend fun emitEnglishSubtitle(
+        base: String?,
+        subHost: String,
+        referer: String,
+        subtitleCallback: (SubtitleFile) -> Unit
+    ) {
+        if (base.isNullOrBlank() || subHost.isBlank()) {
+            dbg("SUB", "no base or subHost — skipping English subtitle")
+            return
+        }
+
+        // Canonical English URL: no language suffix
+        val url = "https://$subHost/$base.vtt"
+        val code = quickProbe(url, referer)
+        dbg("SUB", "probe code=$code url=$url")
+
+        if (code in 200..299 || code == 206) {
+            dbg("SUB", "→ English: $url")
+            subtitleCallback.invoke(newSubtitleFile("English", url))
+        } else {
+            dbg("SUB", "no English subtitle (code=$code)")
+        }
+    }
+
+    private suspend fun quickProbe(url: String, referer: String): Int {
+        return try {
+            app.head(url, headers = headers(referer)).code
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            -1
+        }
+    }
+
+    // ==================================================================
+    // SOURCE RESOLUTION FOR PAGES
     // ==================================================================
     private suspend fun resolveFromPage(
         pageUrl: String,
-        type: String, // "movie" or "tv" (DooPlay player type)
+        type: String,
         postIdHint: String,
         html: String,
         direct: MutableList<Pair<String, String>>,
@@ -371,15 +380,15 @@ class KhflixProvider : MainAPI() {
         val doc = if (html.isNotBlank()) Jsoup.parse(html, pageUrl) else null
         var postId = postIdHint
         if (postId.isBlank() && doc != null) postId = extractPostId(html, doc)
-        dbg("MOVIE", "resolve type=$type postId='$postId' pageLen=${html.length}")
+        dbg("MOVIE", "resolve type=$type postId='$postId'")
 
-        // ---- Strategy 1: DooPlay REST API (stops at first empty option) ----
+        // Strategy 1: DooPlay REST API
         if (postId.isNotBlank()) {
             for (nume in 1..5) {
-                val apiUrl = "$playerApi$postId/$type/$nume"
                 try {
-                    val res = app.get(apiUrl, headers = headers(pageUrl, ajax = true))
-                    dbg("MOVIE", "REST nume=$nume code=${res.code} body=${res.text.cut(200)}")
+                    val res = app.get("$playerApi$postId/$type/$nume",
+                        headers = headers(pageUrl, ajax = true))
+                    dbg("MOVIE", "REST nume=$nume code=${res.code}")
                     if (!res.isSuccessful) break
                     val embed = extractEmbedUrl(res.text)
                     if (embed.isBlank()) break
@@ -387,28 +396,21 @@ class KhflixProvider : MainAPI() {
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
-                    err("MOVIE", "REST nume=$nume FAILED $apiUrl", e)
                     break
                 }
             }
-        } else {
-            err("MOVIE", "skipping REST: postId blank")
         }
 
-        // ---- PATCH Strategy 1b: always scan page HTML for canonical media URLs ----
-        // The page carries the "hls.khflix.top/{slug}/{...}.m3u8" or "videos.khflix.top/*.mp4"
-        // which gives us the correct base name for subtitle lookup
-        // and often a higher-quality source than the Rumble jwplayer embed.
+        // Strategy 1b: page HTML for canonical media URLs
         val pageMedia = findMediaUrls(html)
         if (pageMedia.isNotEmpty()) {
-            dbg("MOVIE", "page media urls (canonical): $pageMedia")
+            dbg("MOVIE", "page media: $pageMedia")
             pageMedia.forEach { direct.add("page" to it) }
         }
 
-        // ---- Strategy 2: admin-ajax with the page's player options ----
+        // Strategy 2: admin-ajax
         if (direct.isEmpty() && embeds.isEmpty() && doc != null) {
             val options = doc.select("li.dooplay_player_option, li[data-post][data-nume]")
-            dbg("MOVIE", "AJAX fallback: ${options.size} player options")
             for (opt in options) {
                 val post = opt.attr("data-post").ifBlank { postId }
                 val nume = opt.attr("data-nume").ifBlank { "1" }
@@ -419,82 +421,28 @@ class KhflixProvider : MainAPI() {
                         headers = headers(pageUrl, ajax = true),
                         data = mapOf(
                             "action" to "doo_player_ajax",
-                            "post" to post,
-                            "nume" to nume,
-                            "type" to optType
+                            "post" to post, "nume" to nume, "type" to optType
                         )
                     )
-                    dbg("MOVIE", "AJAX post=$post nume=$nume type=$optType code=${res.code} body=${res.text.cut(200)}")
                     val embed = extractEmbedUrl(res.text)
                     if (embed.isNotBlank()) handleEmbed(embed, direct, embeds, "ajax#$nume")
                 } catch (e: CancellationException) {
                     throw e
-                } catch (e: Exception) {
-                    err("MOVIE", "AJAX FAILED post=$post nume=$nume", e)
-                }
+                } catch (_: Exception) { }
             }
         }
 
-        // ---- Strategy 3: iframes (raw page media already collected above) ----
+        // Strategy 3: iframes
         if (direct.isEmpty() && embeds.isEmpty() && doc != null) {
-            val iframes = doc.select("iframe[src], iframe[data-src]")
+            doc.select("iframe[src], iframe[data-src]")
                 .map { it.attr("src").ifBlank { it.attr("data-src") } }
                 .filter { it.isNotBlank() }
-            dbg("MOVIE", "PAGE fallback: iframes=$iframes")
-            iframes.forEach { handleEmbed(fixUrl(it), direct, embeds, "iframe") }
-        }
-
-        if (direct.isEmpty() && embeds.isEmpty()) {
-            err("MOVIE", "NO SOURCES found. postId='$postId' pageLen=${html.length}")
+                .forEach { handleEmbed(fixUrl(it), direct, embeds, "iframe") }
         }
     }
 
     // ==================================================================
-    // SUBTITLES (English only)
-    // ==================================================================
-    private suspend fun emitEnglishSubtitle(
-        base: String?,
-        html: String,
-        subHost: String?,
-        referer: String,
-        subtitleCallback: (SubtitleFile) -> Unit
-    ): Boolean {
-        val candidates = mutableListOf<String>()
-
-        // 1) .vtt links that already appear in the page, English ones only
-        Regex("""https?://[^"'\s<>\\]+?\.vtt""")
-            .findAll(html.replace("\\/", "/")).map { it.value }.distinct()
-            .filter { isEnglishVtt(it, base) }
-            .forEach { candidates.add(it) }
-
-        // 2) names built from the media base name on the discovered subtitle host
-        if (!base.isNullOrBlank() && !subHost.isNullOrBlank()) {
-            candidates.add("https://$subHost/$base.vtt")          // default track = English
-            candidates.add("https://$subHost/$base.English.vtt")
-            candidates.add("https://$subHost/$base.en.vtt")
-        }
-
-        dbg("SUB", "english candidates=$candidates")
-        for (c in candidates.distinct()) {
-            val code = probe(c, referer)
-            dbg("SUB", "probe code=$code url=$c")
-            if (code in 200..299 || code == 206) {
-                subtitleCallback.invoke(newSubtitleFile("English", c))
-                return true
-            }
-        }
-        return false
-    }
-
-    private fun isEnglishVtt(url: String, base: String?): Boolean {
-        val name = url.substringAfterLast('/').removeSuffix(".vtt")
-        val lower = name.lowercase()
-        return lower.contains("english") || lower.endsWith(".en") ||
-                (base != null && name == base)
-    }
-
-    // ==================================================================
-    // HOST DISCOVERY (no hardcoded CDN hosts)
+    // HOST DISCOVERY
     // ==================================================================
     private suspend fun resolveHosts(pageUrl: String, html: String): Hosts {
         hostCache?.let { return it }
@@ -503,20 +451,16 @@ class KhflixProvider : MainAPI() {
         val doc = Jsoup.parse(html, pageUrl)
         val scripts = doc.select("script[src]").map { it.absUrl("src") }
             .filter { s -> s.isNotBlank() && SCRIPT_SKIP.none { s.contains(it, true) } }
-            .distinct().take(8)
-        dbg("HOST", "scanning ${scripts.size} script(s): $scripts")
+            .distinct().take(20)
         for (s in scripts) {
             try {
-                val body = app.get(s, headers = headers(pageUrl)).text
-                texts.add(body.replace("\\/", "/"))
+                texts.add(app.get(s, headers = headers(pageUrl)).text.replace("\\/", "/"))
             } catch (e: CancellationException) {
                 throw e
-            } catch (e: Exception) {
-                err("HOST", "script fetch failed $s: ${e.message}")
-            }
+            } catch (_: Exception) { }
         }
 
-        val mainHost = try { URI(mainUrl).host.orEmpty().removePrefix("www.") } catch (e: Exception) { "" }
+        val mainHost = try { URI(mainUrl).host.orEmpty().removePrefix("www.") } catch (_: Exception) { "" }
         val brand = mainHost.substringBefore('.')
 
         val urlHost = Regex("""(?:https?:)?//([a-z0-9][a-z0-9.-]*\.[a-z]{2,})""", RegexOption.IGNORE_CASE)
@@ -524,31 +468,27 @@ class KhflixProvider : MainAPI() {
             """["']([a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.(?:top|xyz|cc|site|online|net|com|io|me|tv|club|live|pro|fun))["']""",
             RegexOption.IGNORE_CASE
         )
-
         val found = linkedSetOf<String>()
         for (t in texts) {
             urlHost.findAll(t).forEach { found.add(it.groupValues[1].lowercase()) }
             bareHost.findAll(t).forEach { found.add(it.groupValues[1].lowercase()) }
         }
-        val hosts = found
-            .filter { h -> h != mainHost && h != "www.$mainHost" && HOST_BLOCKLIST.none { h.contains(it) } }
-            // hosts that share the site's brand name first
-            .sortedBy { if (brand.isNotBlank() && it.contains(brand)) 0 else 1 }
-        dbg("HOST", "candidate hosts=$hosts")
-
-        var video = hosts.firstOrNull { it.contains("cdn") }
-            ?: hosts.firstOrNull { it.contains("video") && !it.contains("hls") }
-        var sub = hosts.firstOrNull { it.contains("sub") }
-
-        // PATCH: fallback messages use dbg() instead of err() — not actual errors
-        if (video == null && FALLBACK_VIDEO_HOST.isNotEmpty()) {
-            dbg("HOST", "USING FALLBACK video host $FALLBACK_VIDEO_HOST")
-            video = FALLBACK_VIDEO_HOST
+        val valid = found.filter { h ->
+            h != mainHost && h != "www.$mainHost" && HOST_BLOCKLIST.none { h.contains(it) }
         }
-        if (sub == null && FALLBACK_SUB_HOST.isNotEmpty()) {
-            dbg("HOST", "USING FALLBACK subtitle host $FALLBACK_SUB_HOST")
-            sub = FALLBACK_SUB_HOST
-        }
+        val brandHosts = valid.filter { brand.isNotBlank() && it.contains(brand) }
+        val otherHosts = valid.filter { !brandHosts.contains(it) }
+
+        var video = brandHosts.firstOrNull {
+            (it.contains("cdn") || it.contains("video")) && !it.contains("hls")
+        } ?: brandHosts.firstOrNull { it.contains("hls") }
+        ?: otherHosts.firstOrNull { (it.contains("cdn") || it.contains("video")) && !it.contains("hls") }
+
+        var sub = brandHosts.firstOrNull { it.contains("sub") }
+            ?: otherHosts.firstOrNull { it.contains("sub") }
+
+        if (video.isNullOrBlank() && FALLBACK_VIDEO_HOST.isNotBlank()) video = FALLBACK_VIDEO_HOST
+        if (sub.isNullOrBlank() && FALLBACK_SUB_HOST.isNotBlank()) sub = FALLBACK_SUB_HOST
 
         val result = Hosts(video, sub)
         dbg("HOST", "resolved video=$video sub=$sub")
@@ -567,7 +507,6 @@ class KhflixProvider : MainAPI() {
             .distinct()
             .toList()
 
-    /** "https://host/Some.Movie/index.m3u8" -> "Some.Movie"; ".../x.mp4" -> "x". */
     private fun baseNameFromMedia(url: String): String? {
         val path = url.substringBefore("?").substringAfter("://").substringAfter("/", "")
         val segs = path.split("/").filter { it.isNotBlank() }
@@ -584,37 +523,28 @@ class KhflixProvider : MainAPI() {
         label: String
     ) {
         val decoded = decodeJwPlayerUrl(embed)
-        if (decoded.isNotBlank()) {
-            dbg("EMBED", "[$label] direct media -> $decoded")
-            direct.add(label to decoded)
-        } else if (embed.startsWith("http")) {
-            dbg("EMBED", "[$label] not direct, sending to extractor -> $embed")
-            embeds.add(embed)
-        } else {
-            dbg("EMBED", "[$label] ignored: $embed")
-        }
+        if (decoded.isNotBlank()) direct.add(label to decoded)
+        else if (embed.startsWith("http")) embeds.add(embed)
     }
 
     private fun extractEmbedUrl(body: String): String {
         val raw = Regex(""""embed_url"\s*:\s*"((?:[^"\\]|\\.)*)"""")
             .find(body)?.groupValues?.get(1) ?: return ""
         val cleaned = raw
-            .replace("\\/", "/")
-            .replace("\\u0026", "&")
-            .replace("\\u003d", "=")
-            .replace("\\u003f", "?")
+            .replace("\\/", "/").replace("\\u0026", "&")
+            .replace("\\u003d", "=").replace("\\u003f", "?")
             .replace("\\\"", "\"")
         if (cleaned == "null") return ""
         if (cleaned.contains("<iframe")) {
-            return Regex("""src=["']([^"']+)["']""").find(cleaned)?.groupValues?.get(1)?.let { fixUrl(it) } ?: ""
+            return Regex("""src=["']([^"']+)["']""").find(cleaned)
+                ?.groupValues?.get(1)?.let { fixUrl(it) } ?: ""
         }
         return cleaned
     }
 
-    /** window.khflixConfig = { series: "abc", episodes: 16 } (quoted or unquoted keys). */
     private fun extractKhflixConfig(html: String): Map<String, String>? {
-        val m = Regex("""khflixConfig\s*=\s*\{(.*?)\}\s*;?""", RegexOption.DOT_MATCHES_ALL).find(html)
-            ?: return null
+        val m = Regex("""khflixConfig\s*=\s*\{(.*?)\}\s*;?""", RegexOption.DOT_MATCHES_ALL)
+            .find(html) ?: return null
         val body = m.groupValues[1]
         val out = mutableMapOf<String, String>()
         Regex("""["']?(\w+)["']?\s*:\s*(?:"([^"]*)"|'([^']*)'|(\d+))""").findAll(body).forEach {
@@ -635,7 +565,6 @@ class KhflixProvider : MainAPI() {
         val patterns = listOf(
             Regex("""<body[^>]*class="[^"]*postid-(\d+)"""),
             Regex("""data-post=["'](\d+)["']"""),
-            Regex("""rel=["']shortlink["'][^>]*href=["'][^"']*\?p=(\d+)"""),
             Regex(""""post_id"\s*:\s*"?(\d+)"?"""),
             Regex("""postid-(\d+)"""),
             Regex("""id="post-(\d+)""""),
@@ -651,48 +580,22 @@ class KhflixProvider : MainAPI() {
             ) embedUrl else ""
         }
         val sourceParam = embedUrl.substringAfter("source=").substringBefore("&")
-        return try {
-            URLDecoder.decode(sourceParam, "UTF-8")
-        } catch (e: Exception) {
-            sourceParam
-        }
+        return try { URLDecoder.decode(sourceParam, "UTF-8") } catch (_: Exception) { sourceParam }
     }
 
-    /** HTTP status of a URL (HEAD, then ranged GET). -1 on failure. */
-    private suspend fun probe(url: String, referer: String = "$mainUrl/"): Int {
-        return try {
-            val h = app.head(url, headers = headers(referer))
-            if (h.code in 200..299) {
-                h.code
-            } else {
-                val g = app.get(url, headers = headers(referer) + ("Range" to "bytes=0-0"))
-                dbg("PROBE", "HEAD=${h.code} GET(range)=${g.code} $url")
-                g.code
-            }
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            err("PROBE", "failed $url: ${e.javaClass.simpleName}: ${e.message}")
-            -1
-        }
-    }
-
-    /** Standard DooPlay episode list: ul.episodios > li. */
     private fun parseEpisodeList(doc: Document): List<Episode> {
         val out = mutableListOf<Episode>()
         doc.select("ul.episodios li, div.episodios li, #episodes li").forEach { li ->
             val a = li.selectFirst("a[href]") ?: return@forEach
             val href = fixUrl(a.attr("href"))
             if (!href.startsWith("http")) return@forEach
-
-            val numerando = li.selectFirst("div.numerando")?.text()?.trim().orEmpty() // "1 - 3"
+            val numerando = li.selectFirst("div.numerando")?.text()?.trim().orEmpty()
             val m = Regex("""(\d+)\s*-\s*(\d+)""").find(numerando)
             val s = m?.groupValues?.get(1)?.toIntOrNull()
             val e = m?.groupValues?.get(2)?.toIntOrNull()
             val epName = li.selectFirst(".episodiotitle a")?.text()?.trim()?.takeIf { it.isNotEmpty() }
                 ?: a.text().trim().ifEmpty { "Episode ${e ?: out.size + 1}" }
             val thumb = li.selectFirst("img")?.let { imgSrc(it) }
-
             out.add(newEpisode("$href|page") {
                 this.name = epName
                 this.season = s
@@ -703,18 +606,11 @@ class KhflixProvider : MainAPI() {
         return out
     }
 
-    /** Logs what a TV page contains when no episode source was recognised. */
     private fun diagnoseTvPage(html: String, doc: Document) {
-        val scripts = doc.select("script[src]").map { it.attr("src") }.take(20)
-        dbg("DIAG", "script srcs=$scripts")
-        val globals = Regex("""window\.(\w+)\s*=""").findAll(html).map { it.groupValues[1] }.distinct().toList()
-        dbg("DIAG", "window globals=$globals")
-        dbg("DIAG", "ul.episodios=${doc.select("ul.episodios").size} li=${doc.select("ul.episodios li").size} " +
-                "player options=${doc.select("li.dooplay_player_option").size} iframes=${doc.select("iframe").size}")
-        dbg("DIAG", "media urls in html=${findMediaUrls(html)}")
-        Regex(""".{0,80}episode.{0,120}""", RegexOption.IGNORE_CASE).findAll(html).take(5).forEach {
-            dbg("DIAG", "episode ctx: ${it.value.replace("\n", " ").cut(220)}")
-        }
+        dbg("DIAG", "ul.episodios=${doc.select("ul.episodios").size} " +
+                "playerOptions=${doc.select("li.dooplay_player_option").size} " +
+                "iframes=${doc.select("iframe").size} " +
+                "media=${findMediaUrls(html)}")
     }
 
     private fun imgSrc(img: Element): String? =
@@ -750,14 +646,10 @@ class KhflixProvider : MainAPI() {
         return null
     }
 
-    // ------------------------------------------------------------------
-    // Network helpers
-    // ------------------------------------------------------------------
     private suspend fun fetchHtml(url: String): String? {
         return try {
             val res = app.get(url, headers = headers())
             dbg("NET", "GET ${res.code} len=${res.text.length} $url")
-            if (!res.isSuccessful) err("NET", "non-2xx ${res.code} for $url body=${res.text.cut(200)}")
             res.text
         } catch (e: CancellationException) {
             throw e
