@@ -12,7 +12,7 @@ import org.jsoup.Jsoup
 import java.net.URI
 
 // ---------------------------------------------------------------------------
-// Shared browser headers used for every HTTP request
+// Shared browser headers
 // ---------------------------------------------------------------------------
 private val BROWSER_HEADERS = mapOf(
     "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
@@ -21,36 +21,38 @@ private val BROWSER_HEADERS = mapOf(
     "Accept-Language" to "en-US,en;q=0.5"
 )
 
-// ---------------------------------------------------------------------------
-// Headers the maxstream CDN requires on the M3U8 requests.
-// Proven by bisection test: removing Accept or Accept-Language → 403.
-// Referer is NOT strictly required, but we set the exact embed page URL
-// for maximum compatibility. Origin must be per-hop.
-// ---------------------------------------------------------------------------
-private fun streamHeaders(cdnOrigin: String): Map<String, String> = mapOf(
-    "Accept" to "*/*",
-    "Accept-Language" to "en-US,en;q=0.5",
-    "Origin" to cdnOrigin
-)
-
 private fun originOf(url: String): String =
     try {
         val u = URI(url)
         "${u.scheme}://${u.host}"
     } catch (e: Exception) { "" }
 
+private fun streamHeaders(cdnOrigin: String): Map<String, String> = mapOf(
+    "Accept" to "*/*",
+    "Accept-Language" to "en-US,en;q=0.5",
+    "Origin" to cdnOrigin
+)
+
+private fun String.toPlaylistM3u8(): String {
+    val perResolutionSegment =
+        Regex("""/(?:\d{3,5}x\d{3,5}|\d{3,4}p)/[^/]+\.m3u8""")
+    return when {
+        perResolutionSegment.containsMatchIn(this) ->
+            perResolutionSegment.replace(this, "/playlist.m3u8")
+        this.contains("/video.m3u8") ->
+            this.replace(Regex("""/video\.m3u8(\?.*)?$"""),
+                         "/playlist.m3u8$1")
+        else -> this
+    }
+}
+
 // ===========================================================================
-// EmbedExtractor — generic player resolver
-//   • Handles meta-refresh, JS location redirect, iframe chains
-//   • Unpacks Dean Edwards P.A.C.K.E.R
-//   • Falls back to getAndUnpack
-//   • Scans jwplayer setup, <video><source>, raw m3u8/mp4, base64 blobs
+// EmbedExtractor — walks redirects/iframes, unpacks JS, finds the m3u8
 // ===========================================================================
 internal object EmbedExtractor {
 
     private const val MAX_DEPTH = 6
 
-    // --- redirect / location regexes ---
     private val metaRefreshRe = Regex(
         """<meta[^>]+http-equiv=["']?refresh["']?[^>]+content=["'][^;]*;\s*url=([^"']+)""",
         RegexOption.IGNORE_CASE
@@ -62,7 +64,6 @@ internal object EmbedExtractor {
         """(?:window|document|top)\.location\.(?:assign|replace)\(\s*["']([^"']+)["']"""
     )
 
-    // --- player regexes ---
     private val jwSetupRe = Regex(
         """jwplayer\s*\(\s*["']?[\w-]+["']?\s*\)\s*\.setup\s*\(\s*(\{.*?\})\s*\)""",
         setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)
@@ -79,7 +80,6 @@ internal object EmbedExtractor {
     )
     private val b64BlobRe = Regex("""["'](aHR0c[A-Za-z0-9+/=]+)["']""")
 
-    // --- Dean Edwards P.A.C.K.E.R ---
     private val packerFullRe = Regex(
         """eval\s*\(\s*function\s*\(\s*p\s*,\s*a\s*,\s*c\s*,\s*k\s*,\s*e\s*,\s*[a-z]\s*\)\s*\{.*?\}\s*\(\s*(["'])(.*?)\1\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(["'])(.*?)\5\s*\.split\s*\(\s*(["'])\|["']\s*\)""",
         setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE)
@@ -124,9 +124,8 @@ internal object EmbedExtractor {
         for (i in count - 1 downTo 0) {
             val key = keys.getOrNull(i) ?: continue
             if (key.isEmpty()) continue
-            val token = baseN(i, radix)
             result = result.replace(
-                Regex("""\b${Regex.escape(token)}\b"""), key
+                Regex("""\b${Regex.escape(baseN(i, radix))}\b"""), key
             )
         }
         return result
@@ -145,34 +144,20 @@ internal object EmbedExtractor {
         return null
     }
 
-    private fun looksLikePlayer(html: String): Boolean {
-        val low = html.lowercase()
-        return low.contains("jwplayer") ||
-               low.contains(".m3u8") ||
-               low.contains("sources") ||
-               low.contains("file:") ||
-               low.contains("eval(function(p,a,c,k,e,d)")
-    }
-
     private fun pickStream(html: String): String? {
         val setup = jwSetupRe.find(html)?.groupValues?.get(1)
         val searchText = (setup ?: html).replace("\\/", "/")
 
-        // 1. jwplayer / JSON source
         m3u8InJsonRe.find(searchText)?.let { return jsUnescape(it.groupValues[1]) }
-        // 2. <video><source>
         videoSourceRe.find(searchText)?.let { return jsUnescape(it.groupValues[1]) }
-        // 3. Raw m3u8 / mp4
         anyM3u8Re.find(searchText)?.let { return jsUnescape(it.groupValues[1]) }
         anyMp4Re.find(searchText)?.let { return jsUnescape(it.groupValues[1]) }
 
-        // 4. getAndUnpack (Cloudstream helper)
         val unpacked = try { getAndUnpack(html) } catch (e: Exception) { html }
         val unpackedNorm = unpacked.replace("\\/", "/")
         anyM3u8Re.find(unpackedNorm)?.let { return jsUnescape(it.groupValues[1]) }
         videoSourceRe.find(unpackedNorm)?.let { return jsUnescape(it.groupValues[1]) }
 
-        // 5. Dean Edwards packer over every <script>
         val doc = Jsoup.parse(html)
         for (s in doc.select("script")) {
             val body = s.data()
@@ -185,27 +170,16 @@ internal object EmbedExtractor {
             m3u8InJsonRe.find(norm)?.let { return jsUnescape(it.groupValues[1]) }
         }
 
-        // 6. base64-encoded URLs
         for (b in b64BlobRe.findAll(html).map { it.groupValues[1] }.toSet()) {
             try {
                 val dec = String(Base64.decode(b, Base64.DEFAULT))
-                if (dec.contains(".m3u8") || dec.contains(".mp4")) {
-                    return dec
-                }
+                if (dec.contains(".m3u8") || dec.contains(".mp4")) return dec
             } catch (e: Exception) { /* ignore */ }
         }
 
         return null
     }
 
-    /**
-     * Fetch an embed URL, walk redirects/iframes, unpack scripts and
-     * return the discovered stream.
-     *
-     * @param embedUrl   the initial embed URL (e.g. maxstream.org/embed-xxx.html)
-     * @param referer    the page that linked here (used for HTTP Referer)
-     * @param sourceLabel human-readable label for the ExtractorLink
-     */
     suspend fun extract(
         embedUrl: String,
         referer: String?,
@@ -226,10 +200,8 @@ internal object EmbedExtractor {
             } catch (e: Exception) { return false }
 
             val html = resp.text
-            val realUrl = resp.url.ifBlank { currentUrl }
-            currentUrl = realUrl
+            currentUrl = resp.url.ifBlank { currentUrl }
 
-            // ---- meta refresh / JS redirect ----
             val redirect = findRedirect(html, currentUrl)
             if (redirect != null && redirect != currentUrl) {
                 headers["Referer"] = currentUrl
@@ -237,12 +209,10 @@ internal object EmbedExtractor {
                 continue
             }
 
-            // ---- iframe chain ----
             val doc = Jsoup.parse(html, currentUrl)
             val iframes = doc.select("iframe[src]")
             if (iframes.isNotEmpty()) {
                 var chosen: String? = null
-                // Prefer cross-host iframe
                 for (f in iframes) {
                     val raw = f.attr("src").trim()
                     if (raw.startsWith("about:") || raw.startsWith("data:")) continue
@@ -270,18 +240,9 @@ internal object EmbedExtractor {
 
         if (finalHtml == null) return false
 
-        // Try to find a stream on the final page
-        val streamUrl = pickStream(finalHtml)
-
-        // If no stream here but HTML looks like a redirect page, we already
-        // exhausted the chain — give up.
-        if (streamUrl.isNullOrBlank()) {
-            return false
-        }
-
+        val streamUrl = pickStream(finalHtml) ?: return false
         val cleanStream = streamUrl.toPlaylistM3u8()
         val cdnOrigin = originOf(cleanStream)
-        val refererForLink = currentUrl
 
         callback.invoke(
             newExtractorLink(
@@ -290,7 +251,7 @@ internal object EmbedExtractor {
                 cleanStream,
                 ExtractorLinkType.M3U8
             ) {
-                this.referer = refererForLink
+                this.referer = currentUrl
                 this.quality = Qualities.Unknown.value
                 if (cdnOrigin.isNotBlank()) {
                     this.headers = streamHeaders(cdnOrigin)
@@ -299,28 +260,14 @@ internal object EmbedExtractor {
         )
         return true
     }
-
-    // Convert per-resolution m3u8 to master playlist if needed
-    private fun String.toPlaylistM3u8(): String {
-        val perResolutionSegment =
-            Regex("""/(?:\d{3,5}x\d{3,5}|\d{3,4}p)/[^/]+\.m3u8""")
-        return when {
-            perResolutionSegment.containsMatchIn(this) ->
-                perResolutionSegment.replace(this, "/playlist.m3u8")
-            this.contains("/video.m3u8") ->
-                this.replace(Regex("""/video\.m3u8(\?.*)?$"""),
-                             "/playlist.m3u8$1")
-            else -> this
-        }
-    }
 }
 
 // ===========================================================================
-// JavguruExtractor — main entry point
+// JavguruExtractor — plain class, no interface
 // ===========================================================================
-class JavguruExtractor : JavExtractor {
+class JavguruExtractor {
 
-    override val name = "JavGuru"
+    val name = "JavGuru"
 
     private val javguruBase = "https://jav.guru"
 
@@ -332,7 +279,6 @@ class JavguruExtractor : JavExtractor {
         Variant("-SUBS", "JavGuru [English Subtitles]")
     )
 
-    // ---- config-page regexes ----
     private val cfgBaseRe  = Regex("""base:\s*['"]([^'"]+)['"]""")
     private val cfgRtypeRe = Regex("""rtype:\s*['"]([^'"]+)['"]""")
     private val cfgCidRe   = Regex("""cid:\s*['"]([^'"]+)['"]""")
@@ -343,10 +289,16 @@ class JavguruExtractor : JavExtractor {
         RegexOption.IGNORE_CASE
     )
 
-    override suspend fun extract(
+    /**
+     * Try every JavGuru variant for the given code and emit every stream
+     * we can find. Returns true if at least one stream was emitted.
+     */
+    suspend fun extract(
         code: String,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
+        var found = false
+
         for (variant in variants) {
             val pageUrl = "$javguruBase/$code${variant.suffix}"
 
@@ -360,15 +312,12 @@ class JavguruExtractor : JavExtractor {
             if (!html.contains("iframe_url", ignoreCase = true)) continue
 
             if (extractFromPage(html, pageUrl, variant.label, callback)) {
-                return true
+                found = true
             }
         }
-        return false
+        return found
     }
 
-    // -----------------------------------------------------------------
-    // Parse one jav.guru video page
-    // -----------------------------------------------------------------
     private suspend fun extractFromPage(
         html: String,
         pageUrl: String,
@@ -377,7 +326,6 @@ class JavguruExtractor : JavExtractor {
     ): Boolean {
         val doc = Jsoup.parse(html, pageUrl)
 
-        // Button labels line up 1:1 with iframe_url order
         val buttonNames = doc
             .select("a.wp-btn-iframe__shortcode[data-localize]")
             .map { it.text().trim() }
@@ -385,7 +333,7 @@ class JavguruExtractor : JavExtractor {
         val matches = iframeUrlRe.findAll(html).toList()
         if (matches.isEmpty()) return false
 
-        val processed = mutableSetOf<String>()
+        var found = false
 
         for ((index, match) in matches.withIndex()) {
             val sourceName =
@@ -395,7 +343,6 @@ class JavguruExtractor : JavExtractor {
             try {
                 val encoded = match.groupValues[1]
 
-                // ---- 1. base64 decode ----
                 val decodedUrl = try {
                     String(Base64.decode(encoded.trim(), Base64.DEFAULT))
                 } catch (e: Exception) { continue }
@@ -403,13 +350,11 @@ class JavguruExtractor : JavExtractor {
                 if (!decodedUrl.startsWith("http")) continue
                 if (decodedUrl.startsWith("about:")) continue
 
-                // ---- 2. fetch config page ----
                 val iframeHtml = try {
                     app.get(decodedUrl, timeout = 15,
                             headers = BROWSER_HEADERS).text
                 } catch (e: Exception) { continue }
 
-                // ---- 3. parse base / rtype / cid / keys ----
                 val cfgBase  = cfgBaseRe.find(iframeHtml)?.groupValues?.get(1)
                 val cfgRtype = cfgRtypeRe.find(iframeHtml)?.groupValues?.get(1)
                 val cfgCid   = cfgCidRe.find(iframeHtml)?.groupValues?.get(1)
@@ -417,9 +362,9 @@ class JavguruExtractor : JavExtractor {
 
                 if (cfgBase == null || cfgRtype == null ||
                     cfgCid == null || cfgKeysRaw == null) {
-                    // Some sources serve the stream directly on the config page
-                    if (tryEmbedExtractor(decodedUrl, pageUrl,
-                                          fullLabel, callback)) return true
+                    if (tryEmbed(decodedUrl, pageUrl, fullLabel, callback)) {
+                        found = true
+                    }
                     continue
                 }
 
@@ -434,58 +379,46 @@ class JavguruExtractor : JavExtractor {
                 }
                 if (tokenParts.isEmpty()) continue
 
-                // ---- 4. build redirect URL ----
                 val reversed = tokenParts.joinToString("").reversed()
                 val cleanBase = cfgBase.trimEnd('/')
                 val finalUrl = "$cleanBase/?${cfgRtype}r=$reversed"
 
-                // ---- 5. follow Location header ----
                 val resolvedUrl = resolveRedirect(finalUrl)
 
                 if (resolvedUrl.isBlank() ||
                     resolvedUrl.startsWith("about:")) continue
 
-                // ---- 6. try EmbedExtractor ----
-                if (tryEmbedExtractor(resolvedUrl, pageUrl,
-                                      fullLabel, callback)) return true
+                if (tryEmbed(resolvedUrl, pageUrl, fullLabel, callback)) {
+                    found = true
+                    continue
+                }
 
-                // ---- 7. last resort: Cloudstream's generic loadExtractor ----
                 try {
                     loadExtractor(resolvedUrl, pageUrl, { }, callback)
-                    return true
+                    found = true
                 } catch (e: Exception) { /* ignore */ }
 
             } catch (e: Exception) {
                 continue
             }
         }
-        return false
+        return found
     }
 
-    // -----------------------------------------------------------------
-    // Wraps EmbedExtractor with dedupe and a graceful failure
-    // -----------------------------------------------------------------
-    private suspend fun tryEmbedExtractor(
+    private suspend fun tryEmbed(
         url: String,
         referer: String,
         label: String,
         callback: (ExtractorLink) -> Unit
-    ): Boolean {
-        return try {
-            EmbedExtractor.extract(
-                embedUrl = url,
-                referer = referer,
-                sourceLabel = label,
-                callback = callback
-            )
-        } catch (e: Exception) {
-            false
-        }
-    }
+    ): Boolean = try {
+        EmbedExtractor.extract(
+            embedUrl = url,
+            referer = referer,
+            sourceLabel = label,
+            callback = callback
+        )
+    } catch (e: Exception) { false }
 
-    // -----------------------------------------------------------------
-    // Follow the Location header from a /searcho/?... URL
-    // -----------------------------------------------------------------
     private suspend fun resolveRedirect(url: String): String {
         return try {
             val resp = app.get(url, headers = BROWSER_HEADERS,
@@ -503,15 +436,9 @@ class JavguruExtractor : JavExtractor {
                     URI(url).resolve(location).toString()
                 } catch (e: Exception) { url }
             }
-        } catch (e: Exception) {
-            url
-        }
+        } catch (e: Exception) { url }
     }
 
-    // -----------------------------------------------------------------
-    // Manual redirect chain (used when Location points at a
-    // javlesbians.com intermediate)
-    // -----------------------------------------------------------------
     private suspend fun followRedirects(url: String, maxHops: Int = 6): String {
         var current = url
         repeat(maxHops) {
