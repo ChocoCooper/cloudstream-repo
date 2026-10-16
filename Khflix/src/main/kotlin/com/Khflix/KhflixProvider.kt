@@ -388,7 +388,7 @@ class KhflixProvider : MainAPI() {
         }
     }
 
-    private fun emitSub(url: String, subtitleCallback: (SubtitleFile) -> Unit) {
+    private suspend fun emitSub(url: String, subtitleCallback: (SubtitleFile) -> Unit) {
         dbg("SUB", "-> English: $url")
         subtitleCallback.invoke(
             newSubtitleFile("English", url) {
