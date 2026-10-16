@@ -504,7 +504,7 @@ class JavHubProvider : MainAPI() {
                                                 if (sourceUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
                                             ) {
                                                 this.referer = "https://javtiful.com/"
-                                                this.quality = source.size ?: Qualities.Unknown.value
+                                                this.quality = Qualities.Unknown.value
                                             }
                                         )
                                         foundStream.set(true)
