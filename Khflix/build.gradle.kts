@@ -1,10 +1,9 @@
 // use an integer for version numbers
 version = 1
 
-
 cloudstream {
     authors = listOf("ChocoCooper")
-    description = "Asian Drama Provider"
+    description = "Asian Drama & Vivamax"
 
     /**
     * Status int as the following:
@@ -21,7 +20,7 @@ cloudstream {
         "Movie",
     )
     language = "en"
-    iconUrl = "https://khflix.com/favicon.ico"
+    iconUrl = "https://t0.gstatic.com/faviconV2?client=SOCIAL&type=FAVICON&fallback_opts=TYPE,SIZE,URL&url=https://khflix.com&size=256"
 
     isCrossPlatform = false
 }
