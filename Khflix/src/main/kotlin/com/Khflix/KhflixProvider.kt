@@ -1,10 +1,9 @@
 // KhflixProvider.kt
-package com.khflix
+package com.Khflix
 
 import android.util.Log
 import com.lagradost.cloudstream3.*
 import com.lagradost.cloudstream3.utils.*
-import com.lagradost.cloudstream3.network.WebViewResolver
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
@@ -19,8 +18,6 @@ class KhflixProvider : MainAPI() {
         TvType.Movie, TvType.TvSeries, TvType.AsianDrama
     )
 
-    private val webViewResolver by lazy { WebViewResolver() }
-
     companion object {
         private const val TAG = "Khflix"
         private const val PLAYER_API = "https://khflix.com/wp-json/dooplayer/v2/"
@@ -34,10 +31,14 @@ class KhflixProvider : MainAPI() {
             "Khmer", "Arabic", "Filipino", "Hindi",
             "Indonesian", "Thai", "Vietnamese", "Malay"
         )
+
+        private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+                "AppleWebKit/537.36 (KHTML, like Gecko) " +
+                "Chrome/124.0.0.0 Safari/537.36"
     }
 
     // ==================================================================
-    // HOME PAGE — Section rows
+    // HOME PAGE
     // ==================================================================
     override val mainPage = mainPageOf(
         "" to "Latest",
@@ -73,11 +74,9 @@ class KhflixProvider : MainAPI() {
         val doc = fetchDocument("$mainUrl/?s=${query.replace(" ", "+")}")
         val out = mutableListOf<SearchResponse>()
 
-        // Primary: div.result-item (search-specific markup)
         doc.select("div.result-item").forEach { el ->
             el.toSearchResult()?.let { out.add(it) }
         }
-        // Fallback: article.item
         if (out.isEmpty()) {
             doc.select("article.item").forEach { el ->
                 el.toSearchResult()?.let { out.add(it) }
@@ -93,16 +92,16 @@ class KhflixProvider : MainAPI() {
         val doc = fetchDocument(url)
         val html = doc.outerHtml()
 
-        // ----- Title (confirmed: div.sheader h1) -----
+        // ----- Title -----
         val title = doc.selectFirst("div.sheader h1")?.text()?.trim()
             ?: doc.selectFirst("div.data h1")?.text()?.trim()
             ?: doc.title().substringBefore(" - ").trim()
 
-        // ----- Poster (confirmed: div.poster img on khflix.com) -----
+        // ----- Poster -----
         val poster = doc.selectFirst("div.poster img")?.attr("src")
             ?.trim()?.takeIf { it.isNotBlank() }
 
-        // ----- Backdrop (confirmed: og:image[1] on tmdb) -----
+        // ----- Backdrop -----
         val ogImages = doc.select("meta[property='og:image']")
             .mapNotNull { it.attr("content").trim().takeIf { c -> c.isNotBlank() } }
         val backdrop = ogImages.getOrNull(1) ?: ogImages.lastOrNull() ?: poster
@@ -115,8 +114,10 @@ class KhflixProvider : MainAPI() {
         val genres = doc.select("div.sgeneros a")
             .map { it.text().trim() }.filter { it.isNotEmpty() }.distinct()
 
-        // ----- IMDb rating -----
-        val rating = extractImdbRating(doc)
+        // ----- IMDb rating → score (0-100) -----
+        // FIX: rating is deprecated; score expects Int 0-100
+        val imdb = extractImdbRating(doc)                       // Double? in 0..10
+        val score: Int? = imdb?.let { (it * 10).toInt().coerceIn(0, 100) }
 
         // ----- Plot -----
         val plot = doc.selectFirst("div#info .wp-content p")?.text()
@@ -149,10 +150,9 @@ class KhflixProvider : MainAPI() {
                 this.plot = plot
                 this.year = year
                 this.tags = genres
-                this.rating = rating
+                this.score = score                            // FIXED
             }
         } else {
-            // For movies: data = "postId|movie"
             val postId = extractPostId(html)
             Log.d(TAG, "Movie: $title, postId=$postId")
 
@@ -162,13 +162,13 @@ class KhflixProvider : MainAPI() {
                 this.plot = plot
                 this.year = year
                 this.tags = genres
-                this.rating = rating
+                this.score = score                            // FIXED
             }
         }
     }
 
     // ==================================================================
-    // LOAD LINKS — Video sources + subtitles
+    // LOAD LINKS
     // ==================================================================
     override suspend fun loadLinks(
         data: String,
@@ -184,13 +184,13 @@ class KhflixProvider : MainAPI() {
 
         when (parts[1]) {
             // ----------------------------------------------------------
-            // MOVIE: use dooplayer REST API + fallback to page HTML
+            // MOVIE
             // ----------------------------------------------------------
             "movie" -> {
                 val postId = parts[0]
                 Log.d(TAG, "Movie loadLinks: postId=$postId")
 
-                // Primary: REST API to get embed URL, then extract source
+                // Primary: REST API
                 for (nume in 1..5) {
                     try {
                         val resp = app.get("$PLAYER_API$postId/movie/$nume").text
@@ -205,46 +205,32 @@ class KhflixProvider : MainAPI() {
                     } catch (e: Exception) {
                         Log.w(TAG, "Player API call failed for nume=$nume", e)
                     }
-                    delayMs(300)
-                }
-
-                // Fallback: scrape the movie page for m3u8/mp4 URLs
-                val pageUrl = parts.getOrNull(2)
-                val moviePage = if (pageUrl.isNullOrBlank()) {
-                    // We don't have the page URL, use referer approach
-                    null
-                } else pageUrl
-
-                if (moviePage != null) {
-                    val pageHtml = app.get(moviePage).text
-                    extractFromHtml(pageHtml, videoUrls, subUrls)
+                    kotlinx.coroutines.delay(300)
                 }
             }
 
             // ----------------------------------------------------------
-            // TV EPISODE: deterministic URL from khflixConfig
+            // TV EPISODE
             // ----------------------------------------------------------
             "tv" -> {
-                val seriesPrefix = parts[0]              // "Revenge.From.A.Wife.S01E"
-                val padded = parts.getOrNull(2) ?: "01"  // "01"
+                val seriesPrefix = parts[0]
+                val padded = parts.getOrNull(2) ?: "01"
                 Log.d(TAG, "TV loadLinks: prefix=$seriesPrefix ep=$padded")
 
-                // Video: https://cdn1.khflixcdnvideos.top/{prefix}{EE}.mp4
-                val videoUrl = "https://$CDN_VIDEO_HOST/${seriesPrefix}${padded}.mp4"
-                videoUrls.add(videoUrl)
+                // Deterministic video URL
+                videoUrls.add("https://$CDN_VIDEO_HOST/${seriesPrefix}${padded}.mp4")
 
-                // Subtitles: 9 languages (confirmed list)
+                // 9 subtitle languages + English default
                 for (lang in SUBTITLE_LANGS) {
                     subUrls.add("https://$SUB_HOST/${seriesPrefix}${padded}.${lang}.vtt")
                 }
-                // English default (no language suffix)
                 subUrls.add("https://$SUB_HOST/${seriesPrefix}${padded}.vtt")
             }
         }
 
         Log.d(TAG, "Emitting ${videoUrls.size} video(s), ${subUrls.size} subtitle(s)")
 
-        // ----- Emit video extractor links -----
+        // ----- Emit video links -----
         videoUrls.forEach { src ->
             val type = if (src.contains(".m3u8")) ExtractorLinkType.M3U8
                        else ExtractorLinkType.VIDEO
@@ -254,9 +240,7 @@ class KhflixProvider : MainAPI() {
                     this.quality = Qualities.Unknown.value
                     this.headers = mapOf(
                         "Referer" to "$mainUrl/",
-                        "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-                                       "AppleWebKit/537.36 (KHTML, like Gecko) " +
-                                       "Chrome/124.0.0.0 Safari/537.36"
+                        "User-Agent" to UA
                     )
                 }
             )
@@ -276,35 +260,16 @@ class KhflixProvider : MainAPI() {
     // ==================================================================
 
     /**
-     * Extract video + subtitle URLs from a page's raw HTML.
-     * Used for the movie fallback.
-     */
-    private fun extractFromHtml(html: String, videos: MutableSet<String>,
-                                subs: MutableSet<String>) {
-        Regex("""https?://$HLS_HOST/[^"'\s<>\\]+\.m3u8[^"'\s<>\\]*""")
-            .findAll(html).forEach { videos.add(it.value) }
-        Regex("""https?://$MP4_HOST/[^"'\s<>\\]+\.(?:mp4|mkv|webm)""")
-            .findAll(html).forEach { videos.add(it.value) }
-        Regex("""https?://$CDN_VIDEO_HOST/[^"'\s<>\\]+\.mp4""")
-            .findAll(html).forEach { videos.add(it.value) }
-        Regex("""https?://$SUB_HOST/[^"'\s<>\\]+\.vtt""")
-            .findAll(html).forEach { subs.add(it.value) }
-    }
-
-    /**
      * Extract window.khflixConfig from a TV series page.
-     * Example: {series: "Revenge.From.A.Wife.S01E", episodes: 26, image: "..."}
      */
     private fun extractKhflixConfig(html: String): Map<String, String>? {
         val m = Regex("""window\.khflixConfig\s*=\s*\{([^}]+)\}""").find(html)
             ?: return null
         val body = m.groupValues[1]
         val out = mutableMapOf<String, String>()
-        // String values: key: "value"
         Regex("""(\w+)\s*:\s*"([^"]*)"""").findAll(body).forEach {
             out[it.groupValues[1]] = it.groupValues[2]
         }
-        // Numeric values: key: 26
         Regex("""(\w+)\s*:\s*(\d+)""").findAll(body).forEach {
             out[it.groupValues[1]] = it.groupValues[2]
         }
@@ -313,7 +278,6 @@ class KhflixProvider : MainAPI() {
 
     /**
      * Extract post ID from HTML.
-     * Confirmed sources: id="post-XXXX", "post_id":"XXXX"
      */
     private fun extractPostId(html: String): String {
         val patterns = listOf(
@@ -330,12 +294,9 @@ class KhflixProvider : MainAPI() {
 
     /**
      * Decode jwplayer wrapper URL → real video URL.
-     * "https://khflix.com/jwplayer/?source=<ENCODED>&id=26161&type=mp4"
-     *   → "https://hugh.cdn.rumble.cloud/video/.../OSG6A.aaa.mp4"
      */
     private fun decodeJwPlayerUrl(embedUrl: String): String {
         if (!embedUrl.contains("jwplayer/?source=")) {
-            // If it's a direct video URL already, return it
             return if (embedUrl.startsWith("http") &&
                 (embedUrl.contains(".mp4") || embedUrl.contains(".m3u8") ||
                  embedUrl.contains(".mkv"))) embedUrl else ""
@@ -350,10 +311,6 @@ class KhflixProvider : MainAPI() {
 
     /**
      * Language detection from VTT URL.
-     * Confirmed patterns:
-     *   Aladdin.2019.Arabic.vtt          → "Arabic"
-     *   Aladdin.2019.vtt                 → "English"
-     *   Revenge.From.A.Wife.S01E01.Thai.vtt → "Thai"
      */
     private fun extractLanguageFromSubtitleUrl(url: String): String {
         val filename = url.substringAfterLast('/').removeSuffix(".vtt")
@@ -362,38 +319,25 @@ class KhflixProvider : MainAPI() {
 
         val last = segments.last()
 
-        // If last segment is a year or a series code (S01E01) → default English
         if (last.matches(Regex("""\d{4}"""))) return "English"
         if (last.matches(Regex("""S\d+E\d+""", RegexOption.IGNORE_CASE))) return "English"
-
-        // Known language list (case-insensitive)
-        val known = setOf(
-            "arabic", "filipino", "hindi", "indonesian", "khmer", "malay",
-            "thai", "vietnamese", "english", "chinese", "korean", "japanese"
-        )
-        if (last.lowercase() in known) return last.replaceFirstChar(Char::uppercase)
 
         return last.replaceFirstChar(Char::uppercase)
     }
 
     /**
      * Parse a card element into a SearchResponse.
-     * Homepage: article.item > div.image > a (poster) + h3.title (name)
-     * Search:   div.result-item (different markup, but shares h3/div.title)
      */
     private fun Element.toSearchResult(): SearchResponse? {
-        // Find link
         val a = selectFirst("a[href]") ?: return null
         val href = a.attr("href").takeIf { it.isNotBlank() } ?: return null
         if (!href.contains("/movies/") && !href.contains("/tvshows/")) return null
 
-        // Find title (tries multiple selectors)
         val title = selectFirst("h3.title, h3, div.title, .data h3, .title")
             ?.text()?.trim()?.takeIf { it.isNotEmpty() }
             ?: a.attr("title").takeIf { it.isNotBlank() }
             ?: return null
 
-        // Find poster
         val poster = selectFirst("img")?.attr("src")
             ?.takeIf { it.isNotBlank() }
             ?: selectFirst("img")?.attr("data-src")?.takeIf { it.isNotBlank() }
@@ -417,17 +361,18 @@ class KhflixProvider : MainAPI() {
     }
 
     // ------------------------------------------------------------------
-    // Network helpers
+    // Network helpers — FIXED: removed WebViewResolver, use app.get directly
     // ------------------------------------------------------------------
     private suspend fun fetchHtml(url: String): String? {
         return try {
-            val html = app.get(url).text
-            if (html.contains("cf-challenge") ||
-                html.contains("Just a moment") ||
-                html.contains("Checking your browser")) {
-                Log.d(TAG, "Cloudflare challenge detected — using WebViewResolver")
-                webViewResolver.resolveUsingWebView(url)
-            } else html
+            app.get(
+                url,
+                headers = mapOf(
+                    "User-Agent" to UA,
+                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language" to "en-US,en;q=0.9"
+                )
+            ).text
         } catch (e: Exception) {
             Log.e(TAG, "fetchHtml failed: $url", e)
             null
@@ -436,8 +381,4 @@ class KhflixProvider : MainAPI() {
 
     private suspend fun fetchDocument(url: String): Document =
         Jsoup.parse(fetchHtml(url) ?: "", url)
-
-    private suspend fun delayMs(ms: Long) {
-        kotlinx.coroutines.delay(ms)
-    }
 }
