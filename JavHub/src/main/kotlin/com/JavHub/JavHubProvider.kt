@@ -285,7 +285,7 @@ class JavHubProvider : MainAPI() {
         val dvdId = loadData?.code ?: extractCode(rawTitle)
         val displayTitle = if (!dvdId.isNullOrBlank() &&
                                 !rawTitle.startsWith(dvdId, ignoreCase = true)) {
-            "$dvdId $rawTitle"
+            "$dvdId$rawTitle"
         } else rawTitle
 
         val cleanCode = dvdId?.lowercase()
@@ -468,52 +468,55 @@ class JavHubProvider : MainAPI() {
                 }
             }
 
-            // 3. JAVTIFUL
+            // 3. JAVTIFUL (Strict Code Matching Validation)
             launch {
                 runCatching {
                     val javtifulSearchDoc = app.get("https://javtiful.com/search?q=$cleanCode", headers = browserHeaders).document
-                    val path = javtifulSearchDoc.selectFirst("body > main > section.front-section > div > div.front-video-grid > article > a")?.attr("href")
-                        ?: javtifulSearchDoc.selectFirst("article a")?.attr("href")
+                    
+                    // Strictly require the href link to contain the exact cleanCode
+                    val path = javtifulSearchDoc.select("a[href*='/video/']")
+                        .firstOrNull { el -> 
+                            el.attr("href").contains(cleanCode, ignoreCase = true) 
+                        }
+                        ?.attr("href")
 
-                    if (!path.isNullOrBlank()) {
+                    if (!path.isNullOrBlank() && path.contains(cleanCode, ignoreCase = true)) {
                         val fullUrl = if (path.startsWith("http")) path else "https://javtiful.com$path"
                         val document = app.get(fullUrl, headers = browserHeaders).document
-                        val scriptData = document.selectFirst("script#frontWatchConfig")?.data()
+                        
+                        // Verify that the actual video page content or title matches the specific code
+                        val pageTitle = document.selectFirst("h1")?.text()?.lowercase() ?: ""
+                        if (fullUrl.contains(cleanCode, ignoreCase = true) || pageTitle.contains(cleanCode, ignoreCase = true)) {
+                            
+                            val scriptData = document.selectFirst("script#watch-config")?.data()
+                                ?: document.select("script").firstOrNull { it.data().contains("playerSources") }?.data()
 
-                        if (!scriptData.isNullOrBlank()) {
-                            val config = parseJson<JavtifulWatchConfig>(scriptData)
-                            config.playerSources?.forEach { source ->
-                                if (!source.src.isNullOrBlank()) {
-                                    callback.invoke(
-                                        newExtractorLink(
-                                            "Javtiful",
-                                            "Javtiful",
-                                            source.src,
-                                            if (source.src.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
-                                        ) {
-                                            this.referer = "https://javtiful.com/"
-                                            this.quality = Qualities.Unknown.value
-                                        }
-                                    )
-                                    foundStream.set(true)
+                            if (!scriptData.isNullOrBlank()) {
+                                val config = runCatching { parseJson<JavtifulWatchConfig>(scriptData) }.getOrNull()
+                                config?.playerSources?.forEach { source ->
+                                    if (!source.src.isNullOrBlank()) {
+                                        val sourceUrl = source.src!!
+                                        callback.invoke(
+                                            newExtractorLink(
+                                                "Javtiful",
+                                                "Javtiful",
+                                                sourceUrl,
+                                                if (sourceUrl.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
+                                            ) {
+                                                this.referer = "https://javtiful.com/"
+                                                this.quality = source.size ?: Qualities.Unknown.value
+                                            }
+                                        )
+                                        foundStream.set(true)
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
-
-            // 4. JAVGURU
-            launch {
-                runCatching {
-                    JavguruExtractor().extract(cleanCode) { link ->
-                        callback.invoke(link)
-                        foundStream.set(true)
-                    }
-                }
-            }
             
-            // 5. SUBTITLES
+            // 4. SUBTITLES
             launch {
                 runCatching {
                     val searchDoc = app.get("$subtitleCatUrl/index.php?search=$code", timeout = 15, headers = browserHeaders).document
