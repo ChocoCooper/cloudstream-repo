@@ -114,10 +114,9 @@ class KhflixProvider : MainAPI() {
         val genres = doc.select("div.sgeneros a")
             .map { it.text().trim() }.filter { it.isNotEmpty() }.distinct()
 
-        // ----- IMDb rating → score (0-100) -----
-        // FIX: rating is deprecated; score expects Int 0-100
-        val imdb = extractImdbRating(doc)                       // Double? in 0..10
-        val score: Int? = imdb?.let { (it * 10).toInt().coerceIn(0, 100) }
+        // ----- IMDb rating → Score object (CORRECTED) -----
+        val imdbRating: Double? = extractImdbRating(doc) // Returns Double? (e.g., 6.9)
+        val score: Score? = imdbRating?.let { Score.from10(it) }
 
         // ----- Plot -----
         val plot = doc.selectFirst("div#info .wp-content p")?.text()
@@ -150,7 +149,7 @@ class KhflixProvider : MainAPI() {
                 this.plot = plot
                 this.year = year
                 this.tags = genres
-                this.score = score                            // FIXED
+                this.score = score // Assign as Score?
             }
         } else {
             val postId = extractPostId(html)
@@ -162,7 +161,7 @@ class KhflixProvider : MainAPI() {
                 this.plot = plot
                 this.year = year
                 this.tags = genres
-                this.score = score                            // FIXED
+                this.score = score // Assign as Score?
             }
         }
     }
@@ -361,7 +360,7 @@ class KhflixProvider : MainAPI() {
     }
 
     // ------------------------------------------------------------------
-    // Network helpers — FIXED: removed WebViewResolver, use app.get directly
+    // Network helpers
     // ------------------------------------------------------------------
     private suspend fun fetchHtml(url: String): String? {
         return try {
