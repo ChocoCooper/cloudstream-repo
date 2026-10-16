@@ -12,7 +12,7 @@ import org.jsoup.Jsoup
 import java.net.URI
 
 // ---------------------------------------------------------------------------
-// Shared browser headers (used for page + config fetches)
+// Shared browser headers for page fetches
 // ---------------------------------------------------------------------------
 private val BROWSER_HEADERS = mapOf(
     "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
@@ -21,13 +21,21 @@ private val BROWSER_HEADERS = mapOf(
     "Accept-Language" to "en-US,en;q=0.5"
 )
 
-private fun originOf(url: String): String =
-    try { URI(url).let { "${it.scheme}://${it.host}" } } catch (e: Exception) { "" }
-
-private fun streamHeaders(cdnOrigin: String): Map<String, String> = mapOf(
+// ---------------------------------------------------------------------------
+// Headers the maxstream CDN accepts.
+//
+// FIX: we NO LONGER send "Origin".
+// Reason: Cloudstream's ExoPlayer uses Cronet, which treats Origin as a
+// forbidden header — it overrides it per-request based on the actual host.
+// When we pin Origin to the master's host, segment requests going to a
+// different s*.maxstream.org shard get a mismatched Origin → 403.
+//
+// Proven by our Python bisection: Accept + Accept-Language alone pass the
+// CDN gate. Referer is optional. Origin is not required.
+// ---------------------------------------------------------------------------
+private fun streamHeaders(): Map<String, String> = mapOf(
     "Accept" to "*/*",
-    "Accept-Language" to "en-US,en;q=0.5",
-    "Origin" to cdnOrigin
+    "Accept-Language" to "en-US,en;q=0.5"
 )
 
 private fun String.toPlaylistM3u8(): String {
@@ -44,8 +52,7 @@ private fun String.toPlaylistM3u8(): String {
 }
 
 // ===========================================================================
-// EmbedExtractor — walks redirects/iframes, unpacks scripts, finds m3u8.
-// Host-agnostic, so it works with any maxstream-family domain.
+// EmbedExtractor — walks redirects/iframes, unpacks scripts, finds m3u8
 // ===========================================================================
 internal object EmbedExtractor {
 
@@ -104,9 +111,7 @@ internal object EmbedExtractor {
         if (num == 0) return "0"
         var n = num
         val sb = StringBuilder()
-        while (n > 0) {
-            sb.insert(0, digits[n % radix]); n /= radix
-        }
+        while (n > 0) { sb.insert(0, digits[n % radix]); n /= radix }
         return sb.toString()
     }
 
@@ -231,8 +236,11 @@ internal object EmbedExtractor {
 
         val streamUrl = pickStream(finalHtml) ?: return false
         val cleanStream = streamUrl.toPlaylistM3u8()
-        val cdnOrigin = originOf(cleanStream)
 
+        // ---------------------------------------------------------------
+        // Callback — no Origin header, Referer = embed page URL.
+        // Cronet will set Origin correctly per request.
+        // ---------------------------------------------------------------
         callback.invoke(
             newExtractorLink(
                 sourceLabel,
@@ -240,11 +248,9 @@ internal object EmbedExtractor {
                 cleanStream,
                 ExtractorLinkType.M3U8
             ) {
-                this.referer = currentUrl
+                this.referer = currentUrl      // exact embed URL
                 this.quality = Qualities.Unknown.value
-                if (cdnOrigin.isNotBlank()) {
-                    this.headers = streamHeaders(cdnOrigin)
-                }
+                this.headers = streamHeaders() // Accept + Accept-Language only
             }
         )
         return true
@@ -252,7 +258,7 @@ internal object EmbedExtractor {
 }
 
 // ===========================================================================
-// JavguruExtractor — processes ONLY the "STREAM JK" button (maxstream source)
+// JavguruExtractor — only the "STREAM JK" button, source = variant.label
 // ===========================================================================
 class JavguruExtractor {
 
@@ -262,45 +268,34 @@ class JavguruExtractor {
 
     private data class Variant(val suffix: String, val label: String)
 
+    // Source names shown in the player's link list
     private val variants = listOf(
         Variant("",      "JavGuru"),
         Variant("-MR",   "JavGuru [Uncensored]"),
-        Variant("-SUBS", "JavGuru [English Subtitles]")
+        Variant("-SUBS", "JavGuru [English Subtitle]")
     )
 
-    // ---- config-page regexes ----
     private val cfgBaseRe  = Regex("""base:\s*['"]([^'"]+)['"]""")
     private val cfgRtypeRe = Regex("""rtype:\s*['"]([^'"]+)['"]""")
     private val cfgCidRe   = Regex("""cid:\s*['"]([^'"]+)['"]""")
     private val cfgKeysRe  = Regex("""keys:\s*\[([^\]]+)\]""")
 
-    // ---- iframe_url extractor (matches both "iframe_url":"..." and
-    //      "iframe_url" : "..." with optional whitespace) ----
     private val iframeUrlRe = Regex(
         """"iframe_url"\s*:\s*"([^"]*)"""",
         RegexOption.IGNORE_CASE
     )
 
-    // ---- JK button detector ----
-    // Matches:
-    //   "STREAM JK", "Stream JK", "JK Player", "Player JK", "JK", "Jk"
-    // Does NOT match: "STREAM JKX", "JK01", "JK-" etc.
+    // JK token detector — matches "STREAM JK", "JK Player", bare "JK"
     private val jkButtonRe = Regex("""(?:^|\s)JK(?:\s|$)""")
 
     private fun isJkButton(text: String): Boolean {
         val t = text.trim()
         if (t.isEmpty()) return false
-        // Primary: token "JK" surrounded by word boundaries
         if (jkButtonRe.containsMatchIn(t.uppercase())) return true
-        // Fallback: label ends with "JK"
         if (t.uppercase().endsWith("JK")) return true
         return false
     }
 
-    /**
-     * Try every JavGuru variant; for each, look for the STREAM JK button
-     * and process ONLY that source. Returns true if a stream was emitted.
-     */
     suspend fun extract(
         code: String,
         callback: (ExtractorLink) -> Unit
@@ -317,6 +312,7 @@ class JavguruExtractor {
             if (html.isBlank()) continue
             if (!html.contains("iframe_url", ignoreCase = true)) continue
 
+            // Pass variant.label (e.g. "JavGuru [Uncensored]") as source name
             if (extractJkFromPage(html, pageUrl, variant.label, callback)) {
                 return true
             }
@@ -324,47 +320,35 @@ class JavguruExtractor {
         return false
     }
 
-    // -----------------------------------------------------------------
-    // Locate the JK button, pick the matching iframe_url, and drive the
-    // whole extraction chain from that single candidate.
-    // -----------------------------------------------------------------
     private suspend fun extractJkFromPage(
         html: String,
         pageUrl: String,
-        label: String,
+        sourceLabel: String,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         val doc = Jsoup.parse(html, pageUrl)
 
-        // Button order corresponds 1:1 with iframe_url order
         val buttons = doc
             .select("a.wp-btn-iframe__shortcode[data-localize]")
             .map { it.text().trim() }
 
         val iframeMatches = iframeUrlRe.findAll(html).toList()
 
-        // Find JK button index
         val jkIndex = buttons.indexOfFirst { isJkButton(it) }
-        if (jkIndex < 0) return false          // no JK button on this page
-        if (jkIndex >= iframeMatches.size) return false  // malformed page
+        if (jkIndex < 0) return false
+        if (jkIndex >= iframeMatches.size) return false
 
-        val sourceLabel = "$label ${buttons[jkIndex]}".trim()
-        val encoded     = iframeMatches[jkIndex].groupValues[1]
-
+        // sourceLabel is already the variant name; no button name appended
+        val encoded = iframeMatches[jkIndex].groupValues[1]
         return runJkChain(encoded, pageUrl, sourceLabel, callback)
     }
 
-    // -----------------------------------------------------------------
-    // Core chain: base64 → config page → base/rtype/cid/keys →
-    //              Location header → EmbedExtractor
-    // -----------------------------------------------------------------
     private suspend fun runJkChain(
         encoded: String,
         pageUrl: String,
         sourceLabel: String,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        // 1. base64-decode the iframe_url value
         val decodedUrl = try {
             String(Base64.decode(encoded.trim(), Base64.DEFAULT))
         } catch (e: Exception) { return false }
@@ -372,12 +356,10 @@ class JavguruExtractor {
         if (!decodedUrl.startsWith("http")) return false
         if (decodedUrl.startsWith("about:")) return false
 
-        // 2. fetch config page
         val iframeHtml = try {
             app.get(decodedUrl, timeout = 15, headers = BROWSER_HEADERS).text
         } catch (e: Exception) { return false }
 
-        // 3. parse base / rtype / cid / keys
         val cfgBase   = cfgBaseRe.find(iframeHtml)?.groupValues?.get(1)
         val cfgRtype  = cfgRtypeRe.find(iframeHtml)?.groupValues?.get(1)
         val cfgCid    = cfgCidRe.find(iframeHtml)?.groupValues?.get(1)
@@ -385,7 +367,6 @@ class JavguruExtractor {
 
         if (cfgBase == null || cfgRtype == null ||
             cfgCid == null || cfgKeysRaw == null) {
-            // Some sources serve the stream directly on the config page
             return tryEmbed(decodedUrl, pageUrl, sourceLabel, callback)
         }
 
@@ -400,19 +381,15 @@ class JavguruExtractor {
         }
         if (tokenParts.isEmpty()) return false
 
-        // 4. build redirect URL
         val reversed  = tokenParts.joinToString("").reversed()
         val cleanBase = cfgBase.trimEnd('/')
         val finalUrl  = "$cleanBase/?${cfgRtype}r=$reversed"
 
-        // 5. follow Location header → final embed URL (any host)
         val resolvedUrl = resolveRedirect(finalUrl)
         if (resolvedUrl.isBlank() || resolvedUrl.startsWith("about:")) return false
 
-        // 6. EmbedExtractor handles the host-agnostic player + packer
         if (tryEmbed(resolvedUrl, pageUrl, sourceLabel, callback)) return true
 
-        // 7. Cloudstream's generic extractor as a last resort
         return try {
             loadExtractor(resolvedUrl, pageUrl, { }, callback)
             true
@@ -433,12 +410,6 @@ class JavguruExtractor {
         )
     } catch (e: Exception) { false }
 
-    // -----------------------------------------------------------------
-    // Follow the Location header from a /searcho/?... URL.
-    // The host we land on is whatever the redirect says — no domain
-    // is hardcoded, so maxstream.org / .xyz / .sx / any future mirror
-    // all work transparently.
-    // -----------------------------------------------------------------
     private suspend fun resolveRedirect(url: String): String {
         return try {
             val resp = app.get(url, headers = BROWSER_HEADERS,
