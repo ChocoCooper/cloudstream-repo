@@ -1,4 +1,4 @@
-package com.Khflix
+package com.khflix
 
 import com.lagradost.cloudstream3.plugins.CloudstreamPlugin
 import com.lagradost.cloudstream3.plugins.Plugin
