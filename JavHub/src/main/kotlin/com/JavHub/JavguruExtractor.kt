@@ -12,7 +12,7 @@ import org.jsoup.Jsoup
 import java.net.URI
 
 // ---------------------------------------------------------------------------
-// Shared browser headers
+// Shared browser headers (used for page + config fetches)
 // ---------------------------------------------------------------------------
 private val BROWSER_HEADERS = mapOf(
     "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
@@ -22,10 +22,7 @@ private val BROWSER_HEADERS = mapOf(
 )
 
 private fun originOf(url: String): String =
-    try {
-        val u = URI(url)
-        "${u.scheme}://${u.host}"
-    } catch (e: Exception) { "" }
+    try { URI(url).let { "${it.scheme}://${it.host}" } } catch (e: Exception) { "" }
 
 private fun streamHeaders(cdnOrigin: String): Map<String, String> = mapOf(
     "Accept" to "*/*",
@@ -47,7 +44,8 @@ private fun String.toPlaylistM3u8(): String {
 }
 
 // ===========================================================================
-// EmbedExtractor — walks redirects/iframes, unpacks JS, finds the m3u8
+// EmbedExtractor — walks redirects/iframes, unpacks scripts, finds m3u8.
+// Host-agnostic, so it works with any maxstream-family domain.
 // ===========================================================================
 internal object EmbedExtractor {
 
@@ -107,8 +105,7 @@ internal object EmbedExtractor {
         var n = num
         val sb = StringBuilder()
         while (n > 0) {
-            sb.insert(0, digits[n % radix])
-            n /= radix
+            sb.insert(0, digits[n % radix]); n /= radix
         }
         return sb.toString()
     }
@@ -125,22 +122,15 @@ internal object EmbedExtractor {
             val key = keys.getOrNull(i) ?: continue
             if (key.isEmpty()) continue
             result = result.replace(
-                Regex("""\b${Regex.escape(baseN(i, radix))}\b"""), key
-            )
+                Regex("""\b${Regex.escape(baseN(i, radix))}\b"""), key)
         }
         return result
     }
 
     private fun findRedirect(html: String, baseUrl: String): String? {
-        metaRefreshRe.find(html)?.let {
-            return absoluteUrl(it.groupValues[1], baseUrl)
-        }
-        jsLocationAssignRe.find(html)?.let {
-            return absoluteUrl(it.groupValues[1], baseUrl)
-        }
-        jsLocationRe.find(html)?.let {
-            return absoluteUrl(it.groupValues[1], baseUrl)
-        }
+        metaRefreshRe.find(html)?.let { return absoluteUrl(it.groupValues[1], baseUrl) }
+        jsLocationAssignRe.find(html)?.let { return absoluteUrl(it.groupValues[1], baseUrl) }
+        jsLocationRe.find(html)?.let { return absoluteUrl(it.groupValues[1], baseUrl) }
         return null
     }
 
@@ -176,7 +166,6 @@ internal object EmbedExtractor {
                 if (dec.contains(".m3u8") || dec.contains(".mp4")) return dec
             } catch (e: Exception) { /* ignore */ }
         }
-
         return null
     }
 
@@ -263,7 +252,7 @@ internal object EmbedExtractor {
 }
 
 // ===========================================================================
-// JavguruExtractor — plain class, no interface
+// JavguruExtractor — processes ONLY the "STREAM JK" button (maxstream source)
 // ===========================================================================
 class JavguruExtractor {
 
@@ -279,26 +268,43 @@ class JavguruExtractor {
         Variant("-SUBS", "JavGuru [English Subtitles]")
     )
 
+    // ---- config-page regexes ----
     private val cfgBaseRe  = Regex("""base:\s*['"]([^'"]+)['"]""")
     private val cfgRtypeRe = Regex("""rtype:\s*['"]([^'"]+)['"]""")
     private val cfgCidRe   = Regex("""cid:\s*['"]([^'"]+)['"]""")
     private val cfgKeysRe  = Regex("""keys:\s*\[([^\]]+)\]""")
 
+    // ---- iframe_url extractor (matches both "iframe_url":"..." and
+    //      "iframe_url" : "..." with optional whitespace) ----
     private val iframeUrlRe = Regex(
         """"iframe_url"\s*:\s*"([^"]*)"""",
         RegexOption.IGNORE_CASE
     )
 
+    // ---- JK button detector ----
+    // Matches:
+    //   "STREAM JK", "Stream JK", "JK Player", "Player JK", "JK", "Jk"
+    // Does NOT match: "STREAM JKX", "JK01", "JK-" etc.
+    private val jkButtonRe = Regex("""(?:^|\s)JK(?:\s|$)""")
+
+    private fun isJkButton(text: String): Boolean {
+        val t = text.trim()
+        if (t.isEmpty()) return false
+        // Primary: token "JK" surrounded by word boundaries
+        if (jkButtonRe.containsMatchIn(t.uppercase())) return true
+        // Fallback: label ends with "JK"
+        if (t.uppercase().endsWith("JK")) return true
+        return false
+    }
+
     /**
-     * Try every JavGuru variant for the given code and emit every stream
-     * we can find. Returns true if at least one stream was emitted.
+     * Try every JavGuru variant; for each, look for the STREAM JK button
+     * and process ONLY that source. Returns true if a stream was emitted.
      */
     suspend fun extract(
         code: String,
         callback: (ExtractorLink) -> Unit
     ): Boolean {
-        var found = false
-
         for (variant in variants) {
             val pageUrl = "$javguruBase/$code${variant.suffix}"
 
@@ -311,14 +317,18 @@ class JavguruExtractor {
             if (html.isBlank()) continue
             if (!html.contains("iframe_url", ignoreCase = true)) continue
 
-            if (extractFromPage(html, pageUrl, variant.label, callback)) {
-                found = true
+            if (extractJkFromPage(html, pageUrl, variant.label, callback)) {
+                return true
             }
         }
-        return found
+        return false
     }
 
-    private suspend fun extractFromPage(
+    // -----------------------------------------------------------------
+    // Locate the JK button, pick the matching iframe_url, and drive the
+    // whole extraction chain from that single candidate.
+    // -----------------------------------------------------------------
+    private suspend fun extractJkFromPage(
         html: String,
         pageUrl: String,
         label: String,
@@ -326,83 +336,87 @@ class JavguruExtractor {
     ): Boolean {
         val doc = Jsoup.parse(html, pageUrl)
 
-        val buttonNames = doc
+        // Button order corresponds 1:1 with iframe_url order
+        val buttons = doc
             .select("a.wp-btn-iframe__shortcode[data-localize]")
             .map { it.text().trim() }
 
-        val matches = iframeUrlRe.findAll(html).toList()
-        if (matches.isEmpty()) return false
+        val iframeMatches = iframeUrlRe.findAll(html).toList()
 
-        var found = false
+        // Find JK button index
+        val jkIndex = buttons.indexOfFirst { isJkButton(it) }
+        if (jkIndex < 0) return false          // no JK button on this page
+        if (jkIndex >= iframeMatches.size) return false  // malformed page
 
-        for ((index, match) in matches.withIndex()) {
-            val sourceName =
-                buttonNames.getOrNull(index) ?: "Source ${index + 1}"
-            val fullLabel = "$label $sourceName"
+        val sourceLabel = "$label ${buttons[jkIndex]}".trim()
+        val encoded     = iframeMatches[jkIndex].groupValues[1]
 
-            try {
-                val encoded = match.groupValues[1]
+        return runJkChain(encoded, pageUrl, sourceLabel, callback)
+    }
 
-                val decodedUrl = try {
-                    String(Base64.decode(encoded.trim(), Base64.DEFAULT))
-                } catch (e: Exception) { continue }
+    // -----------------------------------------------------------------
+    // Core chain: base64 → config page → base/rtype/cid/keys →
+    //              Location header → EmbedExtractor
+    // -----------------------------------------------------------------
+    private suspend fun runJkChain(
+        encoded: String,
+        pageUrl: String,
+        sourceLabel: String,
+        callback: (ExtractorLink) -> Unit
+    ): Boolean {
+        // 1. base64-decode the iframe_url value
+        val decodedUrl = try {
+            String(Base64.decode(encoded.trim(), Base64.DEFAULT))
+        } catch (e: Exception) { return false }
 
-                if (!decodedUrl.startsWith("http")) continue
-                if (decodedUrl.startsWith("about:")) continue
+        if (!decodedUrl.startsWith("http")) return false
+        if (decodedUrl.startsWith("about:")) return false
 
-                val iframeHtml = try {
-                    app.get(decodedUrl, timeout = 15,
-                            headers = BROWSER_HEADERS).text
-                } catch (e: Exception) { continue }
+        // 2. fetch config page
+        val iframeHtml = try {
+            app.get(decodedUrl, timeout = 15, headers = BROWSER_HEADERS).text
+        } catch (e: Exception) { return false }
 
-                val cfgBase  = cfgBaseRe.find(iframeHtml)?.groupValues?.get(1)
-                val cfgRtype = cfgRtypeRe.find(iframeHtml)?.groupValues?.get(1)
-                val cfgCid   = cfgCidRe.find(iframeHtml)?.groupValues?.get(1)
-                val cfgKeysRaw = cfgKeysRe.find(iframeHtml)?.groupValues?.get(1)
+        // 3. parse base / rtype / cid / keys
+        val cfgBase   = cfgBaseRe.find(iframeHtml)?.groupValues?.get(1)
+        val cfgRtype  = cfgRtypeRe.find(iframeHtml)?.groupValues?.get(1)
+        val cfgCid    = cfgCidRe.find(iframeHtml)?.groupValues?.get(1)
+        val cfgKeysRaw = cfgKeysRe.find(iframeHtml)?.groupValues?.get(1)
 
-                if (cfgBase == null || cfgRtype == null ||
-                    cfgCid == null || cfgKeysRaw == null) {
-                    if (tryEmbed(decodedUrl, pageUrl, fullLabel, callback)) {
-                        found = true
-                    }
-                    continue
-                }
-
-                val keys = Regex("""['"]([^'"]+)['"]""")
-                    .findAll(cfgKeysRaw).map { it.groupValues[1] }.toList()
-
-                val iframeDoc = Jsoup.parse(iframeHtml)
-                val targetDiv = iframeDoc.getElementById(cfgCid) ?: continue
-
-                val tokenParts = keys.mapNotNull { k ->
-                    targetDiv.attr(k).takeIf { it.isNotBlank() }
-                }
-                if (tokenParts.isEmpty()) continue
-
-                val reversed = tokenParts.joinToString("").reversed()
-                val cleanBase = cfgBase.trimEnd('/')
-                val finalUrl = "$cleanBase/?${cfgRtype}r=$reversed"
-
-                val resolvedUrl = resolveRedirect(finalUrl)
-
-                if (resolvedUrl.isBlank() ||
-                    resolvedUrl.startsWith("about:")) continue
-
-                if (tryEmbed(resolvedUrl, pageUrl, fullLabel, callback)) {
-                    found = true
-                    continue
-                }
-
-                try {
-                    loadExtractor(resolvedUrl, pageUrl, { }, callback)
-                    found = true
-                } catch (e: Exception) { /* ignore */ }
-
-            } catch (e: Exception) {
-                continue
-            }
+        if (cfgBase == null || cfgRtype == null ||
+            cfgCid == null || cfgKeysRaw == null) {
+            // Some sources serve the stream directly on the config page
+            return tryEmbed(decodedUrl, pageUrl, sourceLabel, callback)
         }
-        return found
+
+        val keys = Regex("""['"]([^'"]+)['"]""")
+            .findAll(cfgKeysRaw).map { it.groupValues[1] }.toList()
+
+        val iframeDoc = Jsoup.parse(iframeHtml)
+        val targetDiv = iframeDoc.getElementById(cfgCid) ?: return false
+
+        val tokenParts = keys.mapNotNull { k ->
+            targetDiv.attr(k).takeIf { it.isNotBlank() }
+        }
+        if (tokenParts.isEmpty()) return false
+
+        // 4. build redirect URL
+        val reversed  = tokenParts.joinToString("").reversed()
+        val cleanBase = cfgBase.trimEnd('/')
+        val finalUrl  = "$cleanBase/?${cfgRtype}r=$reversed"
+
+        // 5. follow Location header → final embed URL (any host)
+        val resolvedUrl = resolveRedirect(finalUrl)
+        if (resolvedUrl.isBlank() || resolvedUrl.startsWith("about:")) return false
+
+        // 6. EmbedExtractor handles the host-agnostic player + packer
+        if (tryEmbed(resolvedUrl, pageUrl, sourceLabel, callback)) return true
+
+        // 7. Cloudstream's generic extractor as a last resort
+        return try {
+            loadExtractor(resolvedUrl, pageUrl, { }, callback)
+            true
+        } catch (e: Exception) { false }
     }
 
     private suspend fun tryEmbed(
@@ -419,6 +433,12 @@ class JavguruExtractor {
         )
     } catch (e: Exception) { false }
 
+    // -----------------------------------------------------------------
+    // Follow the Location header from a /searcho/?... URL.
+    // The host we land on is whatever the redirect says — no domain
+    // is hardcoded, so maxstream.org / .xyz / .sx / any future mirror
+    // all work transparently.
+    // -----------------------------------------------------------------
     private suspend fun resolveRedirect(url: String): String {
         return try {
             val resp = app.get(url, headers = BROWSER_HEADERS,
