@@ -5,20 +5,10 @@ import com.lagradost.cloudstream3.app
 import com.lagradost.cloudstream3.utils.ExtractorLink
 import com.lagradost.cloudstream3.utils.ExtractorLinkType
 import com.lagradost.cloudstream3.utils.Qualities
+import com.lagradost.cloudstream3.utils.getAndUnpack
 import com.lagradost.cloudstream3.utils.newExtractorLink
 import org.jsoup.Jsoup
 
-/**
- * jav.guru aggregator extractor.
- *
- * Each "STREAM XX" button on a jav.guru page hides a base64-encoded internal
- * URL that redirects to a real embed host (oppainet.net, javclan.com,
- * javplaya.com, vide0.net, maxstream.org, ...).
- *
- * This extractor focuses on the "JK" button, which resolves to maxstream.org.
- * Maxstream is a multi-step resolver (redirect stubs + nested iframes +
- * JW Player config), mirroring the working Python implementation.
- */
 class JavguruExtractor : JavExtractor {
     override val name = "JavGuru"
 
@@ -26,7 +16,6 @@ class JavguruExtractor : JavExtractor {
 
     private data class Variant(val suffix: String, val label: String)
 
-    // Labels exactly as requested by the caller.
     private val variants = listOf(
         Variant("",      "JavGuru"),
         Variant("-MR",   "JavGuru [Uncensored]"),
@@ -45,7 +34,6 @@ class JavguruExtractor : JavExtractor {
             }
             if (html.isBlank()) continue
 
-            // Extract "iframe_url":"..." values from the page source.
             val iframeUrls = Regex(
                 """"iframe_url"\s*:\s*"([^"]+)"""",
                 RegexOption.IGNORE_CASE
@@ -60,7 +48,6 @@ class JavguruExtractor : JavExtractor {
                     continue
                 }
 
-                // We only handle the JK button (maxstream.org).
                 if (!embedUrl.contains("maxstream.org")) continue
 
                 val ok = try {
@@ -82,16 +69,6 @@ class JavguruExtractor : JavExtractor {
         return found
     }
 
-    /**
-     * Resolve a jav.guru internal base64 iframe_url into the real embed URL.
-     *
-     * Steps (mirror of the working Python `resolve_embed`):
-     *   1. Base64-decode the encoded value
-     *   2. Fetch that page
-     *   3. Extract base / rtype / cid / keys from the inline config
-     *   4. Build the /?Xr=Y URL from the target div's attributes
-     *   5. Follow the redirect to get the final embed URL
-     */
     private suspend fun resolveEmbed(encoded: String): String? {
         val decodedUrl = try {
             String(Base64.decode(encoded.trim(), Base64.DEFAULT))
@@ -137,15 +114,6 @@ class JavguruExtractor : JavExtractor {
     }
 }
 
-/**
- * Maxstream.org embed resolver.
- *
- * Mirrors the working Python `extract_maxstream_stream`:
- *   1. Follow redirect stubs (meta refresh / JS location)
- *   2. Follow nested iframes (prefer cross-domain)
- *   3. Extract JW Player .m3u8 from the final player page (with a
- *      Dean Edwards packed-JS fallback via `getAndUnpack`)
- */
 internal object MaxstreamExtractor {
     private const val MAX_DEPTH = 6
 
@@ -215,7 +183,6 @@ internal object MaxstreamExtractor {
         m3u8InJsonRe.find(searchText)?.let { return jsUnescape(it.groupValues[1]) }
         anyM3u8Re.find(searchText)?.let { return jsUnescape(it.groupValues[1]) }
 
-        // Dean Edwards packed JS fallback
         val unpacked = try {
             getAndUnpack(html)
         } catch (e: Exception) {
@@ -245,7 +212,6 @@ internal object MaxstreamExtractor {
             }
             val html = resp.text
 
-            // 1) Redirect stub?
             val redirect = findRedirect(html, currentUrl)
             if (redirect != null && redirect != currentUrl) {
                 headers["Referer"] = currentUrl
@@ -253,7 +219,6 @@ internal object MaxstreamExtractor {
                 continue
             }
 
-            // 2) Iframes? (prefer cross-domain)
             val doc = Jsoup.parse(html, currentUrl)
             val iframes = doc.select("iframe[src]")
             if (iframes.isNotEmpty()) {
@@ -275,13 +240,11 @@ internal object MaxstreamExtractor {
                 }
             }
 
-            // 3) Player page?
             if (looksLikePlayer(html)) {
                 finalHtml = html
                 break
             }
 
-            // 4) Fallback: treat as final anyway
             finalHtml = html
             break
         }
