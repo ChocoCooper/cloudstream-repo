@@ -96,9 +96,9 @@ class KhflixProvider : MainAPI() {
     // HOME PAGE
     // ==================================================================
     override val mainPage = listOf(
-        MainPageData("Latest", "", isHorizontalImages = true),
-        MainPageData("Movies", "movies", isHorizontalImages = true),
-        MainPageData("TV Shows", "tvshows", isHorizontalImages = true),
+        MainPageData("Latest", "", horizontalImages = true),
+        MainPageData("Movies", "movies", horizontalImages = true),
+        MainPageData("TV Shows", "tvshows", horizontalImages = true),
         MainPageData("Action", "genre/action"),
         MainPageData("Comedy", "genre/comedy"),
         MainPageData("Drama", "genre/drama"),
@@ -343,7 +343,6 @@ class KhflixProvider : MainAPI() {
             return
         }
 
-        // Canonical English URL: no language suffix
         val url = "https://$subHost/$base.vtt"
         val code = quickProbe(url, referer)
         dbg("SUB", "probe code=$code url=$url")
