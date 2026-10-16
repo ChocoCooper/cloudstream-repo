@@ -96,19 +96,12 @@ class KhflixProvider : MainAPI() {
     // HOME PAGE
     // ==================================================================
     override val mainPage = listOf(
-        MainPageData("Latest", "", horizontalImages = true),
-        MainPageData("Movies", "movies", horizontalImages = true),
-        MainPageData("TV Shows", "tvshows", horizontalImages = true),
-        MainPageData("Action", "genre/action"),
-        MainPageData("Comedy", "genre/comedy"),
-        MainPageData("Drama", "genre/drama"),
-        MainPageData("Horror", "genre/horror"),
-        MainPageData("Romance", "genre/romance"),
-        MainPageData("Thriller", "genre/thriller"),
         MainPageData("K-Drama", "genre/k-drama"),
         MainPageData("C-Drama", "genre/c-drama"),
         MainPageData("J-Drama", "genre/j-drama"),
-        MainPageData("Khmer Dubbed", "genre/movie-speak-khmer"),
+        MainPageData("T-Drama", "genre/t-drama"),
+        MainPageData("P-Drama", "genre/p-drama"),
+        MainPageData("Vivamax", "genre/vivamax"),
     )
 
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
