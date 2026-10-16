@@ -503,7 +503,17 @@ class JavHubProvider : MainAPI() {
                 }
             }
 
-            // 4. SUBTITLES
+            // 4. JAVGURU
+            launch {
+                runCatching {
+                    JavguruExtractor().extract(cleanCode) { link ->
+                        callback.invoke(link)
+                        foundStream.set(true)
+                    }
+                }
+            }
+            
+            // 5. SUBTITLES
             launch {
                 runCatching {
                     val searchDoc = app.get("$subtitleCatUrl/index.php?search=$code", timeout = 15, headers = browserHeaders).document
