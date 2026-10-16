@@ -18,6 +18,7 @@ import java.net.URLEncoder
  * Confirmed URL schema (from css.khflix.top/Khflix.Playlist.js):
  *   TV video    : https://cdn1.khflixcdnvideos.top/{series}{EE}.mp4
  *   TV subtitle : https://subtitle.khflix.top/{series}{EE}.vtt     (English only)
+ *   Movie sub   : https://subtitle.khflix.top/{Title.Words.Year}.vtt (e.g. Dutdot.2026.vtt)
  *
  * Only English subtitles are emitted (no language suffix).
  */
@@ -247,7 +248,8 @@ class KhflixProvider : MainAPI() {
 
         val direct = mutableListOf<Pair<String, String>>()
         val embeds = mutableListOf<String>()
-        var baseName: String? = null
+        // Candidate subtitle base names, best guess first
+        val bases = linkedSetOf<String>()
 
         val pageHtml = fetchHtml(pageUrl).orEmpty()
         val hosts = resolveHosts(pageUrl, pageHtml)
@@ -257,7 +259,7 @@ class KhflixProvider : MainAPI() {
                 val seriesPrefix = parts.getOrNull(2).orEmpty()
                 val padded = parts.getOrNull(3) ?: "01"
                 val base = "$seriesPrefix$padded"
-                baseName = base
+                bases.add(base)
 
                 val videoHost = FALLBACK_VIDEO_HOST.ifBlank { hosts.video.orEmpty() }
                 dbg("TV", "base='$base' usingVideoHost=$videoHost")
@@ -276,16 +278,29 @@ class KhflixProvider : MainAPI() {
                     if (kind == "movie") "movie" else "tv",
                     postIdHint, pageHtml, direct, embeds
                 )
-                baseName = direct
-                    .sortedBy { if (it.second.contains(".m3u8")) 0 else 1 }
-                    .firstOrNull { it.second.contains("khflix") }
-                    ?.second?.let { baseNameFromMedia(it) }
-                dbg("MOVIE", "baseName='$baseName'")
+
+                // 1) base name taken from the media path (same-site hosts first)
+                val sorted = direct.sortedWith(
+                    compareBy({ if (it.second.contains("khflix")) 0 else 1 },
+                        { if (it.second.contains(".m3u8")) 0 else 1 })
+                )
+                sorted.firstOrNull()?.second?.let { baseNameFromMedia(it) }?.let { bases.add(it) }
+
+                // 2) base name built from the page slug: "dutdot-2026" -> "Dutdot.2026"
+                val slugBase = slugToBase(pageUrl)
+                if (slugBase.isNotBlank()) {
+                    bases.add(slugBase)
+                    // 3) same, with the release year appended when the slug lacks it
+                    val year = Jsoup.parse(pageHtml).selectFirst("span.date")?.text()
+                        ?.let { Regex("""(\d{4})""").find(it)?.value }
+                    if (year != null && !slugBase.endsWith(".$year")) bases.add("$slugBase.$year")
+                }
+                dbg("MOVIE", "subtitle base candidates=$bases")
             }
         }
 
         // ---- Emit English subtitle only ----
-        emitEnglishSubtitle(baseName, hosts.sub ?: FALLBACK_SUB_HOST, pageUrl, subtitleCallback)
+        emitEnglishSubtitle(bases.toList(), pageHtml, hosts.sub ?: FALLBACK_SUB_HOST, pageUrl, subtitleCallback)
 
         // ---- Emit video sources ----
         var count = 0
@@ -323,39 +338,99 @@ class KhflixProvider : MainAPI() {
     }
 
     // ==================================================================
-    // SUBTITLES — English only
+    // SUBTITLES - English only
     // ==================================================================
     private suspend fun emitEnglishSubtitle(
-        base: String?,
+        bases: List<String>,
+        html: String,
         subHost: String,
         referer: String,
         subtitleCallback: (SubtitleFile) -> Unit
     ) {
-        if (base.isNullOrBlank() || subHost.isBlank()) {
-            dbg("SUB", "no base or subHost — skipping English subtitle")
-            return
+        val candidates = linkedSetOf<String>()
+
+        // English .vtt links that already appear in the page
+        Regex("""https?://[^"'\s<>\\]+?\.vtt""")
+            .findAll(html.replace("\\/", "/")).map { it.value }.distinct()
+            .filter { isEnglishVtt(it, bases) }
+            .forEach { candidates.add(it) }
+
+        // {subHost}/{base}.vtt for each base-name guess
+        if (subHost.isNotBlank()) {
+            bases.filter { it.isNotBlank() }.forEach { candidates.add("https://$subHost/$it.vtt") }
         }
 
-        val url = "https://$subHost/$base.vtt"
-        val code = quickProbe(url, referer)
-        dbg("SUB", "probe code=$code url=$url")
+        if (candidates.isEmpty()) {
+            dbg("SUB", "no candidates (bases=$bases subHost=$subHost)")
+            return
+        }
+        dbg("SUB", "candidates=$candidates")
 
-        if (code in 200..299 || code == 206) {
-            dbg("SUB", "→ English: $url")
-            subtitleCallback.invoke(newSubtitleFile("English", url))
+        var firstInconclusive: String? = null
+        for (url in candidates) {
+            val code = probeStatus(url, referer)
+            dbg("SUB", "probe code=$code url=$url")
+            when {
+                code in 200..299 || code == 206 -> {
+                    emitSub(url, subtitleCallback)
+                    return
+                }
+                // 404/410 = definitely missing; anything else (HEAD blocked, 403,
+                // 405, network error) says nothing about whether the file exists
+                code != 404 && code != 410 && firstInconclusive == null -> firstInconclusive = url
+            }
+        }
+        if (firstInconclusive != null) {
+            dbg("SUB", "no confirmed subtitle; emitting first inconclusive candidate")
+            emitSub(firstInconclusive, subtitleCallback)
         } else {
-            dbg("SUB", "no English subtitle (code=$code)")
+            dbg("SUB", "no English subtitle found")
         }
     }
 
-    private suspend fun quickProbe(url: String, referer: String): Int {
+    private fun emitSub(url: String, subtitleCallback: (SubtitleFile) -> Unit) {
+        dbg("SUB", "-> English: $url")
+        subtitleCallback.invoke(
+            newSubtitleFile("English", url) {
+                // the subtitle host expects the site as Referer (see browser request)
+                this.headers = mapOf(
+                    "Referer" to "$mainUrl/",
+                    "User-Agent" to UA
+                )
+            }
+        )
+    }
+
+    private fun isEnglishVtt(url: String, bases: List<String>): Boolean {
+        val name = url.substringAfterLast('/').removeSuffix(".vtt")
+        val lower = name.lowercase()
+        return lower.contains("english") || lower.endsWith(".en") || bases.any { it == name }
+    }
+
+    /** HEAD first; if that is not 2xx, a 1-byte ranged GET. -1 on network failure. */
+    private suspend fun probeStatus(url: String, referer: String): Int {
         return try {
-            app.head(url, headers = headers(referer)).code
+            val h = app.head(url, headers = headers(referer))
+            if (h.code in 200..299) {
+                h.code
+            } else {
+                val g = app.get(url, headers = headers(referer) + ("Range" to "bytes=0-0"))
+                dbg("SUB", "HEAD=${h.code} GET(range)=${g.code} $url")
+                g.code
+            }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            err("SUB", "probe failed $url: ${e.javaClass.simpleName}: ${e.message}")
             -1
         }
+    }
+
+    /** ".../movies/dutdot-2026/" -> "Dutdot.2026" */
+    private fun slugToBase(pageUrl: String): String {
+        val slug = pageUrl.substringBefore("?").trimEnd('/').substringAfterLast('/')
+        return slug.split("-").filter { it.isNotBlank() }
+            .joinToString(".") { w -> w.replaceFirstChar { it.uppercase() } }
     }
 
     // ==================================================================
@@ -504,8 +579,10 @@ class KhflixProvider : MainAPI() {
         val segs = path.split("/").filter { it.isNotBlank() }
         if (segs.isEmpty()) return null
         val last = segs.last()
-        return if (last.endsWith(".m3u8") && segs.size >= 2) segs[segs.size - 2]
+        val raw = if (last.endsWith(".m3u8") && segs.size >= 2) segs[segs.size - 2]
         else last.substringBeforeLast(".")
+        // media paths can be percent-encoded; subtitle names are not
+        return try { URLDecoder.decode(raw, "UTF-8") } catch (_: Exception) { raw }
     }
 
     private fun handleEmbed(
