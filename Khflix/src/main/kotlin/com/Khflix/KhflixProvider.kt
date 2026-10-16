@@ -303,8 +303,15 @@ class KhflixProvider : MainAPI() {
 
             else -> { // "movie" or "page"
                 val postIdHint = if (kind == "movie") parts.getOrNull(2).orEmpty() else ""
-                resolveFromPage(pageUrl, if (kind == "movie") "movie" else "tv", postIdHint, pageHtml, direct, embeds)
-                englishBase = direct.firstOrNull()?.second?.let { baseNameFromMedia(it) }
+                resolveFromPage(
+                    pageUrl,
+                    if (kind == "movie") "movie" else "tv",
+                    postIdHint, pageHtml, direct, embeds
+                )
+                // PATCH: prefer m3u8 for the canonical base name (matches subtitle host pattern)
+                englishBase = direct
+                    .sortedBy { if (it.second.contains(".m3u8")) 0 else 1 }
+                    .firstOrNull()?.second?.let { baseNameFromMedia(it) }
             }
         }
 
@@ -388,6 +395,16 @@ class KhflixProvider : MainAPI() {
             err("MOVIE", "skipping REST: postId blank")
         }
 
+        // ---- PATCH Strategy 1b: always scan page HTML for canonical media URLs ----
+        // The page carries the "hls.khflix.top/{slug}/{...}.m3u8" or "videos.khflix.top/*.mp4"
+        // which gives us the correct base name for subtitle lookup
+        // and often a higher-quality source than the Rumble jwplayer embed.
+        val pageMedia = findMediaUrls(html)
+        if (pageMedia.isNotEmpty()) {
+            dbg("MOVIE", "page media urls (canonical): $pageMedia")
+            pageMedia.forEach { direct.add("page" to it) }
+        }
+
         // ---- Strategy 2: admin-ajax with the page's player options ----
         if (direct.isEmpty() && embeds.isEmpty() && doc != null) {
             val options = doc.select("li.dooplay_player_option, li[data-post][data-nume]")
@@ -418,17 +435,13 @@ class KhflixProvider : MainAPI() {
             }
         }
 
-        // ---- Strategy 3: iframes + raw media URLs in the page ----
+        // ---- Strategy 3: iframes (raw page media already collected above) ----
         if (direct.isEmpty() && embeds.isEmpty() && doc != null) {
             val iframes = doc.select("iframe[src], iframe[data-src]")
                 .map { it.attr("src").ifBlank { it.attr("data-src") } }
                 .filter { it.isNotBlank() }
             dbg("MOVIE", "PAGE fallback: iframes=$iframes")
             iframes.forEach { handleEmbed(fixUrl(it), direct, embeds, "iframe") }
-
-            val raw = findMediaUrls(html)
-            dbg("MOVIE", "PAGE fallback: media urls=$raw")
-            raw.forEach { direct.add("page" to it) }
         }
 
         if (direct.isEmpty() && embeds.isEmpty()) {
@@ -527,12 +540,13 @@ class KhflixProvider : MainAPI() {
             ?: hosts.firstOrNull { it.contains("video") && !it.contains("hls") }
         var sub = hosts.firstOrNull { it.contains("sub") }
 
+        // PATCH: fallback messages use dbg() instead of err() — not actual errors
         if (video == null && FALLBACK_VIDEO_HOST.isNotEmpty()) {
-            err("HOST", "USING FALLBACK video host $FALLBACK_VIDEO_HOST")
+            dbg("HOST", "USING FALLBACK video host $FALLBACK_VIDEO_HOST")
             video = FALLBACK_VIDEO_HOST
         }
         if (sub == null && FALLBACK_SUB_HOST.isNotEmpty()) {
-            err("HOST", "USING FALLBACK subtitle host $FALLBACK_SUB_HOST")
+            dbg("HOST", "USING FALLBACK subtitle host $FALLBACK_SUB_HOST")
             sub = FALLBACK_SUB_HOST
         }
 
