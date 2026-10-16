@@ -8,20 +8,25 @@ import kotlinx.coroutines.CancellationException
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
+import java.net.URI
 import java.net.URLDecoder
 import java.net.URLEncoder
 
 /**
- * Khflix provider with verbose diagnostics.
+ * Khflix provider.
  *
- * LOGGING
- *   All diagnostic lines use Log.e (error level) on purpose so they survive
- *   "errors only" logcat filters. Every line starts with a stage marker:
+ * DATA STRINGS (episode / movie "data" passed to loadLinks) ALWAYS START WITH
+ * THE PAGE URL. CloudStream's newEpisode() runs fixUrl() on the data string and
+ * prepends mainUrl to anything that does not start with "http" - that is what
+ * produced https://khflix.com/My.Bias... in the old build.
  *
- *     [HOME] [SEARCH] [LOAD] [LINKS] [MOVIE] [TV] [PROBE] [EMIT] [SUB] [NET]
+ *   {pageUrl}|movie|{postId}
+ *   {pageUrl}|tv|{seriesPrefix}|{episodeNumberPadded}
+ *   {pageUrl}|page                      (episode page, resolved by scanning it)
  *
- *   View them with:   adb logcat Khflix:V *:S
- *   Set DEBUG = false below to silence everything except real errors.
+ * LOGGING: Log.e on purpose (survives errors-only filters).
+ *   adb logcat Khflix:V *:S
+ *   Stages: HOME SEARCH LOAD LINKS MOVIE TV HOST EMBED PROBE SUB EMIT NET DIAG
  */
 class KhflixProvider : MainAPI() {
     override var mainUrl = "https://khflix.com"
@@ -37,25 +42,38 @@ class KhflixProvider : MainAPI() {
         private const val TAG = "Khflix"
         private const val DEBUG = true
 
-        private const val PLAYER_API = "https://khflix.com/wp-json/dooplayer/v2/"
-        private const val AJAX_URL = "https://khflix.com/wp-admin/admin-ajax.php"
-        private const val CDN_VIDEO_HOST = "cdn1.khflixcdnvideos.top"
-        private const val SUB_HOST = "subtitle.khflix.top"
-
-        // Hosts we trust when scanning raw HTML for direct media links
-        private val MEDIA_HOSTS = listOf(
-            "hls.khflix.top", "videos.khflix.top", "khflixcdnvideos.top"
-        )
-
-        private val SUBTITLE_LANGS = listOf(
-            "Khmer", "Arabic", "Filipino", "Hindi",
-            "Indonesian", "Thai", "Vietnamese", "Malay"
-        )
-
         private const val UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
                 "AppleWebKit/537.36 (KHTML, like Gecko) " +
                 "Chrome/124.0.0.0 Safari/537.36"
+
+        // Used ONLY if host discovery from the page + its scripts finds nothing.
+        // Set both to "" to disable. A "[HOST] USING FALLBACK" line is logged
+        // whenever they are used.
+        private const val FALLBACK_VIDEO_HOST = "cdn1.khflixcdnvideos.top"
+        private const val FALLBACK_SUB_HOST = "subtitle.khflix.top"
+
+        // Hosts that are never media/subtitle CDNs
+        private val HOST_BLOCKLIST = listOf(
+            "tmdb", "google", "gstatic", "cloudflare", "jsdelivr", "tailwind",
+            "unpkg", "ampproject", "w.org", "wordpress", "gravatar", "facebook",
+            "twitter", "youtube", "youtu.be", "schema.org", "jquery", "bootstrap",
+            "fontawesome", "wp.com", "imdb", "instagram", "tiktok"
+        )
+
+        // Scripts we do not bother fetching during host discovery
+        private val SCRIPT_SKIP = listOf(
+            "wp-includes", "jquery", "google", "cloudflare", "gstatic",
+            "wp-content/plugins", "bootstrap", "tailwind", "unpkg", "jsdelivr"
+        )
     }
+
+    private val playerApi get() = "$mainUrl/wp-json/dooplayer/v2/"
+    private val ajaxUrl get() = "$mainUrl/wp-admin/admin-ajax.php"
+
+    private data class Hosts(val video: String?, val sub: String?)
+
+    @Volatile
+    private var hostCache: Hosts? = null
 
     // ------------------------------------------------------------------
     // Logging helpers
@@ -109,7 +127,7 @@ class KhflixProvider : MainAPI() {
 
         val doc = fetchDocument(url)
         val items = doc.select("article.item").mapNotNull { it.toSearchResult() }
-        dbg("HOME", "${request.name} page=$page url=$url cards=${items.size}")
+        dbg("HOME", "${request.name} page=$page cards=${items.size}")
         return newHomePageResponse(request, items, hasNext = items.isNotEmpty())
     }
 
@@ -121,13 +139,9 @@ class KhflixProvider : MainAPI() {
         val doc = fetchDocument("$mainUrl/?s=$q")
         val out = mutableListOf<SearchResponse>()
 
-        doc.select("div.result-item").forEach { el ->
-            el.toSearchResult()?.let { out.add(it) }
-        }
+        doc.select("div.result-item").forEach { el -> el.toSearchResult()?.let { out.add(it) } }
         if (out.isEmpty()) {
-            doc.select("article.item").forEach { el ->
-                el.toSearchResult()?.let { out.add(it) }
-            }
+            doc.select("article.item").forEach { el -> el.toSearchResult()?.let { out.add(it) } }
         }
         dbg("SEARCH", "query='$query' results=${out.size}")
         return out.distinctBy { it.url }
@@ -152,9 +166,7 @@ class KhflixProvider : MainAPI() {
             return null
         }
 
-        val poster = (doc.selectFirst("div.poster img")?.let {
-            it.attr("data-src").ifBlank { it.attr("data-lazy-src") }.ifBlank { it.attr("src") }
-        })?.trim()?.takeIf { it.isNotBlank() }?.let { fixUrl(it) }
+        val poster = doc.selectFirst("div.poster img")?.let { imgSrc(it) }
 
         val ogImages = doc.select("meta[property='og:image']")
             .mapNotNull { it.attr("content").trim().takeIf { c -> c.isNotBlank() } }
@@ -166,8 +178,7 @@ class KhflixProvider : MainAPI() {
         val genres = doc.select("div.sgeneros a")
             .map { it.text().trim() }.filter { it.isNotEmpty() }.distinct()
 
-        val imdbRating: Double? = extractImdbRating(doc)
-        val score: Score? = imdbRating?.let { Score.from10(it) }
+        val score: Score? = extractImdbRating(doc)?.let { Score.from10(it) }
 
         val plot = doc.selectFirst("div#info .wp-content p")?.text()
             ?: doc.selectFirst("meta[name='description']")?.attr("content")
@@ -175,34 +186,50 @@ class KhflixProvider : MainAPI() {
         val isTv = url.contains("/tvshows/")
         val isAsian = genres.any {
             it.contains("k-drama", true) || it.contains("c-drama", true) ||
-                    it.contains("j-drama", true)
+                    it.contains("j-drama", true) || it.contains("t-drama", true)
         }
 
         val cfg = extractKhflixConfig(html)
         val postId = extractPostId(html, doc)
-        dbg("LOAD", "url=$url isTv=$isTv title='$title' postId='$postId' cfg=$cfg " +
-                "htmlLen=${html.length} year=$year genres=$genres")
+        dbg("LOAD", "url=$url isTv=$isTv title='$title' postId='$postId' cfg=$cfg year=$year genres=$genres")
 
         return if (isTv) {
-            val seriesPrefix = cfg?.get("series")
-            val episodeCount = cfg?.get("episodes")?.toIntOrNull() ?: 0
             val episodes = mutableListOf<Episode>()
 
-            if (seriesPrefix != null && episodeCount > 0) {
+            // Source 1: window.khflixConfig (series prefix + episode count)
+            val seriesPrefix = cfg?.get("series")
+            val episodeCount = cfg?.get("episodes")?.toIntOrNull() ?: 0
+            if (!seriesPrefix.isNullOrBlank() && episodeCount > 0) {
+                val season = Regex("""S(\d+)E""", RegexOption.IGNORE_CASE)
+                    .find(seriesPrefix)?.groupValues?.get(1)?.toIntOrNull() ?: 1
                 for (n in 1..episodeCount) {
                     val padded = n.toString().padStart(2, '0')
-                    // data = prefix|tv|episode|pageUrl
-                    val data = "$seriesPrefix|tv|$padded|$url"
-                    episodes.add(newEpisode(data) {
+                    // MUST start with the page URL (see class comment)
+                    episodes.add(newEpisode("$url|tv|$seriesPrefix|$padded") {
                         this.name = "Episode $n"
                         this.episode = n
-                        this.season = 1
+                        this.season = season
                     })
                 }
-            } else {
-                err("LOAD", "TV page but khflixConfig missing/empty: prefix=$seriesPrefix count=$episodeCount")
+                dbg("LOAD", "episodes from khflixConfig: ${episodes.size} prefix=$seriesPrefix")
             }
-            dbg("LOAD", "TV '$title' episodes=${episodes.size} prefix=$seriesPrefix")
+
+            // Source 2: standard DooPlay episode list
+            if (episodes.isEmpty()) {
+                episodes.addAll(parseEpisodeList(doc))
+                dbg("LOAD", "episodes from DooPlay list: ${episodes.size}")
+            }
+
+            // Source 3: page itself carries media links -> single episode
+            if (episodes.isEmpty()) {
+                diagnoseTvPage(html, doc)
+                if (findMediaUrls(html).isNotEmpty()) {
+                    episodes.add(newEpisode("$url|page") { this.name = "Episode 1"; this.episode = 1 })
+                    dbg("LOAD", "no episode source; page has media URLs, created single episode")
+                } else {
+                    err("LOAD", "NO EPISODES FOUND for '$title' (see [DIAG] lines above)")
+                }
+            }
 
             newTvSeriesLoadResponse(
                 title, url, if (isAsian) TvType.AsianDrama else TvType.TvSeries, episodes
@@ -215,11 +242,8 @@ class KhflixProvider : MainAPI() {
                 this.score = score
             }
         } else {
-            if (postId.isBlank()) {
-                err("LOAD", "movie postId is BLANK for $url (loadLinks will use page fallback)")
-            }
-            // data = postId|movie|pageUrl
-            newMovieLoadResponse(title, url, TvType.Movie, "$postId|movie|$url") {
+            if (postId.isBlank()) err("LOAD", "movie postId BLANK for $url (loadLinks will retry from page)")
+            newMovieLoadResponse(title, url, TvType.Movie, "$url|movie|$postId") {
                 this.posterUrl = poster
                 this.backgroundPosterUrl = backdrop
                 this.plot = plot
@@ -240,148 +264,59 @@ class KhflixProvider : MainAPI() {
         callback: (ExtractorLink) -> Unit
     ): Boolean {
         dbg("LINKS", "START data='$data'")
-        val parts = data.split("|", limit = 4)
-        if (parts.size < 2) {
-            err("LINKS", "bad data format, parts=${parts.size}")
+        val parts = data.split("|")
+        val pageUrl = parts[0]
+        val kind = parts.getOrNull(1) ?: "page"
+        if (!pageUrl.startsWith("http")) {
+            err("LINKS", "data does not start with a page URL: '$data'")
             return false
         }
 
-        val emitted = mutableSetOf<String>()
-        var count = 0
+        val direct = mutableListOf<Pair<String, String>>() // label to url
+        val embeds = mutableListOf<String>()
+        var englishBase: String? = null
 
-        // Collect sources first, emit them after the type-specific work below
-        val directUrls = mutableListOf<Pair<String, String>>() // label to url
-        val embedUrls = mutableListOf<String>()
+        val pageHtml = fetchHtml(pageUrl).orEmpty()
+        dbg("LINKS", "page len=${pageHtml.length} kind=$kind")
+        val hosts = resolveHosts(pageUrl, pageHtml)
 
-        when (parts[1]) {
-            // ----------------------------------------------------------
-            "movie" -> {
-                val postIdFromData = parts[0]
-                val pageUrl = parts.getOrNull(2).orEmpty()
-                var postId = postIdFromData
-                dbg("MOVIE", "postId='$postId' pageUrl='$pageUrl'")
-
-                // Fetch page once: used for fallbacks and to recover a blank post ID
-                var pageHtml = ""
-                var pageDoc: Document? = null
-                if (pageUrl.isNotBlank()) {
-                    pageHtml = fetchHtml(pageUrl).orEmpty()
-                    if (pageHtml.isNotBlank()) pageDoc = Jsoup.parse(pageHtml, pageUrl)
-                    dbg("MOVIE", "page fetched len=${pageHtml.length}")
-                }
-                if (postId.isBlank() && pageDoc != null) {
-                    postId = extractPostId(pageHtml, pageDoc)
-                    dbg("MOVIE", "recovered postId='$postId'")
-                }
-
-                // ---- Strategy 1: DooPlay REST API ----
-                if (postId.isNotBlank()) {
-                    for (nume in 1..5) {
-                        val apiUrl = "$PLAYER_API$postId/movie/$nume"
-                        try {
-                            val res = app.get(apiUrl, headers = headers(pageUrl.ifBlank { "$mainUrl/" }, ajax = true))
-                            val body = res.text
-                            dbg("MOVIE", "REST nume=$nume code=${res.code} url=$apiUrl body=${body.cut()}")
-                            if (!res.isSuccessful) continue
-                            val embed = extractEmbedUrl(body)
-                            dbg("MOVIE", "REST nume=$nume embed='$embed'")
-                            if (embed.isNotBlank()) handleEmbed(embed, directUrls, embedUrls, "rest#$nume")
-                        } catch (e: CancellationException) {
-                            throw e
-                        } catch (e: Exception) {
-                            err("MOVIE", "REST nume=$nume FAILED url=$apiUrl", e)
-                        }
-                    }
-                } else {
-                    err("MOVIE", "skipping REST: postId blank")
-                }
-
-                // ---- Strategy 2: admin-ajax player options from page ----
-                if (directUrls.isEmpty() && embedUrls.isEmpty() && pageDoc != null) {
-                    val options = pageDoc.select("li.dooplay_player_option, li[data-post][data-nume]")
-                    dbg("MOVIE", "AJAX fallback: ${options.size} player options in page")
-                    for (opt in options) {
-                        val post = opt.attr("data-post").ifBlank { postId }
-                        val nume = opt.attr("data-nume").ifBlank { "1" }
-                        val type = opt.attr("data-type").ifBlank { "movie" }
-                        try {
-                            val res = app.post(
-                                AJAX_URL,
-                                headers = headers(pageUrl, ajax = true),
-                                data = mapOf(
-                                    "action" to "doo_player_ajax",
-                                    "post" to post,
-                                    "nume" to nume,
-                                    "type" to type
-                                )
-                            )
-                            dbg("MOVIE", "AJAX post=$post nume=$nume type=$type code=${res.code} body=${res.text.cut()}")
-                            val embed = extractEmbedUrl(res.text)
-                            if (embed.isNotBlank()) handleEmbed(embed, directUrls, embedUrls, "ajax#$nume")
-                        } catch (e: CancellationException) {
-                            throw e
-                        } catch (e: Exception) {
-                            err("MOVIE", "AJAX FAILED post=$post nume=$nume", e)
-                        }
-                    }
-                }
-
-                // ---- Strategy 3: iframes and raw media URLs in page ----
-                if (directUrls.isEmpty() && embedUrls.isEmpty() && pageDoc != null) {
-                    val iframes = pageDoc.select("iframe[src], iframe[data-src]")
-                        .map { it.attr("src").ifBlank { it.attr("data-src") } }
-                        .filter { it.isNotBlank() }
-                    dbg("MOVIE", "PAGE fallback: iframes=$iframes")
-                    iframes.forEach { handleEmbed(fixUrl(it), directUrls, embedUrls, "iframe") }
-
-                    val raw = Regex("""https?:\\?/\\?/[^"'\s<>\\]+?\.(?:m3u8|mp4)[^"'\s<>\\]*""")
-                        .findAll(pageHtml.replace("\\/", "/"))
-                        .map { it.value }
-                        .filter { u -> MEDIA_HOSTS.any { u.contains(it) } }
-                        .distinct().toList()
-                    dbg("MOVIE", "PAGE fallback: raw media urls=$raw")
-                    raw.forEach { directUrls.add("page" to it) }
-                }
-
-                if (directUrls.isEmpty() && embedUrls.isEmpty()) {
-                    err("MOVIE", "NO SOURCES from any strategy. postId='$postId' pageLen=${pageHtml.length}")
-                }
-            }
-
-            // ----------------------------------------------------------
+        when (kind) {
             "tv" -> {
-                val seriesPrefix = parts[0]
-                val padded = parts.getOrNull(2) ?: "01"
-                dbg("TV", "prefix='$seriesPrefix' ep=$padded")
+                val seriesPrefix = parts.getOrNull(2).orEmpty()
+                val padded = parts.getOrNull(3) ?: "01"
+                val base = "$seriesPrefix$padded"
+                dbg("TV", "prefix='$seriesPrefix' ep=$padded base='$base' videoHost=${hosts.video}")
+                englishBase = base
 
-                val videoUrl = "https://$CDN_VIDEO_HOST/$seriesPrefix$padded.mp4"
-                val code = probe(videoUrl)
-                dbg("TV", "video probe code=$code url=$videoUrl")
-                if (code !in 200..299 && code != 206) {
-                    err("TV", "video probe NOT OK (code=$code); emitting anyway so player shows its own error")
-                }
-                directUrls.add("tv-cdn" to videoUrl)
-
-                // Subtitles: only emit those that really exist
-                val subCandidates = SUBTITLE_LANGS.map { it to "https://$SUB_HOST/$seriesPrefix$padded.$it.vtt" } +
-                        ("English" to "https://$SUB_HOST/$seriesPrefix$padded.vtt")
-                val seen = mutableSetOf<String>()
-                subCandidates.forEach { (language, subUrl) ->
-                    val c = probe(subUrl)
-                    dbg("SUB", "$language code=$c url=$subUrl")
-                    if ((c in 200..299 || c == 206) && seen.add(subUrl)) {
-                        subtitleCallback.invoke(newSubtitleFile(language, subUrl))
+                if (hosts.video.isNullOrBlank()) {
+                    err("TV", "no video host discovered or configured")
+                } else {
+                    val videoUrl = "https://${hosts.video}/$base.mp4"
+                    val code = probe(videoUrl)
+                    dbg("TV", "video probe code=$code url=$videoUrl")
+                    if (code !in 200..299 && code != 206) {
+                        err("TV", "video probe NOT OK (code=$code); emitting anyway")
                     }
+                    direct.add("tv-cdn" to videoUrl)
                 }
-                dbg("SUB", "emitted ${seen.size} subtitle(s)")
             }
 
-            else -> err("LINKS", "unknown type '${parts[1]}'")
+            else -> { // "movie" or "page"
+                val postIdHint = if (kind == "movie") parts.getOrNull(2).orEmpty() else ""
+                resolveFromPage(pageUrl, if (kind == "movie") "movie" else "tv", postIdHint, pageHtml, direct, embeds)
+                englishBase = direct.firstOrNull()?.second?.let { baseNameFromMedia(it) }
+            }
         }
 
-        // ---- Emit direct links ----
-        for ((label, src) in directUrls) {
-            if (src.isBlank() || !emitted.add(src)) continue
+        // ---- English subtitle only ----
+        val subOk = emitEnglishSubtitle(englishBase, pageHtml, hosts.sub, pageUrl, subtitleCallback)
+        dbg("SUB", "english subtitle emitted=$subOk base='$englishBase'")
+
+        // ---- Emit direct links (m3u8 first) ----
+        var count = 0
+        val seen = mutableSetOf<String>()
+        for ((label, src) in direct.sortedBy { if (it.second.contains(".m3u8")) 0 else 1 }) {
+            if (src.isBlank() || !seen.add(src)) continue
             val type = if (src.contains(".m3u8")) ExtractorLinkType.M3U8 else ExtractorLinkType.VIDEO
             dbg("EMIT", "[$label] type=$type url=$src")
             callback.invoke(
@@ -394,8 +329,8 @@ class KhflixProvider : MainAPI() {
             count++
         }
 
-        // ---- Hand embeds to CloudStream extractors ----
-        for (embed in embedUrls.distinct()) {
+        // ---- Hand non-direct embeds to CloudStream extractors ----
+        for (embed in embeds.distinct()) {
             dbg("EMIT", "loadExtractor embed=$embed")
             try {
                 val ok = loadExtractor(embed, "$mainUrl/", subtitleCallback) { link ->
@@ -416,10 +351,218 @@ class KhflixProvider : MainAPI() {
     }
 
     // ==================================================================
+    // SOURCE RESOLUTION FOR PAGES (movies and episode pages)
+    // ==================================================================
+    private suspend fun resolveFromPage(
+        pageUrl: String,
+        type: String, // "movie" or "tv" (DooPlay player type)
+        postIdHint: String,
+        html: String,
+        direct: MutableList<Pair<String, String>>,
+        embeds: MutableList<String>
+    ) {
+        val doc = if (html.isNotBlank()) Jsoup.parse(html, pageUrl) else null
+        var postId = postIdHint
+        if (postId.isBlank() && doc != null) postId = extractPostId(html, doc)
+        dbg("MOVIE", "resolve type=$type postId='$postId' pageLen=${html.length}")
+
+        // ---- Strategy 1: DooPlay REST API (stops at first empty option) ----
+        if (postId.isNotBlank()) {
+            for (nume in 1..5) {
+                val apiUrl = "$playerApi$postId/$type/$nume"
+                try {
+                    val res = app.get(apiUrl, headers = headers(pageUrl, ajax = true))
+                    dbg("MOVIE", "REST nume=$nume code=${res.code} body=${res.text.cut(200)}")
+                    if (!res.isSuccessful) break
+                    val embed = extractEmbedUrl(res.text)
+                    if (embed.isBlank()) break
+                    handleEmbed(embed, direct, embeds, "rest#$nume")
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    err("MOVIE", "REST nume=$nume FAILED $apiUrl", e)
+                    break
+                }
+            }
+        } else {
+            err("MOVIE", "skipping REST: postId blank")
+        }
+
+        // ---- Strategy 2: admin-ajax with the page's player options ----
+        if (direct.isEmpty() && embeds.isEmpty() && doc != null) {
+            val options = doc.select("li.dooplay_player_option, li[data-post][data-nume]")
+            dbg("MOVIE", "AJAX fallback: ${options.size} player options")
+            for (opt in options) {
+                val post = opt.attr("data-post").ifBlank { postId }
+                val nume = opt.attr("data-nume").ifBlank { "1" }
+                val optType = opt.attr("data-type").ifBlank { type }
+                try {
+                    val res = app.post(
+                        ajaxUrl,
+                        headers = headers(pageUrl, ajax = true),
+                        data = mapOf(
+                            "action" to "doo_player_ajax",
+                            "post" to post,
+                            "nume" to nume,
+                            "type" to optType
+                        )
+                    )
+                    dbg("MOVIE", "AJAX post=$post nume=$nume type=$optType code=${res.code} body=${res.text.cut(200)}")
+                    val embed = extractEmbedUrl(res.text)
+                    if (embed.isNotBlank()) handleEmbed(embed, direct, embeds, "ajax#$nume")
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    err("MOVIE", "AJAX FAILED post=$post nume=$nume", e)
+                }
+            }
+        }
+
+        // ---- Strategy 3: iframes + raw media URLs in the page ----
+        if (direct.isEmpty() && embeds.isEmpty() && doc != null) {
+            val iframes = doc.select("iframe[src], iframe[data-src]")
+                .map { it.attr("src").ifBlank { it.attr("data-src") } }
+                .filter { it.isNotBlank() }
+            dbg("MOVIE", "PAGE fallback: iframes=$iframes")
+            iframes.forEach { handleEmbed(fixUrl(it), direct, embeds, "iframe") }
+
+            val raw = findMediaUrls(html)
+            dbg("MOVIE", "PAGE fallback: media urls=$raw")
+            raw.forEach { direct.add("page" to it) }
+        }
+
+        if (direct.isEmpty() && embeds.isEmpty()) {
+            err("MOVIE", "NO SOURCES found. postId='$postId' pageLen=${html.length}")
+        }
+    }
+
+    // ==================================================================
+    // SUBTITLES (English only)
+    // ==================================================================
+    private suspend fun emitEnglishSubtitle(
+        base: String?,
+        html: String,
+        subHost: String?,
+        referer: String,
+        subtitleCallback: (SubtitleFile) -> Unit
+    ): Boolean {
+        val candidates = mutableListOf<String>()
+
+        // 1) .vtt links that already appear in the page, English ones only
+        Regex("""https?://[^"'\s<>\\]+?\.vtt""")
+            .findAll(html.replace("\\/", "/")).map { it.value }.distinct()
+            .filter { isEnglishVtt(it, base) }
+            .forEach { candidates.add(it) }
+
+        // 2) names built from the media base name on the discovered subtitle host
+        if (!base.isNullOrBlank() && !subHost.isNullOrBlank()) {
+            candidates.add("https://$subHost/$base.vtt")          // default track = English
+            candidates.add("https://$subHost/$base.English.vtt")
+            candidates.add("https://$subHost/$base.en.vtt")
+        }
+
+        dbg("SUB", "english candidates=$candidates")
+        for (c in candidates.distinct()) {
+            val code = probe(c, referer)
+            dbg("SUB", "probe code=$code url=$c")
+            if (code in 200..299 || code == 206) {
+                subtitleCallback.invoke(newSubtitleFile("English", c))
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun isEnglishVtt(url: String, base: String?): Boolean {
+        val name = url.substringAfterLast('/').removeSuffix(".vtt")
+        val lower = name.lowercase()
+        return lower.contains("english") || lower.endsWith(".en") ||
+                (base != null && name == base)
+    }
+
+    // ==================================================================
+    // HOST DISCOVERY (no hardcoded CDN hosts)
+    // ==================================================================
+    private suspend fun resolveHosts(pageUrl: String, html: String): Hosts {
+        hostCache?.let { return it }
+
+        val texts = mutableListOf(html.replace("\\/", "/"))
+        val doc = Jsoup.parse(html, pageUrl)
+        val scripts = doc.select("script[src]").map { it.absUrl("src") }
+            .filter { s -> s.isNotBlank() && SCRIPT_SKIP.none { s.contains(it, true) } }
+            .distinct().take(8)
+        dbg("HOST", "scanning ${scripts.size} script(s): $scripts")
+        for (s in scripts) {
+            try {
+                val body = app.get(s, headers = headers(pageUrl)).text
+                texts.add(body.replace("\\/", "/"))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                err("HOST", "script fetch failed $s: ${e.message}")
+            }
+        }
+
+        val mainHost = try { URI(mainUrl).host.orEmpty().removePrefix("www.") } catch (e: Exception) { "" }
+        val brand = mainHost.substringBefore('.')
+
+        val urlHost = Regex("""(?:https?:)?//([a-z0-9][a-z0-9.-]*\.[a-z]{2,})""", RegexOption.IGNORE_CASE)
+        val bareHost = Regex(
+            """["']([a-z0-9][a-z0-9-]*(?:\.[a-z0-9-]+)*\.(?:top|xyz|cc|site|online|net|com|io|me|tv|club|live|pro|fun))["']""",
+            RegexOption.IGNORE_CASE
+        )
+
+        val found = linkedSetOf<String>()
+        for (t in texts) {
+            urlHost.findAll(t).forEach { found.add(it.groupValues[1].lowercase()) }
+            bareHost.findAll(t).forEach { found.add(it.groupValues[1].lowercase()) }
+        }
+        val hosts = found
+            .filter { h -> h != mainHost && h != "www.$mainHost" && HOST_BLOCKLIST.none { h.contains(it) } }
+            // hosts that share the site's brand name first
+            .sortedBy { if (brand.isNotBlank() && it.contains(brand)) 0 else 1 }
+        dbg("HOST", "candidate hosts=$hosts")
+
+        var video = hosts.firstOrNull { it.contains("cdn") }
+            ?: hosts.firstOrNull { it.contains("video") && !it.contains("hls") }
+        var sub = hosts.firstOrNull { it.contains("sub") }
+
+        if (video == null && FALLBACK_VIDEO_HOST.isNotEmpty()) {
+            err("HOST", "USING FALLBACK video host $FALLBACK_VIDEO_HOST")
+            video = FALLBACK_VIDEO_HOST
+        }
+        if (sub == null && FALLBACK_SUB_HOST.isNotEmpty()) {
+            err("HOST", "USING FALLBACK subtitle host $FALLBACK_SUB_HOST")
+            sub = FALLBACK_SUB_HOST
+        }
+
+        val result = Hosts(video, sub)
+        dbg("HOST", "resolved video=$video sub=$sub")
+        hostCache = result
+        return result
+    }
+
+    // ==================================================================
     // HELPERS
     // ==================================================================
 
-    /** Sort an embed URL into "direct media" or "needs an extractor". */
+    private fun findMediaUrls(html: String): List<String> =
+        Regex("""https?://[^"'\s<>\\]+?\.(?:m3u8|mp4)(?:\?[^"'\s<>\\]*)?""")
+            .findAll(html.replace("\\/", "/"))
+            .map { it.value }
+            .distinct()
+            .toList()
+
+    /** "https://host/Some.Movie/index.m3u8" -> "Some.Movie"; ".../x.mp4" -> "x". */
+    private fun baseNameFromMedia(url: String): String? {
+        val path = url.substringBefore("?").substringAfter("://").substringAfter("/", "")
+        val segs = path.split("/").filter { it.isNotBlank() }
+        if (segs.isEmpty()) return null
+        val last = segs.last()
+        return if (last.endsWith(".m3u8") && segs.size >= 2) segs[segs.size - 2]
+        else last.substringBeforeLast(".")
+    }
+
     private fun handleEmbed(
         embed: String,
         direct: MutableList<Pair<String, String>>,
@@ -438,7 +581,6 @@ class KhflixProvider : MainAPI() {
         }
     }
 
-    /** Pull embed_url out of the DooPlay JSON response and un-escape it. */
     private fun extractEmbedUrl(body: String): String {
         val raw = Regex(""""embed_url"\s*:\s*"((?:[^"\\]|\\.)*)"""")
             .find(body)?.groupValues?.get(1) ?: return ""
@@ -449,14 +591,13 @@ class KhflixProvider : MainAPI() {
             .replace("\\u003f", "?")
             .replace("\\\"", "\"")
         if (cleaned == "null") return ""
-        // Sometimes embed_url is an <iframe src="..."> snippet
         if (cleaned.contains("<iframe")) {
             return Regex("""src=["']([^"']+)["']""").find(cleaned)?.groupValues?.get(1)?.let { fixUrl(it) } ?: ""
         }
         return cleaned
     }
 
-    /** window.khflixConfig = { series: "abc", episodes: 16 }  (quoted or unquoted keys). */
+    /** window.khflixConfig = { series: "abc", episodes: 16 } (quoted or unquoted keys). */
     private fun extractKhflixConfig(html: String): Map<String, String>? {
         val m = Regex("""khflixConfig\s*=\s*\{(.*?)\}\s*;?""", RegexOption.DOT_MATCHES_ALL).find(html)
             ?: return null
@@ -470,7 +611,6 @@ class KhflixProvider : MainAPI() {
         return out.takeIf { it.isNotEmpty() }
     }
 
-    /** Post ID. Most reliable signals first. */
     private fun extractPostId(html: String, doc: Document? = null): String {
         doc?.selectFirst("li.dooplay_player_option[data-post]")?.attr("data-post")
             ?.takeIf { it.isNotBlank() }?.let { return it }
@@ -486,13 +626,10 @@ class KhflixProvider : MainAPI() {
             Regex("""postid-(\d+)"""),
             Regex("""id="post-(\d+)""""),
         )
-        for (p in patterns) {
-            p.find(html)?.let { return it.groupValues[1] }
-        }
+        for (p in patterns) p.find(html)?.let { return it.groupValues[1] }
         return ""
     }
 
-    /** jwplayer wrapper -> real URL; plain media URL -> itself; else "". */
     private fun decodeJwPlayerUrl(embedUrl: String): String {
         if (!embedUrl.contains("jwplayer/?source=")) {
             return if (embedUrl.startsWith("http") &&
@@ -507,14 +644,14 @@ class KhflixProvider : MainAPI() {
         }
     }
 
-    /** HTTP status of a URL (HEAD first, ranged GET as fallback). -1 on failure. */
-    private suspend fun probe(url: String): Int {
+    /** HTTP status of a URL (HEAD, then ranged GET). -1 on failure. */
+    private suspend fun probe(url: String, referer: String = "$mainUrl/"): Int {
         return try {
-            val h = app.head(url, headers = headers())
+            val h = app.head(url, headers = headers(referer))
             if (h.code in 200..299) {
                 h.code
             } else {
-                val g = app.get(url, headers = headers() + ("Range" to "bytes=0-0"))
+                val g = app.get(url, headers = headers(referer) + ("Range" to "bytes=0-0"))
                 dbg("PROBE", "HEAD=${h.code} GET(range)=${g.code} $url")
                 g.code
             }
@@ -526,6 +663,50 @@ class KhflixProvider : MainAPI() {
         }
     }
 
+    /** Standard DooPlay episode list: ul.episodios > li. */
+    private fun parseEpisodeList(doc: Document): List<Episode> {
+        val out = mutableListOf<Episode>()
+        doc.select("ul.episodios li, div.episodios li, #episodes li").forEach { li ->
+            val a = li.selectFirst("a[href]") ?: return@forEach
+            val href = fixUrl(a.attr("href"))
+            if (!href.startsWith("http")) return@forEach
+
+            val numerando = li.selectFirst("div.numerando")?.text()?.trim().orEmpty() // "1 - 3"
+            val m = Regex("""(\d+)\s*-\s*(\d+)""").find(numerando)
+            val s = m?.groupValues?.get(1)?.toIntOrNull()
+            val e = m?.groupValues?.get(2)?.toIntOrNull()
+            val epName = li.selectFirst(".episodiotitle a")?.text()?.trim()?.takeIf { it.isNotEmpty() }
+                ?: a.text().trim().ifEmpty { "Episode ${e ?: out.size + 1}" }
+            val thumb = li.selectFirst("img")?.let { imgSrc(it) }
+
+            out.add(newEpisode("$href|page") {
+                this.name = epName
+                this.season = s
+                this.episode = e ?: (out.size + 1)
+                this.posterUrl = thumb
+            })
+        }
+        return out
+    }
+
+    /** Logs what a TV page contains when no episode source was recognised. */
+    private fun diagnoseTvPage(html: String, doc: Document) {
+        val scripts = doc.select("script[src]").map { it.attr("src") }.take(20)
+        dbg("DIAG", "script srcs=$scripts")
+        val globals = Regex("""window\.(\w+)\s*=""").findAll(html).map { it.groupValues[1] }.distinct().toList()
+        dbg("DIAG", "window globals=$globals")
+        dbg("DIAG", "ul.episodios=${doc.select("ul.episodios").size} li=${doc.select("ul.episodios li").size} " +
+                "player options=${doc.select("li.dooplay_player_option").size} iframes=${doc.select("iframe").size}")
+        dbg("DIAG", "media urls in html=${findMediaUrls(html)}")
+        Regex(""".{0,80}episode.{0,120}""", RegexOption.IGNORE_CASE).findAll(html).take(5).forEach {
+            dbg("DIAG", "episode ctx: ${it.value.replace("\n", " ").cut(220)}")
+        }
+    }
+
+    private fun imgSrc(img: Element): String? =
+        img.attr("data-src").ifBlank { img.attr("data-lazy-src") }.ifBlank { img.attr("src") }
+            .trim().takeIf { it.isNotBlank() }?.let { fixUrl(it) }
+
     private fun Element.toSearchResult(): SearchResponse? {
         val a = selectFirst("a[href]") ?: return null
         val href = a.attr("href").takeIf { it.isNotBlank() }?.let { fixUrl(it) } ?: return null
@@ -536,10 +717,7 @@ class KhflixProvider : MainAPI() {
             ?: a.attr("title").takeIf { it.isNotBlank() }
             ?: return null
 
-        val img = selectFirst("img")
-        val poster = img?.let {
-            it.attr("data-src").ifBlank { it.attr("data-lazy-src") }.ifBlank { it.attr("src") }
-        }?.takeIf { it.isNotBlank() }?.let { fixUrl(it) }
+        val poster = selectFirst("img")?.let { imgSrc(it) }
 
         return if (href.contains("/tvshows/")) {
             newTvSeriesSearchResponse(title, href, TvType.TvSeries) { this.posterUrl = poster }
@@ -552,8 +730,7 @@ class KhflixProvider : MainAPI() {
         doc.select("div.custom_fields").forEach { field ->
             val label = field.selectFirst("b.variante")?.text()?.lowercase() ?: ""
             if (label.contains("imdb")) {
-                field.selectFirst("span.valor")?.text()?.trim()?.toDoubleOrNull()
-                    ?.let { return it }
+                field.selectFirst("span.valor")?.text()?.trim()?.toDoubleOrNull()?.let { return it }
             }
         }
         return null
@@ -566,12 +743,10 @@ class KhflixProvider : MainAPI() {
         return try {
             val res = app.get(url, headers = headers())
             dbg("NET", "GET ${res.code} len=${res.text.length} $url")
-            if (!res.isSuccessful) {
-                err("NET", "non-2xx ${res.code} for $url body=${res.text.cut(200)}")
-            }
+            if (!res.isSuccessful) err("NET", "non-2xx ${res.code} for $url body=${res.text.cut(200)}")
             res.text
         } catch (e: CancellationException) {
-            throw e // normal when the user leaves the page; not an error
+            throw e
         } catch (e: Exception) {
             err("NET", "fetchHtml failed: $url", e)
             null
