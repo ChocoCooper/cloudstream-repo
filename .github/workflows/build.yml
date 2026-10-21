@@ -1,0 +1,84 @@
+name: Build
+concurrency: 
+  group: "build"
+  cancel-in-progress: true
+on:
+  push:
+    branches:
+      - master
+      - main
+    paths-ignore:
+      - '*.md'
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          path: "src"
+      - name: Checkout builds
+        uses: actions/checkout@v4
+        with:
+          ref: "builds"
+          path: "builds"
+      - name: Clean old builds
+        run: rm -rf $GITHUB_WORKSPACE/builds/*.cs3
+      - name: Setup JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: "temurin"
+          java-version: 17
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools'
+      - name: Build Plugins
+        id: build
+        run: |
+          cd $GITHUB_WORKSPACE/src
+          chmod +x gradlew
+          set -o pipefail
+          ./gradlew clean make makePluginsJson --no-daemon --parallel --max-workers=2 --stacktrace 2>&1 | tee build_log.txt
+
+          mkdir -p $GITHUB_WORKSPACE/builds
+          cp **/build/*.cs3 $GITHUB_WORKSPACE/builds || true
+          cp build/plugins.json $GITHUB_WORKSPACE/builds || true
+
+      - name: Extract compiler errors
+        if: failure() && steps.build.outcome == 'failure'
+        run: |
+          cd $GITHUB_WORKSPACE/src
+          echo "### Kotlin compiler errors" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          if grep -E "^e: " build_log.txt > kotlin_errors.txt; then
+            cat kotlin_errors.txt >> $GITHUB_STEP_SUMMARY
+          else
+            echo "No 'e: ' compiler lines found — this may be a Gradle/dependency failure, check the full log artifact." >> $GITHUB_STEP_SUMMARY
+            tail -n 60 build_log.txt >> $GITHUB_STEP_SUMMARY
+          fi
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+          if [ -s kotlin_errors.txt ]; then
+            while IFS= read -r line; do
+              echo "::error::${line#e: }"
+            done < kotlin_errors.txt
+          fi
+
+      - name: Upload Build Log Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-error-log
+          path: src/build_log.txt
+          if-no-files-found: ignore
+
+      - name: Push builds
+        if: success()
+        run: |
+          cd $GITHUB_WORKSPACE/builds
+          git config --local user.email "actions@github.com"
+          git config --local user.name "GitHub Actions"
+          git add .
+          git commit --amend -m "Build $GITHUB_SHA" || exit 0
+          git push --force
