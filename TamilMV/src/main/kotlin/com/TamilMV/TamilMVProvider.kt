@@ -322,79 +322,74 @@ class TamilMV : MainAPI() {
         return gb >= OVERSIZE_GB
     }
 
-    /**
-     * Poster is uniquely:
-     *   <p><a data-ipslightbox><img class="ipsImage_thumbnailed" src="..."></a></p>
-     *
-     * Screenshots are:
-     *   <p><a href="..."><img class="ipsImage" src="..."></a></p>
-     *   (no data-ipslightbox, class is ipsImage not ipsImage_thumbnailed)
-     *
-     * Requiring BOTH `data-ipslightbox` AND `ipsImage_thumbnailed` makes the
-     * match unambiguous no matter where the anchor sits in the DOM.
-     */
+    // ────────────────────────────────────────────────────────────
+    // POSTER EXTRACTION  — DOM structure only, no class/URL guessing
+    //
+    //   Poster patterns observed on the site:
+    //     A)  <p> <img src="…" /> </p>                 (bare img under <p>)
+    //     B)  <p><strong><a><img src="…" /></a></strong></p>  (under <strong>)
+    //     C)  <p><strong><a data-ipslightbox><img class="ipsImage_thumbnailed" /></a></strong></p>
+    //
+    //   Screenshot pattern (always skipped by rules A & B):
+    //         <p><a><img class="ipsImage" src="…" /></a></p>
+    //
+    //   The strategies are applied in order and return the first
+    //   valid image, so screenshots never win.
+    // ────────────────────────────────────────────────────────────
     private fun extractPoster(doc: Document): String? {
-        val articles = doc.select("article.cPost")
-        val article = articles.firstOrNull {
-            it.selectFirst("aside.ipsComment_author, .cAuthorPane") != null
-        } ?: articles.firstOrNull() ?: return null
+        val article = doc.select("article.cPost").firstOrNull { art ->
+            art.selectFirst("aside.ipsComment_author, .cAuthorPane") != null
+        } ?: doc.select("article.cPost").firstOrNull() ?: return null
+
+        val content = article.selectFirst("div[data-role=commentContent]")
+            ?: article.selectFirst("div.ipsType_richText")
+            ?: article
 
         val skipFragments = listOf(
             "spacer", "torrborder", "utorrent",
             "smiley", "blank", "emoji", "emoticon"
         )
 
-        fun valid(url: String?): String? {
-            val n = normalizeUrl(url) ?: return null
-            val l = n.lowercase()
-            if (skipFragments.any { l.contains(it) }) return null
-            if (l.endsWith(".gif")) return null
-            return n
-        }
-
-        fun imgUrl(img: Element): String? {
+        fun urlFromImg(img: Element): String? {
             if (img.hasAttr("data-emoticon")) return null
             for (attr in listOf("data-src", "data-original", "src")) {
-                valid(img.attr(attr))?.let { return it }
+                val v = img.attr(attr).trim()
+                if (v.isEmpty()) continue
+                val n = normalizeUrl(v) ?: continue
+                val l = n.lowercase()
+                if (skipFragments.any { l.contains(it) }) continue
+                if (l.endsWith(".gif")) continue
+                return n
             }
             return null
         }
 
-        val content = article.selectFirst("div[data-role=commentContent]")
-            ?: article.selectFirst("div.ipsType_richText")
-            ?: article
-
-        // 1. Strictest: <p> containing a lightbox-wrapped thumbnailed image.
-        //    Matches both `p > a` and `p > strong > a` / `p > span > a` wrappers.
-        content.selectFirst(
-            "p a[data-ipslightbox] img.ipsImage_thumbnailed, " +
-            "p a[data-lightbox-group] img.ipsImage_thumbnailed, " +
-            "p span a[data-ipslightbox] img.ipsImage_thumbnailed, " +
-            "p span a[data-lightbox-group] img.ipsImage_thumbnailed, " +
-            "p strong a[data-ipslightbox] img.ipsImage_thumbnailed, " +
-            "p strong a[data-lightbox-group] img.ipsImage_thumbnailed"
-        )?.let { img ->
-            imgUrl(img)?.let { return it }
+        // Strategy A — bare <img> directly under <p>   (Page 1 pattern)
+        content.select("p > img").forEach { img ->
+            urlFromImg(img)?.let { return it }
         }
 
-        // 2. Any thumbnailed image (poster class) inside the post
-        content.selectFirst("img.ipsImage_thumbnailed")?.let { img ->
-            imgUrl(img)?.let { return it }
-        }
+        // Strategy B — any <img> inside <strong> under <p>   (Page 2 pattern)
+        content.select("p > strong img, p > span > strong img, p > span img")
+            .forEach { img ->
+                urlFromImg(img)?.let { return it }
+            }
 
-        // 3. Any image inside a lightbox anchor
-        content.selectFirst("a[data-ipslightbox] img, a[data-lightbox-group] img")?.let { img ->
-            imgUrl(img)?.let { return it }
-        }
+        // Strategy C — old thumbnailed class
+        content.select("img.ipsImage_thumbnailed, img.ipsImage_thumbnailed_colorized")
+            .forEach { img ->
+                urlFromImg(img)?.let { return it }
+            }
 
-        // 4. Any IPS image (may be a screenshot if 1–3 all failed)
-        content.selectFirst("img.ipsImage")?.let { img ->
-            imgUrl(img)?.let { return it }
-        }
+        // Strategy D — lightbox anchor
+        content.select("a[data-ipslightbox] img, a[data-lightbox-group] img")
+            .forEach { img ->
+                urlFromImg(img)?.let { return it }
+            }
 
-        // 5. Any image at all
-        content.selectFirst("img[src], img[data-src]")?.let { img ->
-            imgUrl(img)?.let { return it }
+        // Last resort — any non-decorative image
+        content.select("img").forEach { img ->
+            urlFromImg(img)?.let { return it }
         }
 
         return null
