@@ -322,10 +322,22 @@ class TamilMV : MainAPI() {
         return gb >= OVERSIZE_GB
     }
 
+    /**
+     * Poster is uniquely:
+     *   <p><a data-ipslightbox><img class="ipsImage_thumbnailed" src="..."></a></p>
+     *
+     * Screenshots are:
+     *   <p><a href="..."><img class="ipsImage" src="..."></a></p>
+     *   (no data-ipslightbox, class is ipsImage not ipsImage_thumbnailed)
+     *
+     * Requiring BOTH `data-ipslightbox` AND `ipsImage_thumbnailed` makes the
+     * match unambiguous no matter where the anchor sits in the DOM.
+     */
     private fun extractPoster(doc: Document): String? {
-        val content = doc.selectFirst("article.cPost div[data-role=commentContent]")
-            ?: doc.selectFirst("div[data-role=commentContent]")
-            ?: return null
+        val articles = doc.select("article.cPost")
+        val article = articles.firstOrNull {
+            it.selectFirst("aside.ipsComment_author, .cAuthorPane") != null
+        } ?: articles.firstOrNull() ?: return null
 
         val skipFragments = listOf(
             "spacer", "torrborder", "utorrent",
@@ -348,33 +360,39 @@ class TamilMV : MainAPI() {
             return null
         }
 
-        // Primary: the poster anchor is uniquely marked with data-ipslightbox.
-        // Screenshot anchors do not carry this attribute.
-        content.selectFirst("a[data-ipslightbox][href], a[data-lightbox-group][href]")
-            ?.let { a ->
-                // Prefer the anchor's own href — it's the direct image URL
-                valid(a.attr("href"))?.let { return it }
-                // Otherwise the wrapped image's source
-                a.selectFirst("img")?.let { img ->
-                    imgUrl(img)?.let { return it }
-                }
-            }
+        val content = article.selectFirst("div[data-role=commentContent]")
+            ?: article.selectFirst("div.ipsType_richText")
+            ?: article
 
-        // Fallback A: first image inside <strong> (older template)
-        content.selectFirst("p strong img, p span strong img")?.let { img ->
-            imgUrl(img)?.let { return it }
-        }
-
-        // Fallback B: first IPS-class image anywhere in the post
+        // 1. Strictest: <p> containing a lightbox-wrapped thumbnailed image.
+        //    Matches both `p > a` and `p > strong > a` / `p > span > a` wrappers.
         content.selectFirst(
-            "img.ipsImage_thumbnailed, " +
-            "img.ipsImage_thumbnailed_colorized, " +
-            "img.ipsImage"
+            "p a[data-ipslightbox] img.ipsImage_thumbnailed, " +
+            "p a[data-lightbox-group] img.ipsImage_thumbnailed, " +
+            "p span a[data-ipslightbox] img.ipsImage_thumbnailed, " +
+            "p span a[data-lightbox-group] img.ipsImage_thumbnailed, " +
+            "p strong a[data-ipslightbox] img.ipsImage_thumbnailed, " +
+            "p strong a[data-lightbox-group] img.ipsImage_thumbnailed"
         )?.let { img ->
             imgUrl(img)?.let { return it }
         }
 
-        // Fallback C: first non-emoticon image with any source
+        // 2. Any thumbnailed image (poster class) inside the post
+        content.selectFirst("img.ipsImage_thumbnailed")?.let { img ->
+            imgUrl(img)?.let { return it }
+        }
+
+        // 3. Any image inside a lightbox anchor
+        content.selectFirst("a[data-ipslightbox] img, a[data-lightbox-group] img")?.let { img ->
+            imgUrl(img)?.let { return it }
+        }
+
+        // 4. Any IPS image (may be a screenshot if 1–3 all failed)
+        content.selectFirst("img.ipsImage")?.let { img ->
+            imgUrl(img)?.let { return it }
+        }
+
+        // 5. Any image at all
         content.selectFirst("img[src], img[data-src]")?.let { img ->
             imgUrl(img)?.let { return it }
         }
@@ -452,12 +470,6 @@ class TamilMV : MainAPI() {
         return null
     }
 
-    /**
-     * Enrich each card with poster + h1-derived title.
-     *
-     * Both home and search call this; both end up with the same title and poster
-     * that the load page will show, because the h1 is the single source of truth.
-     */
     private suspend fun enrich(items: List<SearchResponse>): List<SearchResponse> =
         coroutineScope {
             if (items.isEmpty()) return@coroutineScope items
