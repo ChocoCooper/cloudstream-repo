@@ -12,10 +12,9 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    # ADDED: required so the prune step can delete runs, and so Push builds can write
     permissions:
-      actions: write
-      contents: write
+      actions: write   # required to delete workflow runs
+      contents: write  # required for Push builds
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -87,10 +86,11 @@ jobs:
           git commit --amend -m "Build $GITHUB_SHA" || exit 0
           git push --force
 
-      # ADDED: keep only the latest run, delete all older runs of this workflow
       - name: Prune old workflow runs (keep latest)
         if: always()
         uses: iamazeem/delete-workflow-runs-action@v1
+        env:
+          GH_REPO: ${{ github.repository }}   # <-- FIX: gives gh CLI repo context
         with:
           keep: 1
           token: ${{ github.token }}
