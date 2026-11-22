@@ -4,7 +4,7 @@ version = 1
 
 cloudstream {
     authors = listOf("ChocoCooper")
-    description = "TamilMV Provider (only contents with DL)"
+    description = "Vertical Short Drama"
 
     /**
     * Status int as the following:
@@ -16,6 +16,7 @@ cloudstream {
     status = 1 // will be 3 if unspecified
 
     tvTypes = listOf(
+        "Movie",
         "TvSeries",
         "AsianDrama"
     )

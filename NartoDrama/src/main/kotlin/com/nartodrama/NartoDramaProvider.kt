@@ -36,7 +36,7 @@ import org.jsoup.nodes.Document
 class NartoDramaProvider : MainAPI() {
     override var name = "NartoDrama"
     override var mainUrl = "https://narto-drama.com"
-    override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
+    override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie, TvType.AsianDrama)
     override var lang = "en"
     override val hasMainPage = true
 
@@ -83,10 +83,10 @@ class NartoDramaProvider : MainAPI() {
         }.distinctBy { it.url }
     }
 
-    /** /featured and /genre/x pages: returns (cards, hasNextPage). */
-    private suspend fun catalogue(path: String, page: Int): Pair<List<SearchResponse>, Boolean> {
-        val doc = fetch("$mainUrl$path?lang=$uiLang&page=$page").document
-        val items = doc.select("article.card").mapNotNull { card ->
+    /** /tag/x page (first page only, no paging): returns the cards. */
+    private suspend fun catalogue(path: String): List<SearchResponse> {
+        val doc = fetch("$mainUrl$path?lang=$uiLang").document
+        return doc.select("article.card").mapNotNull { card ->
             val title = card.attr("data-movie-title")
                 .ifBlank { card.selectFirst("h3.title")?.text().orEmpty() }
                 .trim().takeIf { it.isNotBlank() } ?: return@mapNotNull null
@@ -97,8 +97,6 @@ class NartoDramaProvider : MainAPI() {
                 this.posterUrl = fixUrlNull(card.selectFirst("img.poster")?.attr("src"))
             }
         }.distinctBy { it.url }
-        val hasNext = doc.select("a.pager-link").any { it.attr("href").contains("page=${page + 1}") }
-        return items to hasNext
     }
 
     /** Extracts `const <varName> = [ ... ];` from inline JS (bracket matching, string-aware). */
@@ -191,25 +189,21 @@ class NartoDramaProvider : MainAPI() {
     // ---------- search ----------
     override suspend fun search(query: String): List<SearchResponse> = searchJson(query)
 
-    // ---------- main page (homepage is Turnstile-challenged; catalogue pages are not) ----------
+    // ---------- main page (homepage is Turnstile-challenged; /tag/x pages use the same article.card grid) ----------
     override val mainPage = mainPageOf(
-        "/featured" to "Featured",
-        "/genre/romance" to "Romance",
-        "/genre/drama" to "Drama",
-        "/genre/action" to "Action",
-        "/genre/comedy" to "Comedy",
-        "/genre/thriller" to "Thriller",
-        "/genre/fantasy" to "Fantasy",
-        "/genre/anime" to "Anime",
+        "/tag/love-after-marriage" to "Love After Marriage",
+        "/tag/ancient" to "Ancient",
+        "/tag/revenge" to "Revenge",
+        "/tag/hidden-identity" to "Hidden Identity",
+        "/tag/flash-marriage" to "Flash Marriage",
     )
 
+    // Each row is a single, un-paged list (the first 24 cards of the tag page).
     override suspend fun getMainPage(page: Int, request: MainPageRequest): HomePageResponse {
-        var (items, hasNext) = catalogue(request.data, page)
-        if (items.isEmpty() && page == 1) {
-            items = searchJson(request.name) // fallback: verified JSON search
-            hasNext = false
-        }
-        return newHomePageResponse(request.name, items, hasNext)
+        if (page > 1) return newHomePageResponse(request.name, emptyList<SearchResponse>(), false)
+        var items = catalogue(request.data)
+        if (items.isEmpty()) items = searchJson(request.name) // fallback: verified JSON search
+        return newHomePageResponse(request.name, items, false)
     }
 
     // ---------- load ----------
