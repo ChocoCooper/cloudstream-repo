@@ -36,7 +36,7 @@ import org.jsoup.nodes.Document
 class NartoDramaProvider : MainAPI() {
     override var name = "NartoDrama"
     override var mainUrl = "https://narto-drama.com"
-    override val supportedTypes = setOf(TvType.TvSeries, TvType.AsianDrama)
+    override val supportedTypes = setOf(TvType.TvSeries, TvType.Movie)
     override var lang = "en"
     override val hasMainPage = true
 
@@ -293,7 +293,7 @@ class NartoDramaProvider : MainAPI() {
     }
 
     /** Subtitles (only called when a video link exists): multi_subtitles + the single url. */
-    private fun emitSubs(item: JSONObject?, subSeen: HashSet<String>, subtitleCallback: (SubtitleFile) -> Unit) {
+    private suspend fun emitSubs(item: JSONObject?, subSeen: HashSet<String>, subtitleCallback: (SubtitleFile) -> Unit) {
         item?.optJSONArray("multi_subtitles")?.let { subs ->
             for (i in 0 until subs.length()) {
                 val s = subs.optJSONObject(i) ?: continue
